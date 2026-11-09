@@ -1,0 +1,24 @@
+# Публикуется только код, README, лицензия и снимки экрана.
+# Всё остальное (сборки, зависимости, заметки команды, отчёты) остаётся локально.
+/*
+!/.gitignore
+!/README.md
+!/LICENSE
+!/build.sh
+!/src/
+!/third_party/
+!/deps/
+/deps/*
+!/deps/build-deps.sh
+!/tools/
+!/docs/
+!/res/
+
+# внутри tools: только скрипты проверок
+/tools/uitest/out/
+/tools/uitest/__pycache__/
+/tools/uitest/*.npz
+/tools/sec/build*/
+*.bmp
+*.exe
+*.o

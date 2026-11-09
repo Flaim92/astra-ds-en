@@ -1,0 +1,8 @@
+/* Ресурсы Windows Astra DS: значок программы (ID 1 — он же у exe в Проводнике) и манифест.
+ * Пути — относительно этого файла (без путей сборки). */
+#include <winuser.h>
+
+1 ICON "../res/astra.ico"
+
+/* манифест: запуск без повышения прав (asInvoker) */
+1 RT_MANIFEST "astra.manifest"

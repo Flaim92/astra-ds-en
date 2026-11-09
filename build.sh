@@ -37,7 +37,13 @@ else
     EXE=$OUT/astra-ds
 fi
 
-SRC="src/util.c src/secret.c src/net.c src/store.c src/ui.c src/cli.c src/voice.c src/voicefx.c src/panic.c src/vless.c src/img.c src/login.c src/captcha.c src/demo.c src/selftest.c src/main.c $PLAT_SRC"
+# VIDEO=1: «Astra DS Video» (демонстрация экрана и камера) — отдельный продукт со своим обновлением
+if [ "${VIDEO:-0}" = 1 ]; then
+    DEFS="$DEFS -DASTRA_VIDEO"
+    EXE=${EXE/astra-ds/astra-ds-video}
+fi
+SRC="src/util.c src/update.c src/secret.c src/net.c src/store.c src/ui.c src/cli.c src/voice.c src/voicefx.c src/panic.c src/vless.c src/img.c src/login.c src/captcha.c src/demo.c src/selftest.c src/main.c $PLAT_SRC"
+[ "${VIDEO:-0}" = 1 ] && SRC="$SRC src/streamtest.c"      # обычная сборка его не компилирует вовсе
 # Туннель VLESS: VLESS_IMPL=c (по умолчанию) — свой на C (src/xlite_c.c + src/tls13.c, декодер brotli
 # для сжатых сертификатов), без среды Go; VLESS_IMPL=go — libxlite.a (Xray-core на Go, tools/xlite).
 VLESS_IMPL=${VLESS_IMPL:-c}

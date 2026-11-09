@@ -7,6 +7,71 @@
 #include <stdlib.h>
 #include <string.h>
 #include "mc.h"
+#include "demo_en.h"
+
+/* ---------- i18n п.4: английский демо-набор ----------
+ * Демо-данные написаны по-русски; при английском интерфейсе JSON-строки демо подменяются целиком по таблице
+ * DEMO_EN (demo_en.h) прямо перед разбором (json_parse -> demo_en_json). Только в --demo: живые данные не трогаются.
+ * selftest идёт по-русски (ui_lang_init(0)) — проверки демо-данных не меняются. */
+extern bool g_lang_en;
+static const char *demo_en_tok(const char *t, size_t n, size_t *digits) {
+    *digits = 0;
+    for (size_t i = 0; i < sizeof DEMO_EN / sizeof *DEMO_EN; i++) {
+        const char *ru = DEMO_EN[i].ru;
+        size_t rn = strlen(ru);
+        if (rn == n && !memcmp(ru, t, n)) return DEMO_EN[i].en;
+        if (rn > 2 && !strcmp(ru + rn - 2, "%d") && n > rn - 2 && !memcmp(ru, t, rn - 2)) {   /* «... %d» */
+            size_t k = rn - 2;
+            while (k < n && t[k] >= '0' && t[k] <= '9') k++;
+            if (k == n) { *digits = n - (rn - 2); return DEMO_EN[i].en; }
+        }
+    }
+    return NULL;
+}
+/* JSON-текст демо -> он же с английскими строками; NULL — подменять нечего (или не английский/не демо) */
+char *demo_en_json(const char *s, size_t n, size_t *out_n) {
+    if (!O.demo || !g_lang_en) return NULL;
+    Buf b = {0};
+    size_t done = 0;
+    bool any = false;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] != '"') continue;
+        size_t j = i + 1;
+        bool cyr = false;
+        while (j < n && s[j] != '"') {
+            if ((unsigned char)s[j] == 0xD0 || (unsigned char)s[j] == 0xD1) cyr = true;
+            j += s[j] == '\\' ? 2 : 1;
+        }
+        if (j >= n) break;
+        if (cyr) {
+            size_t dg;
+            const char *en = demo_en_tok(s + i + 1, j - i - 1, &dg);
+            if (en) {
+                buf_put(&b, s + done, i + 1 - done);
+                if (dg) {                       /* «%d» -> те же цифры */
+                    const char *pd = strstr(en, "%d");
+                    buf_put(&b, en, (size_t)(pd - en));
+                    buf_put(&b, s + j - dg, dg);
+                    buf_puts(&b, pd + 2);
+                } else buf_puts(&b, en);
+                done = j;
+                any = true;
+            }
+        }
+        i = j;
+    }
+    if (!any) { free(b.p); return NULL; }
+    buf_put(&b, s + done, n - done);
+    *out_n = b.len;
+    return b.p;
+}
+/* простая строка демо (не JSON: тема канала, уведомления) */
+const char *demo_tr(const char *ru) {
+    if (!O.demo || !g_lang_en) return ru;
+    size_t dg;
+    const char *en = demo_en_tok(ru, strlen(ru), &dg);
+    return en && !dg ? en : ru;
+}
 
 static const char READY[] =
     "{\"session_id\":\"demo\",\"user\":{\"id\":\"1000\",\"username\":\"you\",\"global_name\":\"Вы\"},"
@@ -72,7 +137,9 @@ static const char READY[] =
     /* папки — в protobuf, как у настоящего клиента (гоняет разбор user_settings_proto) */
     "\"user_settings_proto\":\"GAVybQopChA0CAAAAAAAAMQJAAAAAAAAEgIIARoKCgjQmNCz0YDRiyIFCNzK7gEKFgoQKAoAAAAAAACMCgAAAAAAABICCAISKNAHAAAAAAAANAgAAAAAAADECQAAAAAAACgKAAAAAAAAjAoAAAAAAAA=\","
     "\"merged_members\":[[{\"user_id\":\"1000\",\"roles\":[\"2004\"]},{\"user_id\":\"1004\",\"roles\":[\"2001\"]},"
-    "{\"user_id\":\"1005\",\"roles\":[\"2003\"]},{\"user_id\":\"1006\",\"roles\":[\"2002\"]}],[{\"user_id\":\"1000\",\"roles\":[]}]],"
+    "{\"user_id\":\"1005\",\"roles\":[\"2003\"]},{\"user_id\":\"1006\",\"roles\":[\"2002\"]}],[{\"user_id\":\"1000\",\"roles\":[]}],"
+    /* №128: в «Шахматном клубе» (2500) правила ещё не приняты — писать нельзя, есть «Принять правила» */
+    "[{\"user_id\":\"1000\",\"roles\":[],\"pending\":true}],[{\"user_id\":\"1000\",\"roles\":[]}],[{\"user_id\":\"1000\",\"roles\":[]}]],"
     "\"private_channels\":[{\"id\":\"4000\",\"type\":1,\"recipient_ids\":[\"1001\"],\"last_message_id\":\"9301\"},"
     "{\"id\":\"4001\",\"type\":3,\"name\":\"\",\"recipient_ids\":[\"1001\",\"1002\"],\"last_message_id\":\"9400\"},"
     /* №109/111: запрос на переписку и спам (от не-друзей, с картинкой), группы — где я владелец и где нет */
@@ -288,7 +355,7 @@ void demo_pins(u64 channel_id) {
     buf_free(&out);
 }
 void demo_topic(u64 channel_id) {
-    if (channel_id == 3001) topic_set(3001, "Уютное общение без токсичности. Правила - в закреплённых");
+    if (channel_id == 3001) topic_set(3001, demo_tr("Уютное общение без токсичности. Правила - в закреплённых"));
 }
 void demo_mentions(void) {
     static const char M[] = "["
@@ -380,7 +447,7 @@ static void demo_post(u64 channel, const char *text, const char *fname, long lon
 }
 void demo_file(u64 channel, const char *filename, long long size, const char *text) {
     demo_post(channel, text, filename, size);
-    ui_notice("файл отправлен (демо: в сеть ничего не ушло)");
+    ui_notice("%s", demo_tr("файл отправлен (демо: в сеть ничего не ушло)"));
 }
 
 /* Поиск в демо: по сообщениям демо-каналов (подстрока), ответ собирается в формате Discord

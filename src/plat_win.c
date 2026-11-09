@@ -162,6 +162,30 @@ void thread_join(PlatThread *t) {
     CloseHandle(t->h);
     free(t);
 }
+int plat_ui_lang(void) {                        /* язык интерфейса Windows: ru/uk/be -> русский */
+    LANGID l = GetUserDefaultUILanguage();
+    WORD p = PRIMARYLANGID(l);
+    return p == LANG_RUSSIAN || p == LANG_UKRAINIAN || p == LANG_BELARUSIAN ? 0 : 1;
+}
+/* такт звонка — точнее 15,6 мс. Ревью 18 С1: winmm.dll не в статическом импорте (+~200 КБ всегда) — грузится
+ * только на время звонка и выгружается после (вызовы — из одного потока звонка) */
+static HMODULE tm_dll;
+static UINT (WINAPI *tm_begin)(UINT), (WINAPI *tm_end)(UINT);
+void plat_timer_hires(bool on) {
+    if (on && !tm_dll) {
+        tm_dll = LoadLibraryExW(L"winmm.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!tm_dll) return;
+        tm_begin = (UINT (WINAPI *)(UINT))(void *)GetProcAddress(tm_dll, "timeBeginPeriod");
+        tm_end = (UINT (WINAPI *)(UINT))(void *)GetProcAddress(tm_dll, "timeEndPeriod");
+        if (!tm_begin || !tm_end) { FreeLibrary(tm_dll); tm_dll = NULL; tm_begin = tm_end = NULL; return; }
+        tm_begin(1);
+    } else if (!on && tm_dll) {
+        tm_end(1);
+        FreeLibrary(tm_dll);
+        tm_dll = NULL;
+        tm_begin = tm_end = NULL;
+    }
+}
 void thread_audio_priority(void) {
     DWORD idx = 0;
     if (!AvSetMmThreadCharacteristicsW(L"Pro Audio", &idx)) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
@@ -192,9 +216,18 @@ bool udp_resolve(const char *ip, uint16_t port, void *addr16) {
 int udp_send(intptr_t s, const void *buf, size_t n, const void *addr16) {
     return sendto((SOCKET)s, buf, (int)n, 0, (const struct sockaddr *)addr16, sizeof(struct sockaddr_in));
 }
-int udp_recv(intptr_t s, void *buf, size_t n) {
-    int r = recv((SOCKET)s, buf, (int)n, 0);
-    return r < 0 ? -1 : r;
+int udp_recv(intptr_t s, void *buf, size_t n, void *from16) {
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    int al = (int)sizeof a;
+    int r = recvfrom((SOCKET)s, buf, (int)n, 0, (struct sockaddr *)&a, &al);
+    if (r < 0) return -1;
+    if (from16) memcpy(from16, &a, sizeof a);
+    return (int)r;
+}
+bool udp_same(const void *a16, const void *b16) {
+    const struct sockaddr_in *a = a16, *b = b16;
+    return a->sin_family == AF_INET && b->sin_family == AF_INET && a->sin_port == b->sin_port && a->sin_addr.s_addr == b->sin_addr.s_addr;
 }
 void udp_close(intptr_t s) { if (s != -1) closesocket((SOCKET)s); }
 

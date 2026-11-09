@@ -45,6 +45,7 @@ static struct {
     char gw_sess[96];                           /* сессия gateway, в которой отправлен op 4 */
     Vol vols[64]; int nvols;
     char dev[2][96];                            /* №140: выбранные устройства (0 — микрофон, 1 — вывод); "" — как в O */
+    VoiceStats stats;                           /* ревью 17: снимок счётчиков (под mu) */
     atomic_int dev_gen;                         /* смена устройства: поток звонка переоткрывает звук */
     atomic_int call_level;                      /* уровень микрофона в звонке (0..100) — для теста микрофона */
     atomic_int ptt_vk;                          /* №141: клавиша рации (0 — по-старому, F8 переключает) */
@@ -57,7 +58,7 @@ static void mt_stop_thread(void);
  * настоящие устройства — только при ST_REALAUDIO=1 (g_audio_fake ставит selftest). */
 bool g_audio_fake;
 static Audio *vopen(const char *mic, const char *out, char *err, size_t errn) {
-    if (g_audio_fake) { snprintf(err, errn, "фиктивное устройство (selftest без ST_REALAUDIO=1)"); return NULL; }
+    if (g_audio_fake) { snprintf(err, errn, ui_tr("фиктивное устройство (selftest без ST_REALAUDIO=1)")); return NULL; }
     return audio_open(mic, out, err, errn);
 }
 /* имена для audio_open: выбранные в настройках, иначе из командной строки (--mic/--out) */
@@ -91,7 +92,7 @@ static void maybe_start(void);
 static void voice_rejoin(void);
 /* Служебные дела главного потока по сигналам голосового (голосовой поток не трогает net.c и vless.c). */
 static void voice_main_chores(void) {
-    if (atomic_exchange(&V.vl_fail, false)) vless_report_failure("голос");
+    if (atomic_exchange(&V.vl_fail, false)) vless_report_failure(ui_tr("голос"));
     /* голосовой поток упал: сообщаем Discord о выходе, иначе для других мы «висим» в канале */
     if (atomic_exchange(&V.need_leave, false) && !O.demo) gw_voice_state(V.st.guild_id, 0, false, false);
     if (O.demo || V.st.phase == VS_IDLE) return;
@@ -100,7 +101,7 @@ static void voice_main_chores(void) {
      * в мёртвое соединение, а голосовая сессия привязана к старой — входим в канал заново */
     if (V.st.phase != VS_FAILED && S.ready && S.session_id && V.gw_sess[0] && strcmp(S.session_id, V.gw_sess)) {
         V.rejoins = 0;
-        ui_notice("связь с Discord восстановлена: голос входит в канал заново");
+        ui_notice(ui_tr("связь с Discord восстановлена: голос входит в канал заново"));
         voice_rejoin();
         return;
     }
@@ -110,7 +111,7 @@ static void voice_main_chores(void) {
     /* туннель включили или пользователь явно выключил его посреди звонка: голос перезаходит по-новому,
      * чтобы не остаться напрямую при включённом VLESS */
     if (V.thr && V.st.phase != VS_FAILED && ((vl == VL_UP && !V.via_vless) || (vl == VL_OFF && V.via_vless))) {
-        ui_notice(vl == VL_UP ? "голос переподключается через VLESS" : "голос переподключается напрямую");
+        ui_notice(vl == VL_UP ? ui_tr("голос переподключается через VLESS") : ui_tr("голос переподключается напрямую"));
         V.rejoins = 0;
         voice_rejoin();
     }
@@ -143,7 +144,7 @@ void voice_set_volume(u64 user, float vol) {
     if (i == V.nvols && V.nvols < 64) V.nvols++;
     if (i < 64) V.vols[i] = (Vol){ user, vol };
     mutex_unlock(V.mu);
-    ui_notice("громкость %s: %d%%", user_name(user), (int)(vol * 100 + 0.5f));
+    ui_notice(ui_tr("громкость %s: %d%%"), user_name(user), (int)(vol * 100 + 0.5f));
 }
 void voice_vad_adjust(int d) {
     int v = atomic_load(&V.vad_db) + d;
@@ -167,6 +168,12 @@ typedef struct {
     int16_t *fifo;                               /* стерео, кольцо FIFO_FRAMES кадров */
     int rd, n;
     bool playing;
+    int plc_run;                                 /* кадров подряд досочинено (PLC) при недоборе в микшере */
+    u8 pend[1500]; int pend_n; u16 pend_seq; i64 pend_until;   /* забежавший вперёд пакет ждёт пропущенный (до 40 мс) */
+    VoiceSrcStats st;                           /* ревью 17: счётчики источника */
+    int fade_in;                                 /* сэмплов осталось до полной громкости после паузы */
+    bool quiet;                                  /* ревью 18 М1: говорящий прислал кадр тишины — конец фразы, PLC не нужен */
+    int16_t *pcm;                                /* ревью 18 М3: рабочий буфер декодера (общий, VW.pcm), 5760 стерео-кадров */
     u16 last_seq;
     bool have_seq;
     i64 last_pkt, last_voice;
@@ -203,6 +210,7 @@ typedef struct {
     bool dave_ready, dave_on;
     double vf_cur, vf_floor; int vf_n; bool vf_init;   /* №142: авточувствительность — состояние звонка (ревью 14 М2) */
     double hp_x1, hp_x2, hp_y1, hp_y2;          /* №143: состояние фильтра 90 Гц */
+    i64 last_tick; int min_q; u32 tick_hist[6]; i64 next_stats;   /* ревью 17: такт и запас вывода */
     u64 users[64]; int nusers;
     /* звук */
     OpusEncoder *encd;
@@ -238,6 +246,7 @@ typedef struct {
     i64 rc_at, rc_start, rc_conn;
     /* буферы микшера и приёма WebSocket (121 КБ): живут только в звонке (раньше — статические, всегда) */
     int32_t *mix_acc;                            /* 4800 стерео-кадров */
+    int16_t *pcm;                                /* декодер источников, 5760 стерео-кадров (раньше — три static) */
     int16_t *mix_out;
     char *ws_buf;                                /* VW_WSBUF байт */
 } VW;
@@ -266,8 +275,12 @@ static void vudp_send(VW *w, const void *p, size_t n) {
 }
 /* Принять датаграмму; данные — в начале buf. -1 — больше нет. 0 — отброшена, читать дальше. */
 static int vudp_recv(VW *w, unsigned char *buf, int cap) {
-    int k = udp_recv(w->udp, buf, (size_t)cap);
-    if (k < 0 || !w->via_socks) return k;
+    unsigned char from[16];
+    int k = udp_recv(w->udp, buf, (size_t)cap, from);
+    if (k < 0) return k;
+    /* только от голосового сервера (через VLESS — от локального реле): чужая датаграмма отбрасывается до разбора */
+    if (!udp_same(from, w->via_socks ? w->sx.relay : w->addr)) return 0;
+    if (!w->via_socks) return k;
     int off = socks_unwrap(&w->sx, buf, k);
     if (off < 0) return 0;
     memmove(buf, buf + off, (size_t)(k - off));
@@ -391,6 +404,8 @@ static Src *src_get(VW *w, u32 ssrc, u64 user) {
     if (!user) for (int i = 0; i < w->nsmap; i++) if (w->smap[i].ssrc == ssrc) s->user = w->smap[i].user;
     s->dec = d;
     s->fifo = xmalloc(FIFO_FRAMES * 2 * sizeof(int16_t));
+    if (!w->pcm) w->pcm = xmalloc(5760 * 2 * sizeof(int16_t));
+    s->pcm = w->pcm;
     s->last_pkt = now_ms();
     dave_set_ratchet(w, s);
     return s;
@@ -406,7 +421,11 @@ static void src_remove_user(VW *w, u64 user) {
     for (int i = w->nsrc - 1; i >= 0; i--) if (w->src[i].user == user) { src_free(&w->src[i]); w->src[i] = w->src[--w->nsrc]; }
     for (int i = 0; i < w->nusers; i++) if (w->users[i] == user) { w->users[i] = w->users[--w->nusers]; break; }
 }
+static void src_trim(Src *s);
+static void src_drop(Src *s);
 static void fifo_push(Src *s, const int16_t *pcm, int frames) {
+    while (s->n + frames > FIFO_FRAMES && s->n >= 48 * 120 + FRAME) src_trim(s);   /* переполнение — 20 мс с перекрёстной склейкой */
+    while (s->n + frames > FIFO_FRAMES && s->n >= FRAME + 120) src_drop(s);       /* ревью 18 М2: залп больше кольца — тоже кадрами */
     for (int i = 0; i < frames; i++) {
         if (s->n == FIFO_FRAMES) { s->rd = (s->rd + 1) % FIFO_FRAMES; s->n--; }   /* выкидываем старое: не копим задержку */
         int wi = (s->rd + s->n) % FIFO_FRAMES;
@@ -469,6 +488,77 @@ static void send_opus(VW *w, const unsigned char *frame, int n) {
     rtp_send(w, out, (int)wr);
 }
 
+static void src_lost(Src *s) {                  /* кадр есть, но звука нет (ошибка расшифровки) — PLC вместо дыры */
+    int16_t *pcm = s->pcm;
+    if (!s->playing && !s->n) return;
+    int k = opus_decode(s->dec, NULL, 0, pcm, FRAME, 0);
+    if (k > 0) { fifo_push(s, pcm, k); s->st.plc++; }
+}
+/* кадр Opus источника -> его кольцо PCM. Потерянные (gap) — силами Opus (PLC), не больше 5. */
+static void src_decode(Src *s, const unsigned char *frame, int fn, int gap, i64 now) {
+    int16_t *pcm = s->pcm;
+    if (s->plc_run) gap = 0;                     /* микшер уже досочинил это время — не повторять */
+    for (int g = 0; g < gap - 1 && g < 4; g++) {
+        int k = opus_decode(s->dec, NULL, 0, pcm, FRAME, 0);
+        if (k > 0) { fifo_push(s, pcm, k); s->st.plc++; }
+    }
+    if (gap > 0) {                               /* последний пропущенный — из FEC текущего пакета (если есть), иначе PLC */
+        int k = opus_decode(s->dec, frame, fn, pcm, FRAME, 1);
+        if (k > 0) { fifo_push(s, pcm, k); s->st.fec++; }
+    }
+    s->plc_run = 0;
+    int k = opus_decode(s->dec, frame, fn, pcm, 5760, 0);
+    if (k > 0) { fifo_push(s, pcm, k); s->last_voice = now; }
+}
+/* Приём по номерам RTP с переупорядочиванием: пакет, забежавший вперёд (пропущено 1..5), ждёт пропущенный
+ * до 40 мс (src_pend_tick), потом пропуск досочиняется PLC. frame NULL: fn 0 — кадр потерян (PLC), fn -1 —
+ * только сдвиг номера (тишина, без звука). Дубли и запоздавшие (уже сыгранные) — мимо. */
+static void src_take(Src *s, u16 seq, const unsigned char *frame, int fn, int gap, i64 now) {
+    s->last_seq = seq;
+    if (frame) s->quiet = false;
+    else if (fn < 0) s->quiet = true;            /* тишина: доиграть кольцо и плавно замолчать, без 100 мс PLC */
+    if (frame) src_decode(s, frame, fn, gap, now);
+    else if (fn == 0) { for (int g = 0; g <= gap && g < 5; g++) src_lost(s); }
+}
+static void src_pend_flush(Src *s, i64 now) {
+    if (!s->pend_n) return;
+    int gap = (u16)(s->pend_seq - s->last_seq) - 1;
+    int n = s->pend_n;
+    s->pend_n = 0;
+    if (gap < 0 || gap > 32767) return;
+    src_take(s, s->pend_seq, s->pend, n, gap, now);
+}
+static void src_pend_tick(Src *s, i64 now) { if (s->pend_n && now >= s->pend_until) src_pend_flush(s, now); }
+static void src_rx(Src *s, u16 seq, const unsigned char *frame, int fn, i64 now) {
+    if (!s->have_seq) { s->have_seq = true; src_take(s, seq, frame, fn, 0, now); return; }
+    int d = (u16)(seq - s->last_seq);
+    if (d == 0 || d > 32768) { if (d) s->st.late++; return; }   /* дубль или уже сыгранный */
+    if (s->pend_n && seq == s->pend_seq) return;  /* дубль ждущего */
+    if (d > 1000) {                              /* пересинхронизация */
+        s->pend_n = 0;
+        opus_decoder_ctl(s->dec, OPUS_RESET_STATE);
+        src_take(s, seq, frame, fn, 0, now);
+        return;
+    }
+    if (d == 1) {
+        src_take(s, seq, frame, fn, 0, now);
+        if (s->pend_n && s->pend_seq == (u16)(s->last_seq + 1)) src_pend_flush(s, now);   /* дождались — ждущий следом */
+        return;
+    }
+    if (!s->pend_n && d <= 6 && frame && fn > 0 && fn <= (int)sizeof s->pend) {   /* забежал вперёд — подождать пропущенный */
+        memcpy(s->pend, frame, (size_t)fn);
+        s->pend_n = fn;
+        s->pend_seq = seq;
+        s->pend_until = now + 40;
+        return;
+    }
+    if (s->pend_n) {                             /* ждали — дальше не ждём */
+        if ((u16)(seq - s->pend_seq) < 32768) src_pend_flush(s, now);
+        d = (u16)(seq - s->last_seq);
+        if (d == 0 || d > 32768) return;
+    }
+    src_take(s, seq, frame, fn, d - 1, now);
+}
 static void on_rtp(VW *w, const unsigned char *b, int len) {
     if (len < 12 + 20 || !w->session_ready) return;
     if ((b[0] >> 6) != 2 || (b[1] & 0x7F) != 120) return;   /* только Opus; RTCP мимо */
@@ -499,48 +589,91 @@ static void on_rtp(VW *w, const unsigned char *b, int len) {
     s->last_pkt = now;
     /* Номер пакета учитываем всегда (даже без звука и при ошибке DAVE), иначе после долгого
      * разрыва все следующие пакеты казались бы «старыми» и собеседник замолкал бы надолго. */
-    int gap = 0;
-    if (s->have_seq) {
-        int d = (u16)(seq - s->last_seq);
-        if (d == 0 || d > 32768) return;         /* дубль или запоздавший */
-        gap = d - 1;
-    }
-    s->have_seq = true;
-    s->last_seq = seq;
-    if (gap > 1000) { opus_decoder_ctl(s->dec, OPUS_RESET_STATE); gap = 0; }   /* пересинхронизация */
-    if (atomic_load(&V.deaf)) return;            /* без звука: не расшифровываем и не декодируем */
-    int16_t pcm[5760 * 2];
-    if (fn == 3 && !memcmp(frame, SILENCE, 3)) return;
+    if (atomic_load(&V.deaf) || (fn == 3 && !memcmp(frame, SILENCE, 3))) { src_rx(s, seq, NULL, -1, now); return; }   /* только номер */
     unsigned char dout[1500];
     if (w->dave) {
         /* При сессии DAVE через дешифратор идёт КАЖДЫЙ кадр: открытый звук принимается, только если
          * libdave сама разрешила переходный режим. Иначе сервер мог бы подсунуть голос от чужого имени. */
-        if (!s->dd) { dave_set_ratchet(w, s); if (!s->dd) return; }
+        if (!s->dd) { dave_set_ratchet(w, s); if (!s->dd) { src_rx(s, seq, NULL, -1, now); return; } }
         size_t wr = 0;
-        if (daveDecryptorDecrypt(s->dd, DAVE_MEDIA_TYPE_AUDIO, frame, (size_t)fn, dout, sizeof dout, &wr) != DAVE_DECRYPTOR_RESULT_CODE_SUCCESS) return;
+        if (daveDecryptorDecrypt(s->dd, DAVE_MEDIA_TYPE_AUDIO, frame, (size_t)fn, dout, sizeof dout, &wr) != DAVE_DECRYPTOR_RESULT_CODE_SUCCESS) {
+            s->st.dave_fail++;
+            src_rx(s, seq, NULL, 0, now);        /* место кадра — PLC, без щелчка */
+            return;
+        }
         frame = dout;
         fn = (int)wr;
     }
-    /* потерянные кадры: восстанавливаем силами Opus (PLC), не больше 5 */
-    for (int g = 0; g < gap && g < 5; g++) {
-        int k = opus_decode(s->dec, NULL, 0, pcm, FRAME, 0);
-        if (k > 0) fifo_push(s, pcm, k);
-    }
-    int k = opus_decode(s->dec, frame, fn, pcm, 5760, 0);
-    if (k > 0) { fifo_push(s, pcm, k); s->last_voice = now; }
+    src_rx(s, seq, frame, fn, now);
 }
 
 /* ---------- микшер ---------- */
+/* Ревью треска (владелец, 10.11): раньше микшер (1) писал в устройство по системным часам, а не по его
+ * собственным — устройство то голодало, то переполнялось; (2) при недоборе у говорящего обрезал звук до нуля
+ * и ждал 40 мс запаса — резкий обрыв = щелчок, и так каждые несколько кадров при джиттере сети. Теперь: в
+ * устройстве держим OUT_TARGET по его padding; недобор — досочиняем Opus PLC (до PLC_MAX кадров, PLC сам
+ * затухает), затем мягко выходим; лишнее в кольце (> JIT_MAX) — выкидываем 20 мс с перекрёстным переходом;
+ * начало после паузы — плавное нарастание 5 мс. */
+#define OUT_TARGET (48 * 60)
+/* мягкий ограничитель: до 24000 — как есть, выше — плавно к 32767 (резкое обрезание — хруст) */
+static int16_t soft_clip(int32_t x) {
+    int32_t a = x < 0 ? -x : x;
+    if (a <= 24000) return (int16_t)x;
+    int32_t over = a - 24000;
+    int32_t y = 24000 + (int32_t)((int64_t)over * 8767 / (over + 8767));
+    return (int16_t)(x < 0 ? -y : y);
+}
+#define PLC_MAX 5
+#define JIT_MAX (48 * 120)
+#define FADE_N 240
+static void src_trim(Src *s) {                  /* выкинуть 20 мс из начала кольца, склеив перекрёстно 2,5 мс */
+    if (s->n < JIT_MAX + FRAME) return;
+    src_drop(s);
+}
+static void src_drop(Src *s) {                  /* то же без порога запаса (переполнение кольца залпом) */
+    if (s->n < FRAME + 120) return;
+    for (int i = 0; i < 120; i++) {
+        int a = (s->rd + i) % FIFO_FRAMES, b = (s->rd + FRAME + i) % FIFO_FRAMES;
+        for (int c = 0; c < 2; c++) s->fifo[b * 2 + c] = (int16_t)((s->fifo[a * 2 + c] * (120 - i) + s->fifo[b * 2 + c] * i) / 120);
+    }
+    s->rd = (s->rd + FRAME) % FIFO_FRAMES;
+    s->n -= FRAME;
+    s->st.trims++;
+}
+/* want стерео-кадров источника -> acc (с громкостью vq/256); false — источник молчит */
+static bool src_pull(Src *s, int32_t *acc, int want, int vq) {
+    int16_t *pcm = s->pcm;
+    if (!s->playing) { if (s->n >= PREBUF) { s->playing = true; s->fade_in = FADE_N; s->plc_run = 0; } else return false; }
+    while (s->n > JIT_MAX + FRAME) src_trim(s);
+    while (s->n < want && s->plc_run < PLC_MAX && !s->quiet) {   /* недобор: досочинить, а не обрывать (но не после тишины) */
+        int k = opus_decode(s->dec, NULL, 0, pcm, FRAME, 0);
+        if (k <= 0) break;
+        fifo_push(s, pcm, k);
+        s->plc_run++;
+        s->st.underruns++;
+    }
+    int take = s->n < want ? s->n : want;
+    for (int f = 0; f < take; f++) {
+        int ri = (s->rd + f) % FIFO_FRAMES;
+        int g = vq;
+        if (s->fade_in > 0) { g = vq * (FADE_N - s->fade_in) / FADE_N; s->fade_in--; }
+        if (take < want && f >= take - FADE_N) g = g * (take - f) / FADE_N;   /* дальше пусто — плавно в тишину */
+        acc[f * 2] += s->fifo[ri * 2] * g / 256;
+        acc[f * 2 + 1] += s->fifo[ri * 2 + 1] * g / 256;
+    }
+    s->rd = (s->rd + take) % FIFO_FRAMES;
+    s->n -= take;
+    if (take < want) { s->playing = false; s->plc_run = 0; s->st.stops++; }   /* PLC исчерпан — говорящий замолчал */
+    return true;
+}
 static void mix_out(VW *w) {
     if (!w->au) return;
-    int space = audio_render_space(w->au);
-    if (space <= 0) return;
+    int queued = audio_render_queued(w->au), room = audio_render_space(w->au);
+    if (!w->min_q || queued / 48 < w->min_q) w->min_q = queued / 48 ? queued / 48 : 1;
+    int space = OUT_TARGET - queued;            /* по часам устройства: держим ~50 мс */
+    if (space > room) space = room;
     if (space > 4800) space = 4800;
-    /* не опережать реальное время больше чем на 60 мс */
-    i64 budget = (now_ms() - w->t_audio) * 48 + 2880 - w->out_frames;
-    if (budget <= 0) { w->throttled = true; return; }
-    if (space > budget) { space = (int)budget; w->throttled = true; }
-    w->out_frames += space;
+    if (space <= 0) return;
     if (!w->mix_acc) w->mix_acc = xmalloc(4800 * 2 * sizeof(int32_t));
     if (!w->mix_out) w->mix_out = xmalloc(4800 * 2 * sizeof(int16_t));
     int32_t *acc = w->mix_acc;
@@ -548,20 +681,9 @@ static void mix_out(VW *w) {
     memset(acc, 0, (size_t)space * 2 * sizeof(int32_t));
     float vols[MAX_SRC];
     for (int i = 0; i < w->nsrc; i++) vols[i] = voice_get_volume(w->src[i].user);
-    for (int i = 0; i < w->nsrc; i++) {
-        Src *s = &w->src[i];
-        if (!s->playing) { if (s->n >= PREBUF) s->playing = true; else continue; }
-        int take = s->n < space ? s->n : space;
-        int vq = (int)(vols[i] * 256);
-        for (int f = 0; f < take; f++) {
-            int ri = (s->rd + f) % FIFO_FRAMES;
-            acc[f * 2] += s->fifo[ri * 2] * vq / 256;
-            acc[f * 2 + 1] += s->fifo[ri * 2 + 1] * vq / 256;
-        }
-        s->rd = (s->rd + take) % FIFO_FRAMES;
-        s->n -= take;
-        if (s->n == 0) s->playing = false;       /* опустел — снова ждём запас */
-    }
+    i64 tnow = now_ms();
+    for (int i = 0; i < w->nsrc; i++) src_pend_tick(&w->src[i], tnow);
+    for (int i = 0; i < w->nsrc; i++) src_pull(&w->src[i], acc, space, (int)(vols[i] * 256));
     if (w->demo && !atomic_load(&V.deaf)) {
         /* тестовый тон 440 Гц, тихо, чтобы проверить вывод без сети */
         for (int f = 0; f < space; f++) {
@@ -572,7 +694,7 @@ static void mix_out(VW *w) {
             acc[f * 2 + 1] += v;
         }
     }
-    for (int i = 0; i < space * 2; i++) out[i] = (int16_t)(acc[i] > 32767 ? 32767 : acc[i] < -32768 ? -32768 : acc[i]);
+    for (int i = 0; i < space * 2; i++) out[i] = soft_clip(acc[i]);   /* несколько говорящих и громкость > 1 — без хруста */
     audio_render_write(w->au, out, space);
 }
 
@@ -592,6 +714,11 @@ static void hpf_run(VW *w, int16_t *s, int n) {
     }
 }
 void voice_hpf(bool on) { atomic_store(&V.hpf_off, !on); }
+/* «Приглушать другие программы во время звонка»: по умолчанию выкл. (Windows приглушает их на 80 % для устройств
+ * «для связи»); действует со следующего открытия устройства (вход в звонок) */
+static atomic_bool g_duck_others;
+void voice_duck_others(bool on) { atomic_store(&g_duck_others, on); }
+bool voice_duck_others_on(void) { return atomic_load(&g_duck_others); }
 bool voice_hpf_on(void) { return !atomic_load(&V.hpf_off); }
 static void capture_tick(VW *w) {
     if (!w->au) return;
@@ -692,7 +819,7 @@ static bool ip_discovery(VW *w, const char *ip, int port) {
         if (!socks_open_udp(&w->sx, w->sx_ip, w->sx_port, w->sx_user, w->sx_pass, ip, port, w->udp, &V.stop, e, sizeof e)) {
             if (!atomic_load(&V.stop)) {
                 char m[200];                     /* VoiceStatus.error обрежет до 127 байт сам */
-                snprintf(m, sizeof m, "VLESS: UDP голоса не поднят (%s)", e);
+                snprintf(m, sizeof m, ui_tr("VLESS: UDP голоса не поднят (%s)"), e);
                 vw_net_error(w, m, m);
             }
             return true;                         /* ошибка уже выставлена */
@@ -752,7 +879,7 @@ static void vw_text(VW *w, const char *text, size_t len) {
         w->rc_start = w->rc_at = 0;
         if (!w->session_ready) status_set(VS_CONNECTING, NULL);
         else if (w->dave) status_set(w->dave_on ? VS_CONNECTED : VS_DAVE, NULL);
-        else status_set(VS_CONNECTED, "звонок без E2EE: микрофон не передаётся");
+        else status_set(VS_CONNECTED, ui_tr("звонок без E2EE: микрофон не передаётся"));
         break;
     case 6:
         w->hb_acked = true;
@@ -768,16 +895,16 @@ static void vw_text(VW *w, const char *text, size_t len) {
         bool mode_ok = false;
         const cJSON *m;
         cJSON_ArrayForEach(m, jget(d, "modes")) if (cJSON_IsString(m) && !strcmp(m->valuestring, "aead_aes256_gcm_rtpsize")) mode_ok = true;
-        if (!mode_ok) { vw_error(w, "сервер не поддерживает AES-GCM"); atomic_store(&V.stop, true); break; }
+        if (!mode_ok) { vw_error(w, ui_tr("сервер не поддерживает AES-GCM")); atomic_store(&V.stop, true); break; }
         if (!ip || !port || !ip_discovery(w, ip, port))
-            vw_net_error(w, "UDP не отвечает (файрвол/NAT?)", "VLESS: голосовой UDP не проходит через туннель (UDP на сервере выключен?)");
+            vw_net_error(w, ui_tr("UDP не отвечает (файрвол/NAT?)"), ui_tr("VLESS: голосовой UDP не проходит через туннель (UDP на сервере выключен?)"));
         break;
     }
     case 4: {
         const char *mode = jstr(d, "mode");
         const cJSON *k = jget(d, "secret_key");
         if (!mode || strcmp(mode, "aead_aes256_gcm_rtpsize") || cJSON_GetArraySize(k) != 32) {
-            vw_error(w, "неверное описание сессии"); atomic_store(&V.stop, true); break;
+            vw_error(w, ui_tr("неверное описание сессии")); atomic_store(&V.stop, true); break;
         }
         int i = 0;
         const cJSON *x;
@@ -785,7 +912,7 @@ static void vw_text(VW *w, const char *text, size_t len) {
         w->session_ready = true;
         u16 dv = (u16)jint(d, "dave_protocol_version", 0);
         if (dv > 0) { dave_init(w, dv); dave_send_kp(w); status_set(VS_DAVE, NULL); }
-        else status_set(VS_CONNECTED, "звонок без E2EE: микрофон не передаётся");
+        else status_set(VS_CONNECTED, ui_tr("звонок без E2EE: микрофон не передаётся"));
         char b[96];
         snprintf(b, sizeof b, "{\"op\":5,\"d\":{\"speaking\":1,\"delay\":0,\"ssrc\":%u}}", (unsigned)w->ssrc);
         ws_text(w, b);
@@ -895,7 +1022,7 @@ static bool vw_read_ws(VW *w) {
         }
         if (meta->flags & (CURLWS_PING | CURLWS_PONG)) continue;
         if (got) {
-            if (w->in.len + got > (4u << 20)) { vw_error(w, "голосовой сервер прислал слишком большое сообщение"); return false; }
+            if (w->in.len + got > (4u << 20)) { vw_error(w, ui_tr("голосовой сервер прислал слишком большое сообщение")); return false; }
             buf_put(&w->in, buf, got);
         }
         if (meta->bytesleft || (meta->flags & CURLWS_CONT)) continue;
@@ -1011,15 +1138,15 @@ static void rc_schedule(VW *w) {
     static const int DELAY[] = { 1000, 2000, 5000 };
     i64 now = now_ms();
     if (now - w->rc_start >= 30000) {
-        vw_net_error(w, "голосовое соединение потеряно и не восстановилось за 30 с",
-                     "VLESS: голосовое соединение через туннель не восстановилось за 30 с");
+        vw_net_error(w, ui_tr("голосовое соединение потеряно и не восстановилось за 30 с"),
+                     ui_tr("VLESS: голосовое соединение через туннель не восстановилось за 30 с"));
         return;
     }
     int d = DELAY[w->rc_try < 2 ? w->rc_try : 2];
     w->rc_try++;
     w->rc_at = now + d;
     char m[96];
-    snprintf(m, sizeof m, "связь потеряна, переподключение через %d с", d / 1000);
+    snprintf(m, sizeof m, ui_tr("связь потеряна, переподключение через %d с"), d / 1000);
     status_set(VS_CONNECTING, m);
 }
 
@@ -1032,11 +1159,11 @@ static void ws_lost(VW *w) {
     w->resuming = false;
     char e[96];
     switch (code) {
-    case 4014: vw_error(w, "вас отключили от канала"); return;              /* не переподключаемся */
-    case 4021: vw_error(w, "голос отключён сервером: слишком много запросов"); return;
-    case 4022: vw_error(w, "звонок завершён"); return;
+    case 4014: vw_error(w, ui_tr("вас отключили от канала")); return;              /* не переподключаемся */
+    case 4021: vw_error(w, ui_tr("голос отключён сервером: слишком много запросов")); return;
+    case 4022: vw_error(w, ui_tr("звонок завершён")); return;
     case 4016: case 4017:
-        snprintf(e, sizeof e, "сквозное шифрование не согласовано (%d)", code);
+        snprintf(e, sizeof e, ui_tr("сквозное шифрование не согласовано (%d)"), code);
         vw_error(w, e);
         return;
     case 0: case 1000: case 1001: case 1005: case 1006: case 4015:
@@ -1044,27 +1171,39 @@ static void ws_lost(VW *w) {
     default:
         if (code == 4006 || code == 4009 || (was_resuming && code >= 4000)) {
             /* RESUME не принят (сессия устарела): новый вход через gateway, op 4 — в главном потоке */
-            status_set(VS_CONNECTING, "сессия голоса устарела: вход заново");
+            status_set(VS_CONNECTING, ui_tr("сессия голоса устарела: вход заново"));
             atomic_store(&V.need_rejoin, true);
             atomic_store(&V.stop, true);
             wake_signal(g_wake);
             return;
         }
-        snprintf(e, sizeof e, "голос закрыт (код %d)", code);
+        snprintf(e, sizeof e, ui_tr("голос закрыт (код %d)"), code);
         vw_error(w, e);
         return;
     }
     if (!w->session_ready) {                     /* сессия не успела начаться: продолжать нечего */
-        vw_net_error(w, "голосовое соединение потеряно", "VLESS: голосовое соединение через туннель потеряно");
+        vw_net_error(w, ui_tr("голосовое соединение потеряно"), ui_tr("VLESS: голосовое соединение через туннель потеряно"));
         return;
     }
     if (!w->rc_start) { w->rc_start = now_ms(); w->rc_try = 0; }
     rc_schedule(w);
 }
 
+bool g_audio_busy;
+void voice_stats(VoiceStats *out) {
+    if (!V.mu) { memset(out, 0, sizeof *out); return; }
+    mutex_lock(V.mu);
+    *out = V.stats;
+    mutex_unlock(V.mu);
+}
 static int voice_thread(void *arg) {
     VW *w = arg;
     thread_audio_priority();
+    plat_timer_hires(true);                     /* ревью 17: такт 20 мс без дрожи 15,6 мс; вернём при выходе */
+    g_audio_busy = true;
+    mutex_lock(V.mu);
+    memset(&V.stats, 0, sizeof V.stats);
+    mutex_unlock(V.mu);
     char err[128] = "";
     w->udp = -1;
     socks_reset(&w->sx);
@@ -1072,7 +1211,7 @@ static int voice_thread(void *arg) {
     dev_hints(hm, ho);
     int gen = atomic_load(&V.dev_gen);
     w->au = vopen(hm[0] ? hm : NULL, ho[0] ? ho : NULL, err, sizeof err);
-    if (!w->au) { status_set(VS_FAILED, err[0] ? err : "нет звукового устройства"); }
+    if (!w->au) { status_set(VS_FAILED, err[0] ? err : ui_tr("нет звукового устройства")); }
     int oe;
     w->encd = opus_encoder_create(48000, 2, OPUS_APPLICATION_VOIP, &oe);
     if (oe == OPUS_OK) {
@@ -1099,8 +1238,8 @@ static int voice_thread(void *arg) {
         status_set(VS_CONNECTING, NULL);
         bool proxy_bad;
         if (!ws_connect(w, 10, &proxy_bad)) {
-            if (proxy_bad) vw_net_error(w, "", "VLESS: голосовой WebSocket нельзя пустить через туннель (curl без прокси?)");
-            else if (!atomic_load(&V.stop)) vw_net_error(w, "голосовой сервер недоступен", "VLESS: голосовой сервер недоступен через туннель");
+            if (proxy_bad) vw_net_error(w, "", ui_tr("VLESS: голосовой WebSocket нельзя пустить через туннель (curl без прокси?)"));
+            else if (!atomic_load(&V.stop)) vw_net_error(w, ui_tr("голосовой сервер недоступен"), ui_tr("VLESS: голосовой сервер недоступен через туннель"));
             goto out;
         }
     }
@@ -1114,6 +1253,7 @@ static int voice_thread(void *arg) {
         int n = 0;
         if (w->ws_wait) wt[n++] = sockwait_get(w->ws_wait);
         if (w->sx_wait) wt[n++] = sockwait_get(w->sx_wait);
+        if (w->udp_wait && w->session_ready) wt[n++] = sockwait_get(w->udp_wait);   /* ревью 17: пакеты — сразу, не ждут такта */
         wt[n++] = wake_waitable(V.cmd);
         i64 now = now_ms();
         i64 t = w->next_frame;
@@ -1124,19 +1264,25 @@ static int voice_thread(void *arg) {
         if (w->sx_wait) {
             /* TCP управления UDP ASSOCIATE закрылся: туннель для голоса умер, напрямую не идём */
             sockwait_clear(w->sx_wait);
-            if (!socks_alive(&w->sx)) { vw_net_error(w, "", "VLESS: туннель для голоса оборвался (Xray остановлен?)"); break; }
+            if (!socks_alive(&w->sx)) { vw_net_error(w, "", ui_tr("VLESS: туннель для голоса оборвался (Xray остановлен?)")); break; }
         }
         if (w->ws_wait) { sockwait_clear(w->ws_wait); vw_read_ws(w); }
+        if (w->udp_wait && w->session_ready && w->udp >= 0) {
+            sockwait_clear(w->udp_wait);
+            unsigned char pk[2048];
+            int k;
+            for (int g = 0; g < 128 && (k = vudp_recv(w, pk, sizeof pk)) >= 0; g++) if (k > 0) on_rtp(w, pk, k);
+        }
         if (atomic_load(&V.stop)) break;
         if (w->ws_dead) { ws_lost(w); if (atomic_load(&V.stop)) break; }
         now = now_ms();
         if (!w->ws && w->rc_at && now >= w->rc_at) {
             /* переподключение: TLS + Upgrade, затем Hello -> RESUME (op 7) */
             w->rc_at = 0;
-            status_set(VS_CONNECTING, "переподключение голоса...");
+            status_set(VS_CONNECTING, ui_tr("переподключение голоса..."));
             bool proxy_bad;
             if (ws_connect(w, 5, &proxy_bad)) { w->resuming = true; w->rc_conn = now_ms(); }
-            else if (proxy_bad) { vw_net_error(w, "", "VLESS: голосовой WebSocket нельзя пустить через туннель"); break; }
+            else if (proxy_bad) { vw_net_error(w, "", ui_tr("VLESS: голосовой WebSocket нельзя пустить через туннель")); break; }
             else if (!atomic_load(&V.stop)) rc_schedule(w);
             if (atomic_load(&V.stop)) break;
             now = now_ms();
@@ -1144,6 +1290,21 @@ static int voice_thread(void *arg) {
         if (w->ws && w->resuming && now - w->rc_conn > 10000) { w->ws_dead = true; w->ws_close = 0; continue; }   /* RESUMED не пришёл */
         if (now < w->next_frame) continue;
         w->next_frame += 20;
+        if (w->last_tick) {                      /* гистограмма интервала такта */
+            i64 dt = now - w->last_tick;
+            w->tick_hist[dt <= 22 ? 0 : dt <= 27 ? 1 : dt <= 32 ? 2 : dt <= 40 ? 3 : dt <= 60 ? 4 : 5]++;
+        }
+        w->last_tick = now;
+        if (now >= w->next_stats) {
+            w->next_stats = now + 1000;
+            mutex_lock(V.mu);
+            memset(&V.stats, 0, sizeof V.stats);
+            for (int i = 0; i < w->nsrc && i < 8; i++) { V.stats.src[i] = w->src[i].st; V.stats.src[i].user = w->src[i].user; }
+            V.stats.nsrc = w->nsrc < 8 ? w->nsrc : 8;
+            V.stats.min_queued_ms = w->min_q;
+            memcpy(V.stats.tick_hist, w->tick_hist, sizeof w->tick_hist);
+            mutex_unlock(V.mu);
+        }
         if (now >= w->next_gc) {
             /* декодер и буфер — только пока человек говорит: молчащие дольше 30 с освобождаются */
             w->next_gc = now + 1000;
@@ -1163,7 +1324,7 @@ static int voice_thread(void *arg) {
             w->au = vopen(hm[0] ? hm : NULL, ho[0] ? ho : NULL, err, sizeof err);
             w->t_audio = now_ms();
             w->cap_frames = w->out_frames = 0;
-            if (!w->au) status_set(VS_FAILED, "звуковое устройство отключено");
+            if (!w->au) status_set(VS_FAILED, ui_tr("звуковое устройство отключено"));
         }
         capture_tick(w);
         mix_out(w);
@@ -1183,6 +1344,8 @@ static int voice_thread(void *arg) {
         publish(w);
     }
 out:
+    plat_timer_hires(false);
+    g_audio_busy = false;
     for (int i = 0; i < w->nsrc; i++) src_free(&w->src[i]);
     if (w->denc) daveEncryptorDestroy(w->denc);
     if (w->dave) daveSessionDestroy(w->dave);
@@ -1199,6 +1362,7 @@ out:
     buf_free(&w->in);
     free(w->mix_acc);
     free(w->mix_out);
+    free(w->pcm);
     if (w->ws_buf) { wipe(w->ws_buf, VW_WSBUF); free(w->ws_buf); }   /* там были кадры голосового gateway */
     json_done();
     wipe(w, sizeof *w);
@@ -1231,7 +1395,7 @@ static void maybe_start(void) {
     /* VLESS: голос (WebSocket и UDP) — только через туннель. Туннель поднимается — ждём (повтор из
      * voice_status); не работает — голос не подключается, напрямую не идём. */
     VlessState vl = vless_state();
-    if (vl == VL_STARTING) { status_set(VS_WAITING, "ожидание туннеля VLESS"); return; }
+    if (vl == VL_STARTING) { status_set(VS_WAITING, ui_tr("ожидание туннеля VLESS")); return; }
     char px[300] = "", sip[64] = "", su[160] = "", sp[160] = "";
     int sport = 0;
     if (vl != VL_OFF) {
@@ -1243,8 +1407,8 @@ static void maybe_start(void) {
             wipe(V.token, sizeof V.token);
             wipe(su, sizeof su);
             wipe(sp, sizeof sp);
-            status_set(VS_FAILED, "VLESS: туннель не работает - голос не подключён");
-            vless_report_failure("голос");
+            status_set(VS_FAILED, ui_tr("VLESS: туннель не работает - голос не подключён"));
+            vless_report_failure(ui_tr("голос"));
             atomic_store(&V.need_leave, true);   /* Discord уже ждёт нас в канале: сказать, что вышли */
             return;
         }
@@ -1273,14 +1437,14 @@ static void maybe_start(void) {
         wipe(w, sizeof *w);
         free(w);
         wipe(V.token, sizeof V.token);
-        status_set(VS_FAILED, safe ? "голосовой сервер не из discord.media" : "неверные данные голосовой сессии");
+        status_set(VS_FAILED, safe ? ui_tr("голосовой сервер не из discord.media") : ui_tr("неверные данные голосовой сессии"));
         return;
     }
     wipe(V.token, sizeof V.token);
     status_set(VS_CONNECTING, NULL);
     mt_stop_thread();                           /* тест микрофона уступает устройство звонку */
     V.thr = thread_start(voice_thread, w);
-    if (!V.thr) { wipe(w, sizeof *w); free(w); status_set(VS_FAILED, "не удалось запустить поток"); }   /* в w — токен голоса */
+    if (!V.thr) { wipe(w, sizeof *w); free(w); status_set(VS_FAILED, ui_tr("не удалось запустить поток")); }   /* в w — токен голоса */
 }
 
 int voice_restarts;                             /* selftest: сколько раз вход начинался с полного выхода */
@@ -1333,7 +1497,7 @@ static void voice_rejoin(void) {
     if (++V.rejoins > 2) {
         stop_thread();
         if (!O.demo) gw_voice_state(g, 0, false, false);
-        status_set(VS_FAILED, "голос не восстановился: войдите в канал заново");
+        status_set(VS_FAILED, ui_tr("голос не восстановился: войдите в канал заново"));
         return;
     }
     voice_join(g, c);
@@ -1366,7 +1530,7 @@ void voice_on_state(u64 guild, u64 channel, u64 user, const char *session_id) {
         wipe(V.session, sizeof V.session);
         V.have_session = V.have_server = false;
         V.gw_sess[0] = 0;
-        ui_notice("вы отключены от голосового канала");
+        ui_notice(ui_tr("вы отключены от голосового канала"));
         return;
     }
     (void)guild;
@@ -1612,10 +1776,10 @@ static int vm_thread(void *arg) {
     char err[128] = "";
     Audio *au = g_audio_fake ? NULL : audio_open_out(VM.out[0] ? VM.out : NULL, err, sizeof err);
     CURLM *m = NULL;
-    if (!au) { vm_err(g_audio_fake ? "звук выключен (selftest)" : err[0] ? err : "нет устройства вывода"); goto out; }
+    if (!au) { vm_err(g_audio_fake ? ui_tr("звук выключен (selftest)") : err[0] ? err : ui_tr("нет устройства вывода")); goto out; }
     c->e = curl_easy_init();
     m = curl_multi_init();
-    if (!c->e || !m) { vm_err("не удалось начать загрузку"); goto out; }
+    if (!c->e || !m) { vm_err(ui_tr("не удалось начать загрузку")); goto out; }
     net_curl_common(c->e);
     curl_easy_setopt(c->e, CURLOPT_PROTOCOLS_STR, "https");
     curl_easy_setopt(c->e, CURLOPT_PROXY, VM.proxy);
@@ -1643,13 +1807,13 @@ static int vm_thread(void *arg) {
             curl_easy_getinfo(c->e, CURLINFO_RESPONSE_CODE, &status);
             if (msg->data.result != CURLE_OK || status != 200) {
                 char b[120];
-                snprintf(b, sizeof b, status ? "голосовое не загрузилось: HTTP %ld" : "голосовое не загрузилось: нет связи", status);
+                snprintf(b, sizeof b, status ? ui_tr("голосовое не загрузилось: HTTP %ld") : ui_tr("голосовое не загрузилось: нет связи"), status);
                 vm_err(b);
                 atomic_store(&VM.stop, true);
             }
             eof = true;
         }
-        if (c->d.bad) { vm_err("голосовое сообщение повреждено"); break; }
+        if (c->d.bad) { vm_err(ui_tr("голосовое сообщение повреждено")); break; }
         vm_decode(&c->d);
         if (c->paused && c->d.pqn + c->d.ogn < VM_PQ_HI / 2) { c->paused = false; curl_easy_pause(c->e, CURLPAUSE_CONT); }
         if (!started && (c->d.rn >= 4800 || (eof && c->d.rn))) started = true;   /* 100 мс впрок — начинаем */
@@ -1671,7 +1835,7 @@ static int vm_thread(void *arg) {
             if (!idle_since) idle_since = now;
             if (now - idle_since > 150) break;
         }
-        if (audio_lost(au)) { vm_err("устройство вывода отключено"); break; }
+        if (audio_lost(au)) { vm_err(ui_tr("устройство вывода отключено")); break; }
         if (curl_multi_poll(m, NULL, 0, 20, NULL) != CURLM_OK) plat_wait(NULL, 0, 20);
     }
     atomic_store(&VM.pos_ms, (int)(played / 48));
@@ -1711,16 +1875,16 @@ bool vmsg_play(u64 mid) {
     memset(&VM.st, 0, sizeof VM.st);
     VM.st.mid = mid;
     mutex_unlock(VM.mu);
-    if (!m || !m->voice_secs) { vm_err("это не голосовое сообщение"); return false; }
+    if (!m || !m->voice_secs) { vm_err(ui_tr("это не голосовое сообщение")); return false; }
     /* ссылка — из строки вложения (маркер ATT_MARK), только CDN Discord; просроченная — обновлённая */
     const char *c = m->content ? strchr(m->content, ATT_MARK) : NULL;
     const char *u = c ? strstr(c, "] https://") : NULL;
     char url[1100] = "";
     if (u) { u += 2; size_t k = 0; while (u[k] && u[k] != '\n' && u[k] != ' ' && k + 1 < sizeof url) { url[k] = u[k]; k++; } url[k] = 0; }
-    if (!url[0] || !cdn_host_ok(url)) { vm_err("нет ссылки на голосовое"); return false; }
+    if (!url[0] || !cdn_host_ok(url)) { vm_err(ui_tr("нет ссылки на голосовое")); return false; }
     if (cdn_expired(url)) {
         const char *f = cdn_fresh(url);
-        if (!f) { cdn_want(url); vm_err("ссылка устарела — обновляется, нажмите ещё раз через пару секунд"); return false; }
+        if (!f) { cdn_want(url); vm_err(ui_tr("ссылка устарела — обновляется, нажмите ещё раз через пару секунд")); return false; }
         snprintf(url, sizeof url, "%s", f);
     }
     mutex_lock(VM.mu);
@@ -1731,14 +1895,14 @@ bool vmsg_play(u64 mid) {
     if (O.demo) { VM.demo_t0 = now_ms(); ui_dirty(); return true; }   /* демо: по часам, без сети и звука */
     VlessState vs = vless_state();
     const char *px = vs == VL_OFF ? "" : vless_proxy_url();
-    if (!px) { vm_err("VLESS ещё не готов"); vmsg_stop(); return false; }
+    if (!px) { vm_err(ui_tr("VLESS ещё не готов")); vmsg_stop(); return false; }
     snprintf(VM.url, sizeof VM.url, "%s", url);
     snprintf(VM.proxy, sizeof VM.proxy, "%s", px);
     { char hm[96]; dev_hints(hm, VM.out); }
     atomic_store(&VM.stop, false);
     atomic_store(&VM.done, false);
     VM.thr = thread_start(vm_thread, NULL);
-    if (!VM.thr) { vm_err("не удалось запустить воспроизведение"); vmsg_stop(); return false; }
+    if (!VM.thr) { vm_err(ui_tr("не удалось запустить воспроизведение")); vmsg_stop(); return false; }
     ui_dirty();
     return true;
 }
@@ -1860,7 +2024,7 @@ static int snd_thread(void *arg) {
     thread_audio_priority();
     char err[128] = "", hm[96], ho[96];
     dev_hints(hm, ho);
-    Audio *au = g_audio_fake ? NULL : audio_open_out(ho[0] ? ho : NULL, err, sizeof err);
+    Audio *au = (g_audio_fake || O.demo) ? NULL /* в --demo и --shot звуки не открывают вывод */ : audio_open_out(ho[0] ? ho : NULL, err, sizeof err);
     int16_t *pcm = xmalloc(48000 * 3 * sizeof(int16_t)), st[960 * 2];
     int n = sound_synth(SN.which, pcm, 48000 * 3), pos = 0, loops = 0;
     while (au && !atomic_load(&SN.stop)) {
@@ -1946,7 +2110,117 @@ static void fx_measure(VoiceFx m, double *freq, double *level, bool *jumps_ok) {
     *freq = cross / 2.0 / (100 * 0.020);
     *level = ein > 0 ? sqrt(eout / ein) : 0;
 }
+/* Ревью треска: непрерывность пути приёма. Синус 440 Гц -> Opus (с FEC) -> пакеты с джиттером 0..60 мс,
+ * потерей 3 % и перестановками -> src_rx -> кольцо -> src_pull по такту 14..34 мс -> «устройство», которое
+ * играет 48 кГц по своим часам. Считаем: обрывы (скачок > 2500 между соседними сэмплами), паузы (>= 5 мс почти
+ * нуля посреди речи), опустошения устройства. */
+static u32 ct_rng = 12345;
+static u32 ct_rand(void) { ct_rng = ct_rng * 1103515245u + 12345u; return ct_rng >> 8; }
+static void cont_test(int *jumps, int *gaps, int *dev_empty, long *played) {
+    int e;
+    OpusEncoder *enc = opus_encoder_create(48000, 2, OPUS_APPLICATION_VOIP, &e);
+    opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1));
+    opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(5));
+    enum { NPK = 200 };                         /* 4 с */
+    static unsigned char pk[NPK][400];
+    static int pkn[NPK], at[NPK], order[NPK];
+    for (int p = 0; p < NPK; p++) {
+        int16_t pcm[FRAME * 2];
+        for (int i = 0; i < FRAME; i++) pcm[i * 2] = pcm[i * 2 + 1] = (int16_t)(8000 * sin(2 * 3.14159265358979 * 440 * (p * FRAME + i) / 48000.0));
+        pkn[p] = opus_encode(enc, pcm, FRAME, pk[p], 400);
+        at[p] = p * 20 + (int)(ct_rand() % 61);  /* приход: время отправки + джиттер */
+        order[p] = p;
+    }
+    opus_encoder_destroy(enc);
+    for (int i = 1; i < NPK; i++) for (int j = i; j > 0 && at[order[j]] < at[order[j - 1]]; j--) { int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t; }
+    Src s;
+    memset(&s, 0, sizeof s);
+    s.dec = opus_decoder_create(48000, 2, &e);
+    s.fifo = xmalloc(FIFO_FRAMES * 2 * sizeof(int16_t));
+    s.pcm = xmalloc(5760 * 2 * sizeof(int16_t));
+    static int32_t acc[4800 * 2];
+    int16_t *out = xmalloc((size_t)(48 * 5000) * sizeof(int16_t));
+    long nout = 0, devq = 0;
+    int ip = 0, t = 0;
+    *jumps = *gaps = *dev_empty = 0;
+    while (t < NPK * 20 + 400) {
+        int dt = 14 + (int)(ct_rand() % 21);    /* такт 14..34 мс */
+        t += dt;
+        while (ip < NPK && at[order[ip]] <= t) {   /* пришедшие пакеты (3 % потеряно) */
+            int p = order[ip++];
+            if (ct_rand() % 100 < 3) continue;
+            src_rx(&s, (u16)(1000 + p), pk[p], pkn[p], t);
+        }
+        src_pend_tick(&s, t);
+        long eat = (long)dt * 48;               /* устройство сыграло своё */
+        if (devq < eat && t > 200 && t < NPK * 20) (*dev_empty)++;
+        devq = devq > eat ? devq - eat : 0;
+        int want = OUT_TARGET - (int)devq;
+        if (want > 4800) want = 4800;
+        if (want <= 0) continue;
+        memset(acc, 0, (size_t)want * 2 * sizeof(int32_t));
+        src_pull(&s, acc, want, 256);
+        for (int i = 0; i < want && nout < 48 * 5000; i++) out[nout++] = soft_clip(acc[i * 2]);
+        devq += want;
+    }
+    /* разбор: от первого звука до конца речи */
+    long a = 0;
+    while (a < nout && abs(out[a]) < 500) a++;
+    long b = a + 48 * 3500 < nout ? a + 48 * 3500 : nout;
+    int zr = 0;
+    for (long i = a + 1; i < b; i++) {
+        if (abs(out[i] - out[i - 1]) > 2500) (*jumps)++;
+        if (abs(out[i]) < 50) { if (++zr == 240) (*gaps)++; } else zr = 0;
+    }
+    *played = b - a;
+    opus_decoder_destroy(s.dec);
+    free(s.fifo);
+    free(s.pcm);
+    free(out);
+}
 int voice_selftest(void (*check)(bool ok, const char *what)) {
+    {
+        int jumps, gaps, empty;
+        long played;
+        cont_test(&jumps, &gaps, &empty, &played);
+        char w[320];
+        snprintf(w, sizeof w, "треск приёма: синус через кодек->кольцо->вывод, джиттер 60 мс, потери 3 %%: обрывов %d, пауз %d, опустошений устройства %d (сыграно %.1f с)",
+                 jumps, gaps, empty, played / 48000.0);
+        check(jumps == 0 && gaps == 0 && empty == 0 && played > 48 * 3000, w);
+    }
+    {   /* ревью 18 М1/М2: после кадра тишины PLC не досочиняет хвост; залп больше кольца срезается целыми кадрами */
+        int e;
+        Src s;
+        memset(&s, 0, sizeof s);
+        s.dec = opus_decoder_create(48000, 2, &e);
+        s.fifo = xmalloc(FIFO_FRAMES * 2 * sizeof(int16_t));
+        s.pcm = xmalloc(5760 * 2 * sizeof(int16_t));
+        int16_t *fr = xcalloc(FRAME * 2, sizeof(int16_t));
+        for (int i = 0; i < FRAME; i++) fr[i * 2] = fr[i * 2 + 1] = (int16_t)(8000 * sin(2 * 3.14159265358979 * 440 * i / 48000.0));
+        for (int i = 0; i < 5; i++) fifo_push(&s, fr, FRAME);
+        static int32_t acc[4800 * 2];
+        src_pull(&s, acc, FRAME * 2, 256);       /* играет */
+        src_rx(&s, 100, NULL, -1, 0);            /* тишина: конец фразы */
+        u32 u0 = s.st.underruns;
+        memset(acc, 0, sizeof acc);
+        src_pull(&s, acc, 4800, 256);            /* кольцо (60 мс) кончилось — PLC не нужен */
+        bool m1 = s.st.underruns == u0 && !s.playing && s.quiet;
+        src_rx(&s, 101, NULL, 0, 0);
+        /* залп: кольцо почти полное, ещё 120 мс сверху — сдвиг читающей позиции кратен кадру (20 мс) */
+        s.n = 0; s.rd = 0; s.quiet = false;
+        for (int i = 0; i < 6; i++) fifo_push(&s, fr, FRAME);
+        fifo_push(&s, fr, 720);                  /* 135 мс: ниже порога src_trim (140 мс), но 120 мс сверху не влезут */
+        int rd0 = s.rd, n0 = s.n;
+        int16_t *big = xcalloc(5760 * 2, sizeof(int16_t));
+        fifo_push(&s, big, 5760);
+        int moved = (s.rd - rd0 + FIFO_FRAMES) % FIFO_FRAMES;
+        bool m2 = moved % FRAME == 0 && s.n <= FIFO_FRAMES && s.n == n0 + 5760 - moved && moved > 0;
+        free(big); free(fr); free(s.fifo); free(s.pcm);
+        opus_decoder_destroy(s.dec);
+        char w[200];
+        snprintf(w, sizeof w, "приём: после кадра тишины без PLC-хвоста; залп больше кольца — срез целыми кадрами (сдвиг %d)", moved);
+        check(m1 && m2, w);
+    }
     {   /* №143: ФВЧ 90 Гц — 30 Гц гасит, 1 кГц пропускает */
         VW t = {0};
         int16_t a[4800], b[4800];

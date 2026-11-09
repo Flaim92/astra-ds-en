@@ -64,7 +64,8 @@ void mutex_free(PlatMutex *m);
 intptr_t udp_open(void);                        /* -1 при ошибке; неблокирующий */
 bool udp_resolve(const char *ip, uint16_t port, void *addr16);  /* только IPv4-литерал */
 int udp_send(intptr_t s, const void *buf, size_t n, const void *addr16);
-int udp_recv(intptr_t s, void *buf, size_t n);  /* -1 — данных нет */
+int udp_recv(intptr_t s, void *buf, size_t n, void *from16);  /* -1 — данных нет; from16 (может быть NULL) — отправитель */
+bool udp_same(const void *a16, const void *b16);  /* тот же IPv4-адрес и порт */
 void udp_close(intptr_t s);
 
 /* ---------- хранилище секретов ----------

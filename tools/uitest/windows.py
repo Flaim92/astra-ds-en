@@ -39,6 +39,39 @@ def at(prefix, text, size='120x34', dx=0, dy=0, last=False, extra=None, tol=None
     return '%d:%d' % (x + dx, y + dy)
 
 
+_srv_cache = {}
+
+
+def server_xy(name, size='120x34'):
+    """Шаги до значка сервера по его названию: значки без подписей, часть — в папках («[ N ]», щелчок раскрывает).
+    Щёлкаем по каждому значку, читаем шапку колонки каналов; папки раскрываем и ищем внутри. Возвращает «X:Y» или
+    «X:Y,wait:50,click:X2:Y2» (раскрыть папку, затем сервер). Кэш на прогон."""
+    key = (name, size)
+    if key in _srv_cache:
+        return _srv_cache[key]
+
+    def mids(t):
+        return [y for y in range(4, len(t) - 3) if t[y][1:7].strip() and t[y - 1][1:7].strip() and t[y + 1][1:7].strip()]
+
+    def scan(prefix, depth):
+        t = shot.run(prefix + 'wait:50', 'srv-поиск', size).text()
+        for y in mids(t):
+            step = '3:%d' % y
+            r = shot.run(prefix + 'click:' + step + ',wait:50', 'srv-поиск', size).text()
+            if name in r[0][9:45]:
+                return step
+            if depth == 0 and r[0][9:45] == t[0][9:45] and [l[:9] for l in r] != [l[:9] for l in t]:   # раскрылась папка
+                inner = scan(prefix + 'click:' + step + ',wait:50,', 1)
+                if inner:
+                    return step + ',wait:50,click:' + inner
+        return None
+    found = scan('', 0)
+    if not found:
+        raise LookupError('сервер «%s» не найден в колонке серверов' % name)
+    _srv_cache[key] = found
+    return found
+
+
 def check(win, what, ok, detail='', snap=''):
     RES.append((win, what, bool(ok), detail, snap))
     print('  [%s] %s: %s%s' % ('ok' if ok else 'FAIL', win, what, (' - ' + detail) if detail and not ok else ''))
@@ -143,7 +176,7 @@ def t_friends():
     win('друзья-клав-del', 'tab,tab,del,wait:50', ['Удалить друга'], mouse=False)
     win('друзья-клав-enter', 'tab,tab,enter,wait:100', ['Написать @'], mouse=False)
     for sz in ('50x12', '80x24', '100x30', '150x45', '200x60'):
-        win('друзья-' + sz, 'wait:50', ['Друзья'], size=sz, mouse=False)
+        win('друзья-' + sz, 'wait:50', ['Друзья' if sz != '50x12' else '< (В сети) >'], size=sz, mouse=False)   # 50x12: переключатель вкладок
 
 
 def t_newdm():
@@ -181,7 +214,7 @@ def t_search():
     win('поиск-узко-70x24', SRV + ',click:20:6,wait:100,ctrl+f,t:привет,enter,wait:300', ['результат'], size='70x24')
     win('поиск-широко-200x60', SRV + ',click:20:6,wait:100,ctrl+f,t:привет,enter,wait:300', ['результат'], size='200x60')
     win('поиск-лс', 'click:' + at('wait:50', 'Алиса', last=True) + ',wait:100,ctrl+f,t:созвон,enter,wait:300', ['результат'])
-    win('поиск-смена-сервера', r + ',click:3:11,wait:50', [], absent=['результат'])
+    win('поиск-смена-сервера', r + ',click:' + server_xy('Другой сервер') + ',wait:50', [], absent=['результат'])
     win('поиск-друзья-закрывает', r + ',click:3:1,wait:50', ['Друзья'], absent=['результат'])
 
 
@@ -335,7 +368,7 @@ def t_login():
 
 def t_sizes():
     for sz in ('50x12', '60x20', '80x24', '100x30', '160x50', '200x60'):
-        win('размер-' + sz, 'wait:50', ['Друзья'], size=sz, mouse=False)
+        win('размер-' + sz, 'wait:50', ['Друзья' if sz != '50x12' else '< (В сети) >'], size=sz, mouse=False)   # 50x12: переключатель вкладок
         win('размер-канал-' + sz, 'click:3:7,wait:50,tab,enter,wait:50', [], size=sz, mouse=True)
     win('слишком-маленькое-49x11', 'wait:50', ['слишком маленькое', '50x12', 'Ctrl+Q'], size='49x11', mouse=False)
     win('ресайз-200x60-50x12-120x34', 'size:200x60,wait:50,size:50x12,wait:50,size:120x34,wait:50', ['Друзья'], mouse=False)
@@ -530,7 +563,7 @@ def t_wave2():
     win('в2-пригласить-o+', SRV + ',click:' + at(SRV, 'o+') + ',wait:50', ['Пригласить друзей', 'Создать ссылку'])
     ip = SRV + ',click:' + at(SRV, 'o+') + ',wait:50'
     win('в2-пригласить-создать-ссылку', ip + ',click:' + at(ip, 'Создать ссылку') + ',wait:200', ['Копировать'])
-    o2 = 'click:3:11,wait:50'
+    o2 = 'click:' + server_xy('Другой сервер') + ',wait:50'
     s = shot.run(o2, 'at', '120x34')
     p = s.find(' v')
     if p:
@@ -1198,7 +1231,141 @@ def _first(text, rx):
     return m.group(1).strip() if m else None
 
 
-ALL = [t_home, t_vstart, t_alert_links, t_bots_misc, t_packV, t_packA, t_look_voice_slow, t_viewer, t_select_threads, t_wave1, t_wave1b, t_wave2, t_txt, t_call, t_friends, t_newdm, t_dm, t_server, t_search, t_file, t_voice, t_settings, t_help, t_login, t_sizes, t_fine]
+def t_queue1():
+    """Очередь 1 (дизайнер ~21:00): статус на время и текст, игнор (свёрнутые сообщения «[показать]»), личная заметка,
+    «Фильтр гула» и «Звуки звонка и событий» в «Голос и видео». Правила сервера (№128) — когда будет демо-сервер."""
+    sm = 'click:' + at('wait:50', '(В сети)', dx=-3, last=True) + ',wait:50'
+    win('о1-меню-статуса', sm, ['Статус на время и текст', 'Режим фокуса: 30 мин', 'Невидимый'])
+    sf = sm + ',click:' + at(sm, 'Статус на время и текст') + ',wait:100'
+    win('о1-форма-статуса', sf, ['Сохранить'])
+    win('о1-форма-поля', sf, ['СТАТУС', 'НА СКОЛЬКО', 'ТЕКСТОВЫЙ СТАТУС', 'ТЕКСТ УБРАТЬ ЧЕРЕЗ'])
+    win('о1-статус-текст', sf + ',tab,tab,t:на обеде,enter,wait:100', ['статус сохранён'])
+    win('о1-статус-текст-виден', sf + ',tab,tab,t:на обеде,enter,wait:100,' + sm.split(',')[0] + ',wait:50,click:' +
+        at(sm, 'Статус на время и текст') + ',wait:100', ['на обеде'])
+    win('о1-фокус-30', sm + ',click:' + at(sm, 'Режим фокуса: 30 мин') + ',wait:100', ['фокус'])
+    ch = SRV + ',click:' + at(SRV, 'general') + ',wait:150'
+    pc = ch + ',click:' + at(ch, '<Боб>', dx=1) + ',wait:100'
+    win('о1-карточка', pc, ['Личная заметка', '( Игнор )', '( Роли )'])
+    ig = pc + ',click:' + at(pc, '( Игнор )', dx=2, tol=0) + ',wait:100,esc,wait:50'
+    s = win('о1-игнор-свёрнуто', ig, ['[показать]'], absent=['привет! в #новости смешное'])
+    win('о1-игнор-показать', ig + ',click:' + at(ig, '[показать]', dx=2) + ',wait:100', ['привет! в #новости смешное'])
+    nt = pc + ',click:' + at(pc, 'Личная заметка', dx=2) + ',wait:100'
+    win('о1-заметка-раскрыта', nt, ['ЗАМЕТКА', 'пусто'])
+    ne = nt + ',click:' + at(nt, 'пусто', dx=1) + ',wait:100,t:знаком по работе,enter,wait:100'
+    win('о1-заметка-сохранена', ne + ',esc,wait:50,click:' + at(ch, '<Боб>', dx=1) + ',wait:100,click:' + at(pc, 'Личная заметка', dx=2) +
+        ',wait:100', ['знаком по работе'])
+    Z = '120x50'
+    g = 'click:' + at('wait:50', '(*)', dx=1, size=Z) + ',wait:50'
+    vo = g + ',click:' + at(g, 'Голос и видео', size=Z) + ',wait:100'
+    win('о1-фильтр-гула-снять', vo + ',click:' + at(vo, 'Фильтр гула', size=Z) + ',wait:100', ['[ ] Фильтр гула'], size=Z)
+    win('о1-звуки-звонка-снять', vo + ',click:' + at(vo, 'Звуки звонка', size=Z) + ',wait:100', ['[ ] Звуки звонка'], size=Z)
+
+
+def t_lang_switch():
+    """Переключатель языка без перезапуска: «Внешний вид» (Русский / English), карточка входа и стартовый экран
+    («RU|EN» в рамке). Остальная проверка английского — lang_scan.py / lang_static.py."""
+    Z = '120x50'
+    g = 'click:' + at('wait:50', '(*)', dx=1, size=Z) + ',wait:50'
+    lk = g + ',click:' + at(g, 'Внешний вид', size=Z) + ',wait:100'
+    win('язык-пункт', lk, ['ЯЗЫК / LANGUAGE', 'Русский', 'English'], size=Z)
+    en = lk + ',click:' + at(lk, 'English', dx=2, size=Z) + ',wait:100'
+    win('язык-en-сразу', en, ['Appearance', 'LANGUAGE'], absent=['Внешний вид'], size=Z)
+    win('язык-en-главная', en + ',esc,wait:100', ['Friends'], absent=['Друзья'], size=Z)
+    win('язык-en-ru-обратно', en + ',click:' + at(lk, 'Русский', dx=2, size=Z) + ',wait:100', ['Внешний вид'], size=Z)
+    lg = 'ctrl+l,wait:100'
+    s = shot.run(lg, 'язык-вход', '120x34')
+    p = s.find('RU|EN', tol=0)
+    if p:
+        win('язык-вход-en', lg + ',click:%d:%d,wait:100' % (p[0] + 3, p[1]), ['RU|EN'], absent=['Подключение'])
+        win('язык-вход-ru-обратно', lg + ',click:%d:%d,wait:100,click:%d:%d,wait:100' % (p[0] + 3, p[1], p[0] + 1, p[1]),
+            ['Подключение'])
+    else:
+        check('язык-вход', 'на карточке входа есть RU|EN', False)
+    s = shot.run('wait:100', 'язык-старт', '120x34', extra=['--demo-start'])
+    p = s.find('RU|EN', tol=0)
+    if p:
+        win('язык-старт-en', 'wait:100,click:%d:%d,wait:100' % (p[0] + 3, p[1]), ['RU|EN'], absent=['Подключение'],
+            extra=['--demo-start'])
+    else:
+        check('язык-старт', 'на стартовом экране есть RU|EN', False)
+
+
+def t_updates_duck():
+    """«Настройки > Обновления» (версия, «Проверять при запуске», «Проверить сейчас») и «Приглушать другие программы
+    во время звонка» в «Голос и видео» — на русском и английском (--lang). Окно обновления — когда будет --demo-update."""
+    Z = '120x50'
+    for lang, T in (('ru', {'sec': 'Обновления', 'ver': 'ТЕКУЩАЯ ВЕРСИЯ', 'auto': 'Проверять обновления при запуске',
+                            'now': 'Проверить сейчас', 'voice': 'Голос и видео', 'duck': 'Приглушать другие программы'}),
+                    ('en', {'sec': 'Updates', 'ver': 'CURRENT VERSION', 'auto': 'Check for updates at startup',
+                            'now': 'Check now', 'voice': 'Voice & Video', 'duck': 'Lower other apps'})):
+        os.environ['UITEST_LANG'] = lang
+        try:
+            g = 'click:' + at('wait:50', '(*)', dx=1, size=Z) + ',wait:50'
+            s = shot.run(g, 'обн-поиск-' + lang, Z)
+            if not s.has(T['sec']):
+                check('обн-%s' % lang, 'раздел «%s» в настройках' % T['sec'], False, s.dump()[:200])
+                continue
+            u = g + ',click:' + at(g, T['sec'], size=Z) + ',wait:100'
+            win('обн-раздел-' + lang, u, [T['ver'], 'Astra DS 0.', '[x] ' + T['auto'], T['now']], size=Z)
+            win('обн-снять-галочку-' + lang, u + ',click:' + at(u, T['auto'], size=Z) + ',wait:100', ['[ ] ' + T['auto']], size=Z)
+            win('обн-проверить-сейчас-' + lang, u + ',click:' + at(u, T['now'], dx=2, size=Z) + ',wait:500', [T['now']], size=Z)
+            v = g + ',click:' + at(g, T['voice'], size=Z) + ',wait:100'
+            sv = shot.run(v, 'обн-голос-' + lang, Z)
+            if sv.has(T['duck']):
+                win('приглушать-по-умолч-' + lang, v, ['[ ] ' + T['duck']], size=Z)
+                win('приглушать-вкл-' + lang, v + ',click:' + at(v, T['duck'], size=Z) + ',wait:100', ['[x] ' + T['duck']], size=Z)
+            else:
+                check('приглушать-' + lang, 'галочка «%s» в «%s»' % (T['duck'], T['voice']), False,
+                      ' | '.join(l.strip()[:60] for l in sv.text() if '[' in l)[:300])
+        finally:
+            os.environ.pop('UITEST_LANG', None)
+
+
+def t_update_window():
+    """Окно обновления (--demo-update=available|downloading|ready|failed|confirm; без сети), ru и en, 50x12."""
+    A = 'wait:300'
+    U = lambda st: ['--demo-update=' + st]
+    for lang, T in (('ru', {'av': 'Доступна версия 9.9.0', 'now': 'сейчас у вас 0.1.1', 'new': 'ЧТО НОВОГО', 'later': '( Позже',
+                            'upd': '( Обновить', 'rdy': 'Версия 9.9.0 загружена', 'rst': 'Перезапустить', 'mb': '/ 10.1 МБ',
+                            'dl': 'Загрузка версии 9.9.0'}),
+                    ('en', {'av': '9.9.0 is available', 'now': '0.1.1 now', 'new': 'NEW', 'later': '( Later',
+                            'upd': '( Update', 'rdy': '9.9.0 downloaded', 'rst': 'Restart', 'mb': '/ 10.1 MB',
+                            'dl': 'Downloading version 9.9.0'})):
+        os.environ['UITEST_LANG'] = lang
+        try:
+            win('ов-доступна-' + lang, A, [T['av'], T['now'], T['new'], T['later'], T['upd']], extra=U('available'), mouse=False)
+            win('ов-позже-' + lang, A + ',click:' + at(A, T['later'], dx=3, extra=U('available')) + ',wait:200', [], absent=[T['av']],
+                extra=U('available'))
+            win('ов-esc-' + lang, A + ',esc,wait:200', [], absent=[T['av']], extra=U('available'), mouse=False)
+            s = win('ов-обновить-' + lang, A + ',click:' + at(A, T['upd'], dx=3, extra=U('available')) + ',wait:800', [],
+                    extra=U('available'))
+            check('ов-обновить-' + lang, '«Обновить» в демо даёт отклик (переход к загрузке или сообщение)',
+                  not s.has(T['av']) or 'демо' in s.text()[-1] or 'demo' in s.text()[-1])
+            s = win('ов-загрузка-' + lang, A, [T['dl'], '####'], extra=U('downloading'), mouse=False)
+            check('ов-загрузка-ед-' + lang, 'единица в полосе по языку интерфейса (%s)' % T['mb'], s.has(T['mb'], tol=0))
+            win('ов-готово-' + lang, A, [T['rdy'], T['rst']], extra=U('ready'), mouse=False)
+            win('ов-перезапуск-' + lang, A + ',click:' + at(A, T['rst'], dx=2, extra=U('ready')) + ',wait:300', [], extra=U('ready'))
+        finally:
+            os.environ.pop('UITEST_LANG', None)
+    # ошибка: при запуске сразу в failed окна нет (показывается, если окно уже было открыто) — видна в «Обновлениях»
+    Z = '120x50'
+    g = 'click:' + at('wait:50', '(*)', dx=1, size=Z) + ',wait:50'
+    u = g + ',click:' + at(g, 'Обновления', size=Z) + ',wait:100'
+    win('ов-ошибка-в-настройках', A + ',' + u, ['хэш файла не совпал'], size=Z, extra=U('failed'))
+    # общая папка (--demo-update=confirm): предупреждение сразу; Enter НЕ соглашается, Esc — отмена к обычному окну
+    win('ов-общая-папка', A, ['открыт на запись другим', '( Отмена', 'Обновить всё равно'], extra=U('confirm'), mouse=False)
+    win('ов-общая-папка-enter', A + ',enter,wait:500', ['открыт на запись другим', 'Обновить всё равно'], extra=U('confirm'),
+        mouse=False)
+    win('ов-общая-папка-esc', A + ',esc,wait:300', ['( Позже', '( Обновить'], absent=['открыт на запись другим'],
+        extra=U('confirm'), mouse=False)
+    s = shot.run(A, 'ов-общая-папка-текст', '120x34', extra=U('confirm'))
+    check('ов-общая-папка-текст', 'предупреждение целиком (до «Обновить всё равно?») и без «—»',
+          s.has('всё равно?', tol=0) and '—' not in s.dump())
+    win('ов-доступна-50x12', A, ['9.9.0'], size='50x12', extra=U('available'), mouse=False)
+    win('ов-доступна-200x60', A, ['Доступна версия 9.9.0', 'Обновить'], size='200x60', extra=U('available'), mouse=False)
+
+
+ALL = [t_home, t_lang_switch, t_updates_duck, t_update_window, t_queue1, t_vstart, t_alert_links, t_bots_misc, t_packV, t_packA, t_look_voice_slow, t_viewer, t_select_threads, t_wave1, t_wave1b, t_wave2, t_txt, t_call, t_friends, t_newdm, t_dm, t_server, t_search, t_file, t_voice, t_settings, t_help, t_login, t_sizes, t_fine]
 
 
 def main():

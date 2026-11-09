@@ -108,5 +108,38 @@ if j:
 else:
     print('  [FAIL] контроль: кнопка «Присоединиться» не найдена')
     res.append(False)
+# Устройство ВЫВОДА: звуки звонка и событий в --demo не открывают его (аудиосессия процесса на выводе по умолчанию,
+# IAudioSessionManager2 — audio_check.render_session_pids); контроль — вход в голос открывает.
+import subprocess
+import audio_check as AC
+
+
+def opens_output(keys, secs):
+    sc = os.path.join(shot.OUT, 'snd_keys.txt')
+    with open(sc, 'w', encoding='utf-8') as f:
+        f.write('size:120x34,' + keys)
+    p = subprocess.Popen([shot.EXE, '--demo', '--shot=' + os.path.join(shot.OUT, 'snd.bmp'), '--shot-keys=@' + sc],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    seen, t = False, time.time()
+    while p.poll() is None and time.time() - t < secs + 15:
+        seen = seen or p.pid in AC.render_session_pids()
+        time.sleep(0.2)
+    p.wait()
+    return seen
+
+
+CH = S + ',click:' + W.at(S, 'general') + ',wait:150'
+INP = W.at(CH, 'Написать #general')
+DM = 'click:' + W.at('wait:50', 'Алиса', last=True) + ',wait:150'
+for name, keys in (('главная', 'wait:2000'),
+                   ('канал, отправка сообщения', CH + ',click:' + INP + ',t:привет,enter,wait:2000'),
+                   ('ЛС (звук сообщения)', DM + ',wait:2000'),
+                   ('Настройки > Голос и видео', gk + ',click:' + W.at(gk, 'Голос и видео') + ',wait:2000')):
+    ok = not opens_output(keys, 3)
+    res.append(ok)
+    print('  [%s] %s: устройство вывода не открывалось' % ('ok' if ok else 'FAIL', name))
+ok = opens_output(VC + ',click:' + W.at(VC, 'Присоединиться') + ',wait:2500', 3)
+res.append(ok)
+print('  [%s] контроль: вход в голос открыл устройство вывода' % ('ok' if ok else 'FAIL'))
 print('Итог: %d ok, %d FAIL' % (sum(res), len(res) - sum(res)))
 sys.exit(0 if all(res) else 1)

@@ -235,11 +235,11 @@ static bool parse_link(const char *link, char *err, size_t errn) {
     size_t full = strlen(link);
     size_t n = strcspn(link, "#");               /* #имя — подпись для людей, отбрасываем */
     if (n < 8 || strncmp(link, "vless://", 8)) {
-        if (n >= 8 && !strncmp(link, "VLESS://", 8)) {} else FAIL("это не ссылка vless:// (должна начинаться с vless://)");
+        if (n >= 8 && !strncmp(link, "VLESS://", 8)) {} else FAIL(ui_tr("это не ссылка vless:// (должна начинаться с vless://)"));
     }
-    if (n > LINK_MAX || full > LINK_MAX * 2) FAIL("ссылка слишком длинная (больше %d символов)", LINK_MAX);
+    if (n > LINK_MAX || full > LINK_MAX * 2) FAIL(ui_tr("ссылка слишком длинная (больше %d символов)"), LINK_MAX);
     for (size_t i = 0; i < n; i++)
-        if ((unsigned char)link[i] < 0x21 || (unsigned char)link[i] > 0x7E) FAIL("в ссылке недопустимый символ (позиция %zu)", i + 1);
+        if ((unsigned char)link[i] < 0x21 || (unsigned char)link[i] > 0x7E) FAIL(ui_tr("в ссылке недопустимый символ (позиция %zu)"), i + 1);
     VSec *k = K;
     /* сначала копия: link может указывать в саму область (загрузка из хранилища) */
     memmove(k->link, link, n);
@@ -248,8 +248,8 @@ static bool parse_link(const char *link, char *err, size_t errn) {
     const char *p = k->link + 8;
     /* UUID@ */
     const char *at = strchr(p, '@');
-    if (!at) FAIL("в ссылке нет UUID@сервер");
-    if (!valid_uuid(p, (size_t)(at - p))) FAIL("UUID в ссылке неверного формата (нужно 8-4-4-4-12 шестнадцатеричных цифр)");
+    if (!at) FAIL(ui_tr("в ссылке нет UUID@сервер"));
+    if (!valid_uuid(p, (size_t)(at - p))) FAIL(ui_tr("UUID в ссылке неверного формата (нужно 8-4-4-4-12 шестнадцатеричных цифр)"));
     for (int i = 0; i < 36; i++) k->uuid[i] = lower(p[i]);
     k->uuid[36] = 0;
     p = at + 1;
@@ -258,31 +258,31 @@ static bool parse_link(const char *link, char *err, size_t errn) {
     k->host_v6 = false;
     if (*p == '[') {
         const char *e = strchr(p, ']');
-        if (!e || (size_t)(e - p - 1) >= sizeof k->host) FAIL("адрес IPv6 в ссылке не закрыт ']'");
+        if (!e || (size_t)(e - p - 1) >= sizeof k->host) FAIL(ui_tr("адрес IPv6 в ссылке не закрыт ']'"));
         hl = (size_t)(e - p - 1);
         memcpy(k->host, p + 1, hl);
         k->host[hl] = 0;
         for (size_t i = 0; i < hl; i++) k->host[i] = lower(k->host[i]);
-        if (!valid_ipv6(k->host)) FAIL("неверный адрес IPv6 сервера");
+        if (!valid_ipv6(k->host)) FAIL(ui_tr("неверный адрес IPv6 сервера"));
         k->host_v6 = true;
         p = e + 1;
     } else {
         hl = strcspn(p, ":/?");
-        if (hl == 0 || hl >= sizeof k->host) FAIL("в ссылке нет адреса сервера");
+        if (hl == 0 || hl >= sizeof k->host) FAIL(ui_tr("в ссылке нет адреса сервера"));
         for (size_t i = 0; i < hl; i++) k->host[i] = lower(p[i]);
         k->host[hl] = 0;
-        if (!valid_ipv4(k->host) && !valid_domain(k->host)) FAIL("адрес сервера должен быть доменом, IPv4 или [IPv6]");
+        if (!valid_ipv4(k->host) && !valid_domain(k->host)) FAIL(ui_tr("адрес сервера должен быть доменом, IPv4 или [IPv6]"));
         p += hl;
     }
-    if (*p != ':') FAIL("в ссылке нет порта сервера");
+    if (*p != ':') FAIL(ui_tr("в ссылке нет порта сервера"));
     p++;
     long port = 0;
     int digits = 0;
     while (*p >= '0' && *p <= '9') { port = port * 10 + (*p - '0'); if (++digits > 5) break; p++; }
-    if (!digits || digits > 5 || port < 1 || port > 65535) FAIL("порт сервера должен быть числом 1-65535");
+    if (!digits || digits > 5 || port < 1 || port > 65535) FAIL(ui_tr("порт сервера должен быть числом 1-65535"));
     k->port = (int)port;
     if (*p == '/') p++;
-    if (*p && *p != '?') FAIL("после порта ожидаются параметры ?...");
+    if (*p && *p != '?') FAIL(ui_tr("после порта ожидаются параметры ?..."));
     if (*p == '?') p++;
     /* параметры */
     Param ps[32];
@@ -292,16 +292,16 @@ static bool parse_link(const char *link, char *err, size_t errn) {
         size_t len = strcspn(p, "&");
         if (len) {
             const char *eq = memchr(p, '=', len);
-            if (!eq) FAIL("параметр без значения: %.*s", (int)(len > 40 ? 40 : len), p);
-            if (np == 32) FAIL("слишком много параметров в ссылке");
+            if (!eq) FAIL(ui_tr("параметр без значения: %.*s"), (int)(len > 40 ? 40 : len), p);
+            if (np == 32) FAIL(ui_tr("слишком много параметров в ссылке"));
             size_t kn = (size_t)(eq - p);
             for (int i = 0; i < np; i++)
-                if (ps[i].kn == kn && !memcmp(ps[i].k, p, kn)) FAIL("параметр повторяется: %.*s", (int)(kn > 40 ? 40 : kn), p);
+                if (ps[i].kn == kn && !memcmp(ps[i].k, p, kn)) FAIL(ui_tr("параметр повторяется: %.*s"), (int)(kn > 40 ? 40 : kn), p);
             ps[np].k = p;
             ps[np].kn = kn;
             ps[np].v = k->q + qo;
             if (!pct_decode(eq + 1, len - kn - 1, k->q + qo, sizeof k->q - qo))
-                FAIL("неверная %%-кодировка в параметре %.*s", (int)(kn > 40 ? 40 : kn), p);
+                FAIL(ui_tr("неверная %%-кодировка в параметре %.*s"), (int)(kn > 40 ? 40 : kn), p);
             qo += strlen(k->q + qo) + 1;
             np++;
         }
@@ -316,7 +316,7 @@ static bool parse_link(const char *link, char *err, size_t errn) {
     for (int i = 0; i < np; i++) {
         size_t j = 0;
         for (; j < sizeof known / sizeof *known; j++) if (strlen(known[j]) == ps[i].kn && !memcmp(known[j], ps[i].k, ps[i].kn)) break;
-        if (j == sizeof known / sizeof *known) FAIL("неизвестный параметр ссылки: %.*s", (int)(ps[i].kn > 40 ? 40 : ps[i].kn), ps[i].k);
+        if (j == sizeof known / sizeof *known) FAIL(ui_tr("неизвестный параметр ссылки: %.*s"), (int)(ps[i].kn > 40 ? 40 : ps[i].kn), ps[i].k);
         val[j] = ps[i].v[0] ? ps[i].v : NULL;   /* пустое значение = параметра нет */
     }
     const char *type = val[0], *security = val[1], *encryption = val[2], *flow = val[3], *sni = val[4], *fp = val[5],
@@ -325,28 +325,28 @@ static bool parse_link(const char *link, char *err, size_t errn) {
     /* транспорт */
     if (!type || !strcmp(type, "tcp") || !strcmp(type, "raw")) k->net = NET_TCP;
     else if (!strcmp(type, "ws")) k->net = NET_WS;
-    else FAIL("транспорт type=%.24s не поддерживается (только tcp и ws)", type);
+    else FAIL(ui_tr("транспорт type=%.24s не поддерживается (только tcp и ws)"), type);
     /* защита */
     if (!security || !strcmp(security, "none"))
-        FAIL("security=none: VLESS без TLS передаёт всё открытым текстом - такая ссылка не принимается");
+        FAIL(ui_tr("security=none: VLESS без TLS передаёт всё открытым текстом - такая ссылка не принимается"));
     if (!strcmp(security, "reality")) k->sec = SEC_REALITY;
     else if (!strcmp(security, "tls")) k->sec = SEC_TLS;
-    else FAIL("security=%.24s не поддерживается (только reality и tls)", security);
-    if (k->sec == SEC_REALITY && k->net != NET_TCP) FAIL("Reality работает только с type=tcp");
+    else FAIL(ui_tr("security=%.24s не поддерживается (только reality и tls)"), security);
+    if (k->sec == SEC_REALITY && k->net != NET_TCP) FAIL(ui_tr("Reality работает только с type=tcp"));
     if ((insec && strcmp(insec, "0") && strcmp(insec, "false")) || (insec2 && strcmp(insec2, "0") && strcmp(insec2, "false")))
-        FAIL("allowInsecure=1 отключает проверку сертификата сервера - такая ссылка не принимается");
-    if (header && strcmp(header, "none")) FAIL("headerType=%.24s не поддерживается", header);
-    if (pe && strcmp(pe, "xudp") && strcmp(pe, "none")) FAIL("packetEncoding=%.24s не поддерживается", pe);
+        FAIL(ui_tr("allowInsecure=1 отключает проверку сертификата сервера - такая ссылка не принимается"));
+    if (header && strcmp(header, "none")) FAIL(ui_tr("headerType=%.24s не поддерживается"), header);
+    if (pe && strcmp(pe, "xudp") && strcmp(pe, "none")) FAIL(ui_tr("packetEncoding=%.24s не поддерживается"), pe);
     if (mlkem && strcmp(mlkem, "true") && strcmp(mlkem, "false") && strcmp(mlkem, "1") && strcmp(mlkem, "0"))
-        FAIL("support-x25519mlkem768 должен быть true или false");
+        FAIL(ui_tr("support-x25519mlkem768 должен быть true или false"));
     /* шифрование VLESS: none или собственное шифрование Xray (mlkem768x25519plus...) */
     if (!encryption) encryption = "none";
-    if (!charset(encryption, "._-") || !cpy(k->enc, sizeof k->enc, encryption)) FAIL("неверный параметр encryption");
+    if (!charset(encryption, "._-") || !cpy(k->enc, sizeof k->enc, encryption)) FAIL(ui_tr("неверный параметр encryption"));
     /* flow */
     k->flow[0] = 0;
     if (flow) {
-        if (strcmp(flow, "xtls-rprx-vision") && strcmp(flow, "xtls-rprx-vision-udp443")) FAIL("flow=%.32s не поддерживается", flow);
-        if (k->net != NET_TCP) FAIL("flow=xtls-rprx-vision работает только с type=tcp");
+        if (strcmp(flow, "xtls-rprx-vision") && strcmp(flow, "xtls-rprx-vision-udp443")) FAIL(ui_tr("flow=%.32s не поддерживается"), flow);
+        if (k->net != NET_TCP) FAIL(ui_tr("flow=xtls-rprx-vision работает только с type=tcp"));
         cpy(k->flow, sizeof k->flow, flow);
     }
     /* SNI */
@@ -354,44 +354,44 @@ static bool parse_link(const char *link, char *err, size_t errn) {
     if (sni) {
         char t[256];
         size_t sl = strlen(sni);
-        if (sl >= sizeof t) FAIL("sni слишком длинный");
+        if (sl >= sizeof t) FAIL(ui_tr("sni слишком длинный"));
         for (size_t i = 0; i <= sl; i++) t[i] = lower(sni[i]);
-        if (!valid_domain(t)) FAIL("sni должен быть доменным именем");
+        if (!valid_domain(t)) FAIL(ui_tr("sni должен быть доменным именем"));
         cpy(k->sni, sizeof k->sni, t);
-    } else if (k->sec == SEC_REALITY) FAIL("для Reality в ссылке нужен sni");
+    } else if (k->sec == SEC_REALITY) FAIL(ui_tr("для Reality в ссылке нужен sni"));
     else if (valid_domain(k->host)) cpy(k->sni, sizeof k->sni, k->host);
     /* отпечаток TLS-клиента */
     static const char *const fps[] = { "chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized" };
     if (!fp) fp = "chrome";
     size_t fi = 0;
     for (; fi < sizeof fps / sizeof *fps; fi++) if (!strcmp(fp, fps[fi])) break;
-    if (fi == sizeof fps / sizeof *fps) FAIL("fp=%.24s не поддерживается", fp);
+    if (fi == sizeof fps / sizeof *fps) FAIL(ui_tr("fp=%.24s не поддерживается"), fp);
     cpy(k->fp, sizeof k->fp, fp);
     /* Reality */
     k->pbk[0] = k->sid[0] = k->spx[0] = k->pqv[0] = 0;
     if (k->sec == SEC_REALITY) {
-        if (!pbk || strlen(pbk) != 43 || !charset(pbk, "-_")) FAIL("pbk (открытый ключ Reality) неверного формата");
+        if (!pbk || strlen(pbk) != 43 || !charset(pbk, "-_")) FAIL(ui_tr("pbk (открытый ключ Reality) неверного формата"));
         cpy(k->pbk, sizeof k->pbk, pbk);
         if (sid) {
             size_t sl = strlen(sid);
-            if (sl > 16 || sl % 2) FAIL("sid (shortId Reality) - до 16 шестнадцатеричных цифр, чётное число");
-            for (size_t i = 0; i < sl; i++) if (!is_hex(sid[i])) FAIL("sid (shortId Reality) - только шестнадцатеричные цифры");
+            if (sl > 16 || sl % 2) FAIL(ui_tr("sid (shortId Reality) - до 16 шестнадцатеричных цифр, чётное число"));
+            for (size_t i = 0; i < sl; i++) if (!is_hex(sid[i])) FAIL(ui_tr("sid (shortId Reality) - только шестнадцатеричные цифры"));
             cpy(k->sid, sizeof k->sid, sid);
         }
-        if (spx && (spx[0] != '/' || !printable(spx) || !cpy(k->spx, sizeof k->spx, spx))) FAIL("spx (spiderX) должен быть путём вида /...");
-        if (pqv && (!charset(pqv, "-_") || !cpy(k->pqv, sizeof k->pqv, pqv))) FAIL("pqv (ключ ML-DSA-65) неверного формата");
-    } else if (pbk || sid || spx || pqv) FAIL("pbk/sid/spx/pqv бывают только при security=reality");
+        if (spx && (spx[0] != '/' || !printable(spx) || !cpy(k->spx, sizeof k->spx, spx))) FAIL(ui_tr("spx (spiderX) должен быть путём вида /..."));
+        if (pqv && (!charset(pqv, "-_") || !cpy(k->pqv, sizeof k->pqv, pqv))) FAIL(ui_tr("pqv (ключ ML-DSA-65) неверного формата"));
+    } else if (pbk || sid || spx || pqv) FAIL(ui_tr("pbk/sid/spx/pqv бывают только при security=reality"));
     /* ALPN (только TLS; для Reality Xray его не использует) */
     k->alpn[0] = 0;
     if (alpn && k->sec == SEC_TLS) {
-        if (strlen(alpn) >= sizeof k->alpn || !charset(alpn, ",/.")) FAIL("alpn неверного формата");
+        if (strlen(alpn) >= sizeof k->alpn || !charset(alpn, ",/.")) FAIL(ui_tr("alpn неверного формата"));
         char t[64];
         cpy(t, sizeof t, alpn);
         for (char *s = t, *e; *s; s = e + (*e != 0)) {
             e = s + strcspn(s, ",");
             size_t l = (size_t)(e - s);
             if (!((l == 2 && !memcmp(s, "h2", 2)) || (l == 8 && !memcmp(s, "http/1.1", 8))))
-                FAIL("alpn: допустимы только h2 и http/1.1");
+                FAIL(ui_tr("alpn: допустимы только h2 и http/1.1"));
             if (!*e) break;
         }
         cpy(k->alpn, sizeof k->alpn, alpn);
@@ -402,15 +402,15 @@ static bool parse_link(const char *link, char *err, size_t errn) {
         if (host) {
             char t[256];
             size_t hl2 = strlen(host);
-            if (hl2 >= sizeof t) FAIL("host (WebSocket) слишком длинный");
+            if (hl2 >= sizeof t) FAIL(ui_tr("host (WebSocket) слишком длинный"));
             for (size_t i = 0; i <= hl2; i++) t[i] = lower(host[i]);
-            if (!valid_domain(t)) FAIL("host (WebSocket) должен быть доменным именем");
+            if (!valid_domain(t)) FAIL(ui_tr("host (WebSocket) должен быть доменным именем"));
             cpy(k->ws_host, sizeof k->ws_host, t);
         }
         if (path && (path[0] != '/' || !printable(path) || !cpy(k->ws_path, sizeof k->ws_path, path)))
-            FAIL("path (WebSocket) должен быть путём вида /...");
+            FAIL(ui_tr("path (WebSocket) должен быть путём вида /..."));
     } else if ((host && strcmp(host, k->host)) || (path && strcmp(path, "/"))) {
-        FAIL("host/path бывают только при type=ws");
+        FAIL(ui_tr("host/path бывают только при type=ws"));
     }
     plat_wipe(k->q, sizeof k->q);
     return true;
@@ -491,7 +491,7 @@ static void xray_kill(void) {
 static bool xray_start(void) {
     xray_kill();
     V.fatal = true;
-    if (!V.have) { set_err("ссылка VLESS не задана"); return false; }
+    if (!V.have) { set_err(ui_tr("ссылка VLESS не задана")); return false; }
     bool ok = false;
     V.fatal = false;
     /* Порт выбирает система (свободный на 127.0.0.1); если его успели занять — другой. */
@@ -499,14 +499,14 @@ static bool xray_start(void) {
         V.port = tcp_free_port();
         hex_rand(K->user, 16);
         hex_rand(K->pass, 16);
-        if (V.port <= 0 || !K->user[0] || !K->pass[0]) { set_err("нет свободного порта или случайных чисел"); break; }
+        if (V.port <= 0 || !K->user[0] || !K->pass[0]) { set_err(ui_tr("нет свободного порта или случайных чисел")); break; }
         Buf cfg = {0};
-        if (!build_config(&cfg)) { buf_wipe(&cfg); set_err("недопустимый символ в параметрах ссылки"); break; }
+        if (!build_config(&cfg)) { buf_wipe(&cfg); set_err(ui_tr("недопустимый символ в параметрах ссылки")); break; }
         int rc = XliteStart(cfg.p, (int)cfg.len);
         buf_wipe(&cfg);
-        if (rc == 1) { V.fatal = true; set_err("ссылка не подходит туннелю (параметры Reality/TLS?)"); break; }
-        if (rc == 2) { set_err("туннель не создался (адрес сервера не разрешился в DNS?)"); break; }
-        if (rc == 3) { set_err("туннель не открыл порт 127.0.0.1:%d", V.port); continue; }
+        if (rc == 1) { V.fatal = true; set_err(ui_tr("ссылка не подходит туннелю (параметры Reality/TLS?)")); break; }
+        if (rc == 2) { set_err(ui_tr("туннель не создался (адрес сервера не разрешился в DNS?)")); break; }
+        if (rc == 3) { set_err(ui_tr("туннель не открыл порт 127.0.0.1:%d"), V.port); continue; }
         V.running = true;
         i64 deadline = now_ms() + 2000;
         while (now_ms() < deadline) {
@@ -515,7 +515,7 @@ static bool xray_start(void) {
             if (r < 0) break;
             plat_sleep_ms(10);
         }
-        if (!ok) { xray_kill(); set_err("туннель не отвечает на 127.0.0.1"); }
+        if (!ok) { xray_kill(); set_err(ui_tr("туннель не отвечает на 127.0.0.1")); }
     }
     if (!ok) { xray_kill(); return false; }
     snprintf(K->proxy, sizeof K->proxy, "socks5h://%s:%s@127.0.0.1:%d", K->user, K->pass, V.port);
@@ -580,7 +580,7 @@ static void probe_start(void) {
     P.m = curl_multi_init();
     P.ok = false;
     P.fail[0] = 0;
-    if (!P.m || !probe_add_get()) { snprintf(P.fail, sizeof P.fail, "нет памяти для проверки"); probe_free(); return; }
+    if (!P.m || !probe_add_get()) { snprintf(P.fail, sizeof P.fail, ui_tr("нет памяти для проверки")); probe_free(); return; }
     P.stage = PR_GET1;
 }
 
@@ -617,15 +617,15 @@ static void probe_step(void) {
                 return;
             }
             bool diag = false;
-            if (rc == CURLE_OK) snprintf(P.fail, sizeof P.fail, "Discord недоступен через туннель (HTTP %ld)", status);
-            else if (rc == CURLE_COULDNT_CONNECT) snprintf(P.fail, sizeof P.fail, "туннель не принимает соединения");
+            if (rc == CURLE_OK) snprintf(P.fail, sizeof P.fail, ui_tr("Discord недоступен через туннель (HTTP %ld)"), status);
+            else if (rc == CURLE_COULDNT_CONNECT) snprintf(P.fail, sizeof P.fail, ui_tr("туннель не принимает соединения"));
             else if (rc == CURLE_PEER_FAILED_VERIFICATION)
-                snprintf(P.fail, sizeof P.fail, "Discord недоступен через туннель: сертификат Discord не прошёл проверку (подмена на пути)");
+                snprintf(P.fail, sizeof P.fail, ui_tr("Discord недоступен через туннель: сертификат Discord не прошёл проверку (подмена на пути)"));
             else if (rc == CURLE_OPERATION_TIMEDOUT) {
-                snprintf(P.fail, sizeof P.fail, "сервер VLESS не отвечает (таймаут 10 с)");
+                snprintf(P.fail, sizeof P.fail, ui_tr("сервер VLESS не отвечает (таймаут 10 с)"));
                 diag = true;
             } else {
-                snprintf(P.fail, sizeof P.fail, "рукопожатие с сервером VLESS не прошло (ошибка curl %d)", (int)rc);
+                snprintf(P.fail, sizeof P.fail, ui_tr("рукопожатие с сервером VLESS не прошло (ошибка curl %d)"), (int)rc);
                 diag = true;
             }
             curl_easy_cleanup(P.e);
@@ -644,10 +644,10 @@ static void probe_step(void) {
         }
         if (P.stage == PR_DIAG) {
             if (rc == CURLE_OK)
-                snprintf(P.fail, sizeof P.fail, "рукопожатие VLESS не прошло: сервер %.64s:%d доступен, но не принял ключ, UUID или SNI либо не пускает к Discord",
+                snprintf(P.fail, sizeof P.fail, ui_tr("рукопожатие VLESS не прошло: сервер %.64s:%d доступен, но не принял ключ, UUID или SNI либо не пускает к Discord"),
                          K->host_v6 ? "[IPv6]" : K->host, K->port);
             else
-                snprintf(P.fail, sizeof P.fail, "сервер VLESS %.64s:%d не отвечает (нет TCP-соединения)", K->host_v6 ? "[IPv6]" : K->host, K->port);
+                snprintf(P.fail, sizeof P.fail, ui_tr("сервер VLESS %.64s:%d не отвечает (нет TCP-соединения)"), K->host_v6 ? "[IPv6]" : K->host, K->port);
             probe_free();
             probe_done(false);
             return;
@@ -673,7 +673,7 @@ static void probe_done(bool ok) {
         V.err[0] = 0;
     } else {
         V.st = VL_DOWN;
-        set_err("%s", P.fail[0] ? P.fail : "туннель не работает");
+        set_err("%s", P.fail[0] ? P.fail : ui_tr("туннель не работает"));
         schedule_retry();
     }
     wake_all();
@@ -703,7 +703,7 @@ static void wait_probe(void) {
         curl_multi_poll(P.m, NULL, 0, 100, NULL);
         if (false) {
             probe_free();
-            snprintf(P.fail, sizeof P.fail, "туннель остановился во время проверки");
+            snprintf(P.fail, sizeof P.fail, ui_tr("туннель остановился во время проверки"));
             probe_done(false);
             return;
         }
@@ -735,7 +735,7 @@ void vless_report_failure(const char *what) {
     if (!what) { V.fails = 0; return; }
     if (++V.fails < FAILS_TO_DOWN) return;
     V.st = VL_DOWN;
-    set_err("через туннель нет связи (%s)", what);
+    set_err(ui_tr("через туннель нет связи (%s)"), what);
     V.backoff = 0;
     V.next_try = now_ms() + 3000;
     wake_all();
@@ -744,7 +744,7 @@ void vless_report_failure(const char *what) {
 /* Выбор пользователя «повторить»: синхронно, как vless_set_link (до ~15 с). Автоматические попытки
  * в VL_DOWN идут без блокировки — из vless_service. */
 bool vless_restart(void) {
-    if (!area() || !V.have) { set_err("ссылка VLESS не задана"); return false; }
+    if (!area() || !V.have) { set_err(ui_tr("ссылка VLESS не задана")); return false; }
     V.backoff = 0;
     V.deaths = 0;
     if (!restart_async()) return false;
@@ -757,7 +757,7 @@ long vless_xray_rss_kb(void) { return -1; }      /* туннель внутри 
 bool vless_set_link(const char *link, char *err, size_t errn, int *latency_ms) {
     if (errn) err[0] = 0;
     if (latency_ms) *latency_ms = -1;
-    if (!area()) { snprintf(err, errn, "нет защищённой памяти"); return false; }
+    if (!area()) { snprintf(err, errn, ui_tr("нет защищённой памяти")); return false; }
     probe_free();
     xray_kill();
     V.have = false;
@@ -781,7 +781,7 @@ bool vless_set_link(const char *link, char *err, size_t errn, int *latency_ms) {
     }
     if (latency_ms) *latency_ms = V.latency;
     if (!O.no_save && !keyring_save("vless", K->link, strlen(K->link)))
-        snprintf(err, errn, "ссылка работает, но хранилище секретов недоступно: не сохранена");
+        snprintf(err, errn, ui_tr("ссылка работает, но хранилище секретов недоступно: не сохранена"));
     return true;
 }
 
@@ -793,7 +793,7 @@ bool vless_load_saved(void) {
     int n = keyring_load("vless", buf, cap < LINK_MAX + 1 ? cap : LINK_MAX + 1);
     if (n == -2) {                              /* ревью 8 М3: хранилище не прочиталось — VLESS «не работает», а не «нет»: */
         plat_wipe(buf, cap);                    /* иначе клиент молча пошёл бы напрямую */
-        set_err("хранилище секретов не прочиталось: ссылка VLESS недоступна");
+        set_err(ui_tr("хранилище секретов не прочиталось: ссылка VLESS недоступна"));
         V.st = VL_DOWN;
         return false;
     }
@@ -805,7 +805,7 @@ bool vless_load_saved(void) {
     O.no_save = saved;
     plat_wipe(buf, cap);
     if (!ok) {
-        if (!V.have) set_err("сохранённая ссылка VLESS повреждена: %s", err);
+        if (!V.have) set_err(ui_tr("сохранённая ссылка VLESS повреждена: %s"), err);
         V.st = VL_DOWN;
     }
     return ok;
@@ -848,8 +848,8 @@ void vless_service(void) {
         if (now - V.deaths_since > 300000) { V.deaths_since = now; V.deaths = 0; }
         V.deaths++;
         V.st = VL_DOWN;
-        if (V.deaths > 5) { set_err("туннель падает раз за разом - нужен выбор: повторить, другая ссылка или без VLESS"); V.next_try = 0; }
-        else { set_err("туннель неожиданно остановился; перезапуск..."); V.next_try = now + 1000; }
+        if (V.deaths > 5) { set_err(ui_tr("туннель падает раз за разом - нужен выбор: повторить, другая ссылка или без VLESS")); V.next_try = 0; }
+        else { set_err(ui_tr("туннель неожиданно остановился; перезапуск...")); V.next_try = now + 1000; }
         wake_all();
     }
     if (P.stage != PR_IDLE) probe_step();

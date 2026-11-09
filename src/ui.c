@@ -10,8 +10,39 @@
 #include "plat.h"
 #include "img.h"
 #include "login.h"
+#include "ui_en.h"
+#ifdef ASTRA_VIDEO
+#include "share.h"
+static ShareState SHS;                           /* снимок состояния трансляции (ui_tick) */
+static bool sh_prev_streamer, sh_running;
+static u64 sh_ch;
+#endif
 
 bool g_quit;
+/* Язык интерфейса: строки пишутся по-русски, при английском tr() находит пару в TR_EN (двоичный поиск по
+ * отсортированной таблице в .rodata; памяти не занимает). Нет пары — показывается русская строка. */
+bool g_lang_en;
+static const char *tr(const char *ru) __attribute__((format_arg(1)));   /* форматы в tr("...") проверяются как литералы */
+static const char *tr(const char *ru) {
+    if (!g_lang_en || !ru) return ru;
+    int lo = 0, hi = (int)(sizeof TR_EN / sizeof *TR_EN) - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2, c = strcmp(ru, TR_EN[mid].ru);
+        if (!c) return TR_EN[mid].en;
+        if (c < 0) hi = mid - 1; else lo = mid + 1;
+    }
+    return ru;
+}
+#define TR(s) tr(s)
+/* «Astra DS Video» — отдельная сборка (build.sh VIDEO=1 -> -DASTRA_VIDEO): демонстрация экрана и камера. */
+#ifdef ASTRA_VIDEO
+#define APP_NAME "Astra DS Video"
+#else
+#define APP_NAME "Astra DS"
+#endif
+/* Для store.c/net.c/main.c/login.c: та же таблица (объявление — в mc.h у разработчика). */
+const char *ui_tr(const char *ru) __attribute__((format_arg(1)));
+const char *ui_tr(const char *ru) { return tr(ru); }
 
 enum { F_GUILDS, F_CHANNELS, F_MESSAGES, F_INPUT };
 enum { M_NORMAL, M_REPLY, M_EDIT, M_REACT, M_DELETE,
@@ -75,7 +106,7 @@ enum {
     B_PING, B_PINS, B_INBOX, B_PRESENT, B_STATUS, B_CARD_BLOCK, B_CARD_ADD, B_NEWMSG,
     B_PINS_MORE, B_INBOX_T0, B_INBOX_T1, B_ACK_ALL, B_EP_X, B_EMOJI, B_CAP_GO, B_CAP_NO,
     B_ADDSRV, B_GMENU, B_GINVITE, B_ADDFRIEND, B_TXT_EXP, B_TXT_DL, B_STARTASK, B_RV_X, B_EPH_HIDE, B_EMBEDS, B_MRETRY, B_MDISCARD,
-    B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS,
+    B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS,
     B_SP_PREV, B_SP_NEXT
 };
 enum { MI_REPLY = 1, MI_EDIT, MI_DELETE, MI_REACT, MI_COPY,
@@ -87,7 +118,7 @@ enum { MI_REPLY = 1, MI_EDIT, MI_DELETE, MI_REACT, MI_COPY,
        MI_C_EDIT, MI_C_PERMS, MI_C_INV, MI_C_DEL, MI_C_ID,    /* меню канала */
        MI_FORWARD, MI_REACTS,                                /* пакет А: переслать, кто поставил реакцию */
        MI_G_MUTE, MI_G_NOTIFY, MI_C_MUTE, MI_C_NOTIFY,       /* заглушить, уровень уведомлений */
-       MI_THREAD, MI_T_JOIN, MI_GDM_ADD, MI_GDM_LEAVE, MI_FOCUS30, MI_FOCUS60, MI_FOCUS120, MI_FOCUSOFF, MI_C_VSTATUS, MI_C_ARCH, MI_T_RENAME, MI_T_ARCH, MI_T_LOCK, MI_T_MEMB, MI_GDM_RENAME,                                 /* пакет Б: создать ветку; вступить/покинуть ветку */
+       MI_THREAD, MI_T_JOIN, MI_GDM_ADD, MI_GDM_LEAVE, MI_FOCUS30, MI_FOCUS60, MI_FOCUS120, MI_FOCUSOFF, MI_C_VSTATUS, MI_STATUS_SET, MI_C_ARCH, MI_T_RENAME, MI_T_ARCH, MI_T_LOCK, MI_T_MEMB, MI_GDM_RENAME,                                 /* пакет Б: создать ветку; вступить/покинуть ветку */
        MI_MRETRY, MI_MDISCARD };                             /* неотправленное: повторить, отменить */
 enum { MENU_MSG = 1, MENU_SET, MENU_FRIEND, MENU_STATUS, MENU_GUILD, MENU_CHAN };
 #define MENU_LEFT(k) ((k) == MENU_SET || (k) == MENU_STATUS || (k) == MENU_GUILD || (k) == MENU_CHAN)
@@ -384,7 +415,7 @@ static void notice_http(const char *what, Resp *r) {
     cJSON *j = r->body.p ? json_parse(r->body.p, r->body.len) : NULL;
     if (j) m = jstr(j, "message");
     char *safe = san(m ? m : "", false);
-    if (r->status == 0) ui_notice("%s: нет связи", what);
+    if (r->status == 0) ui_notice(TR("%s: нет связи"), what);
     else if (*safe) ui_notice("%s: %s", what, safe);
     else ui_notice("%s (HTTP %ld)", what, r->status);
     free(safe);
@@ -403,14 +434,14 @@ static void on_messages(Resp *r, void *ctx) {
         cJSON *e = r->body.p ? json_parse(r->body.p, r->body.len) : NULL;
         char *m = san(jstr(e, "message") ? jstr(e, "message") : "", false);
         json_done();
-        if (r->status == 0) snprintf(U.hist_state, sizeof U.hist_state, "история не загрузилась: нет связи");
-        else snprintf(U.hist_state, sizeof U.hist_state, "история не загрузилась: HTTP %ld %s", r->status, m);
+        if (r->status == 0) snprintf(U.hist_state, sizeof U.hist_state, TR("история не загрузилась: нет связи"));
+        else snprintf(U.hist_state, sizeof U.hist_state, TR("история не загрузилась: HTTP %ld %s"), r->status, m);
         free(m);
         return;
     }
     cJSON *j = json_parse(r->body.p, r->body.len);
     if (cJSON_IsArray(j)) store_set_messages(j, older);
-    else snprintf(U.hist_state, sizeof U.hist_state, "история: неожиданный ответ");
+    else snprintf(U.hist_state, sizeof U.hist_state, TR("история: неожиданный ответ"));
     json_done();
     if (!older && S.nmsgs == 0 && !U.hist_state[0]) snprintf(U.hist_state, sizeof U.hist_state, "в канале пока нет сообщений");
     if (!older) { U.msg_scroll = 0; U.sel_msg = -1; }
@@ -516,7 +547,7 @@ static void open_channel(u64 id) {
 
 static void on_sent(Resp *r, void *ctx) {
     (void)ctx;
-    if (r->status >= 300 || r->status == 0) notice_http("не отправлено", r);
+    if (r->status >= 300 || r->status == 0) notice_http(TR("не отправлено"), r);
 }
 static int user_by_name(const char *p, size_t maxn, size_t *mlen);
 static int chan_by_name(const char *p, size_t maxn, size_t *mlen);
@@ -553,9 +584,9 @@ static void wire_text(const char *s, Buf *out) {
 /* №127: «8 с», «2 мин 05 с», «1 ч 10 мин» */
 static void wait_len(i64 s, char *o, size_t n) {
     if (s < 0) s = 0;
-    if (s >= 3600) snprintf(o, n, "%lld ч %lld мин", (long long)(s / 3600), (long long)(s / 60 % 60));
-    else if (s >= 60) snprintf(o, n, "%lld мин %02lld с", (long long)(s / 60), (long long)(s % 60));
-    else snprintf(o, n, "%lld с", (long long)s);
+    if (s >= 3600) snprintf(o, n, TR("%lld ч %lld мин"), (long long)(s / 3600), (long long)(s / 60 % 60));
+    else if (s >= 60) snprintf(o, n, TR("%lld мин %02lld с"), (long long)(s / 60), (long long)(s % 60));
+    else snprintf(o, n, TR("%lld с"), (long long)s);
 }
 /* Подпись в рамке поля ввода: «Медленный режим: 8 с» или «Тайм-аут на сервере до 15:42» (до 10.11 15:42 — не сегодня). */
 static void send_wait_text(i64 until, bool timeout, char *o, size_t n) {
@@ -563,7 +594,7 @@ static void send_wait_text(i64 until, bool timeout, char *o, size_t n) {
     if (!timeout) {
         char w[48];
         wait_len(until - now, w, sizeof w);
-        snprintf(o, n, "Медленный режим: %s", w);
+        snprintf(o, n, TR("Медленный режим: %s"), w);
         return;
     }
     time_t tu = (time_t)until, tn = (time_t)now;
@@ -573,11 +604,11 @@ static void send_wait_text(i64 until, bool timeout, char *o, size_t n) {
 #else
     localtime_r(&tu, &a); localtime_r(&tn, &b);
 #endif
-    if (a.tm_yday == b.tm_yday && a.tm_year == b.tm_year) snprintf(o, n, "Тайм-аут на сервере до %02d:%02d", a.tm_hour, a.tm_min);
-    else snprintf(o, n, "Тайм-аут на сервере до %02d.%02d %02d:%02d", a.tm_mday, a.tm_mon + 1, a.tm_hour, a.tm_min);
+    if (a.tm_yday == b.tm_yday && a.tm_year == b.tm_year) snprintf(o, n, TR("Тайм-аут на сервере до %02d:%02d"), a.tm_hour, a.tm_min);
+    else snprintf(o, n, TR("Тайм-аут на сервере до %02d.%02d %02d:%02d"), a.tm_mday, a.tm_mon + 1, a.tm_hour, a.tm_min);
 }
 static void send_message(const char *text0) {
-    if (!S.open_ch) { ui_notice("сначала откройте канал"); return; }
+    if (!S.open_ch) { ui_notice(TR("сначала откройте канал")); return; }
     /* «@silent текст» — тихое сообщение (без уведомлений), как в Discord */
     bool silent = !strncmp(text0, "@silent ", 8);
     if (silent) text0 += 8;
@@ -623,7 +654,7 @@ static void send_message(const char *text0) {
     buf_free(&wt);
 }
 static void delete_message(u64 id) {
-    if (O.demo) { ui_notice("в демо-режиме удаление не отправляется"); return; }
+    if (O.demo) { ui_notice(TR("в демо-режиме удаление не отправляется")); return; }
     char path[96];
     snprintf(path, sizeof path, "/channels/%llu/messages/%llu", (unsigned long long)S.open_ch, (unsigned long long)id);
     http_async("DELETE", path, NULL, on_sent, NULL);
@@ -643,14 +674,14 @@ static void react(u64 msg_id, const char *emoji_in) {
     Message *m = msg_find(msg_id, NULL);
     if (!m) return;
 #ifdef MC_PACKA
-    if (m->state != MS_SENT) { ui_notice("сообщение ещё не отправлено"); return; }   /* id = nonce: сервер его не знает */
+    if (m->state != MS_SENT) { ui_notice(TR("сообщение ещё не отправлено")); return; }   /* id = nonce: сервер его не знает */
 #endif
     char emoji[160];
     snprintf(emoji, sizeof emoji, "%s", emoji_in);
     /* номер существующей реакции */
     if (emoji[0] >= '1' && emoji[0] <= '9' && !emoji[1]) {
         int k = emoji[0] - '1';
-        if (k >= m->nreacts) { ui_notice("нет реакции с номером %d", k + 1); return; }
+        if (k >= m->nreacts) { ui_notice(TR("нет реакции с номером %d"), k + 1); return; }
         snprintf(emoji, sizeof emoji, "%s", m->reacts[k].emoji);
     } else if (emoji[0] == ':' && emoji[strlen(emoji) - 1] == ':' && strlen(emoji) > 2) {
         emoji[strlen(emoji) - 1] = 0;
@@ -664,7 +695,7 @@ static void react(u64 msg_id, const char *emoji_in) {
             size_t nl = strlen(name);
             if (e[0] == ':' && !strncmp(e + 1, name, nl) && e[nl + 1] == ':') { snprintf(tmp, sizeof tmp, "%s", e); hit = tmp; }
         }
-        if (!hit) { ui_notice("неизвестный код :%s: - вставьте эмодзи напрямую", name); return; }
+        if (!hit) { ui_notice(TR("неизвестный код :%s: - вставьте эмодзи напрямую"), name); return; }
         snprintf(emoji, sizeof emoji, "%s", hit);
     }
     bool mine = false;
@@ -696,7 +727,7 @@ static void in_insert(u32 cp) {
     if ((cp < 0x20 && cp != '\n') || cp == 0x7F || (cp >= 0x80 && cp <= 0x9F) ||
         (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF)
         return;
-    if (in_chars() >= 2000) { ui_notice("не больше 2000 символов"); return; }
+    if (in_chars() >= 2000) { ui_notice(TR("не больше 2000 символов")); return; }
     char e[4];
     int n = utf8_enc(cp, e);
     /* Рост буфера — с затиранием старого блока: в строке ввода бывает ссылка VLESS (секрет),
@@ -1261,7 +1292,7 @@ static void hover_paint(void) {
     }
     /* подсказка словом над значком (или под ним у верхнего края) */
     if (U.hov.tip && U.hov.tip < sizeof TIPS / sizeof *TIPS) {
-        const char *t = TIPS[U.hov.tip];
+        const char *t = tr(TIPS[U.hov.tip]);
         char dbuf[96];
         if (U.hov.tip == T_DATE && U.hov.arg >= 0 && U.hov.arg < S.nmsgs) { date_full(S.msgs[U.hov.arg].ts, dbuf, sizeof dbuf); t = dbuf; }
         int w = vw(t) + 4, y = U.hov.y > 0 ? U.hov.y - 1 : U.hov.y + U.hov.h;
@@ -1684,7 +1715,7 @@ static void sel_put(Buf *b, const Message *m, size_t a, size_t e) {
         size_t le = ls;
         while (s[le] && s[le] != '\n') le++;
         size_t pe = le < e ? le : e;
-        if (s[l0] == ATT_MARK && !strncmp(s + l0 + 1 + strlen("[файл: "), "SPOILER_", 8)) buf_puts(b, "[спойлер]");
+        if (s[l0] == ATT_MARK && !strncmp(s + l0 + 1 + strlen(TR("[файл: ")), "SPOILER_", 8)) buf_puts(b, TR("[спойлер]"));
         else {
             MdLine ln;
             MdSpan sp[64];
@@ -1694,7 +1725,7 @@ static void sel_put(Buf *b, const Message *m, size_t a, size_t e) {
                 int si = -1;
                 for (int i = 0; i < k; i++) if (p - l0 >= sp[i].off && p - l0 < (size_t)sp[i].off + sp[i].len) { si = i; break; }
                 bool spl = si >= 0 && (sp[si].attr & MD_SPOIL);
-                if (spl) { if (!in) buf_puts(b, "[спойлер]"); in = true; continue; }
+                if (spl) { if (!in) buf_puts(b, TR("[спойлер]")); in = true; continue; }
                 in = false;
                 if (si < 0 && s[p] == '|') continue;     /* маркеры || спойлера */
                 buf_put(b, s + p, 1);
@@ -1717,7 +1748,7 @@ static void sel_copy(void) {
         if (mi > SEL.lo_mi) buf_puts(&b, "\n");
         if (e > a) sel_put(&b, &S.msgs[mi], a, e);
     }
-    if (b.p && b.len) { copy_text(b.p); ui_notice("выделенный текст скопирован"); }
+    if (b.p && b.len) { copy_text(b.p); ui_notice(TR("выделенный текст скопирован")); }
     buf_free(&b);
 }
 /* Строка блока кода: как g_textn, плюс карта клеток и подсветка выделения. */
@@ -1761,7 +1792,7 @@ static void code_copy(int k) {
     Buf b = {0};
     if (want >= 0 && md_code_block(s, want, &b) && b.p && b.len) {
         copy_text(b.p);
-        ui_notice("код скопирован");
+        ui_notice(TR("код скопирован"));
     }
     buf_free(&b);
 }
@@ -1800,8 +1831,8 @@ static void draw_avbig(int W, int H) {
     if (need > AVB.cap) { free(AVB.buf); AVB.buf = xmalloc(need * sizeof *AVB.buf); AVB.cap = need; }
     int ax = (W - aw) / 2, ay = 2 + (H - 4 - ah) / 2;
     if (pic_avatar(AVB.uid, aw, ah, false, C_IVBG, AVB.buf)) for (int r = 0; r < ah; r++) g_imgrow(ax, ay + r, aw, r, AVB.buf);
-    else g_ctext(0, H / 2, W, avatar_hold(AVB.uid) ? "аватар скрыт, пока запрос не принят" : "загрузка...", C_MUTED, 0);
-    g_ctext(0, H - 1, W, "Esc - закрыть", C_MUTED, 0);
+    else g_ctext(0, H / 2, W, avatar_hold(AVB.uid) ? TR("аватар скрыт, пока запрос не принят") : TR("загрузка..."), C_MUTED, 0);
+    g_ctext(0, H - 1, W, TR("Esc - закрыть"), C_MUTED, 0);
 }
 static void iv_close(void) {
     IV.on = false;
@@ -1822,7 +1853,7 @@ static int iv_list(int *cur, int target, int *tmi, int *toff) {
             size_t le = at;
             while (le < len && s[le] != '\n') le++;
             int url = image_line(s, at, le);
-            bool sp = url >= 0 && !strncmp(s + at + 1 + strlen("[файл: "), "SPOILER_", 8) && !spoil_open(S.msgs[mi].id);
+            bool sp = url >= 0 && !strncmp(s + at + 1 + strlen(TR("[файл: ")), "SPOILER_", 8) && !spoil_open(S.msgs[mi].id);
             if (url >= 0 && !sp) {
                 if (S.msgs[mi].id == IV.msg && url == IV.off) *cur = n;
                 if (n == target) { *tmi = mi; *toff = url; }
@@ -1856,7 +1887,7 @@ static void iv_step(int d) {
 static void iv_name(const char *s, int off, char *out, size_t n) {
     size_t a = (size_t)off;
     while (a > 0 && s[a - 1] != '\n') a--;
-    a += 1 + strlen("[файл: ");
+    a += 1 + strlen(TR("[файл: "));
     const char *rb = strchr(s + a, ']');
     size_t l = rb ? (size_t)(rb - (s + a)) : 0;
     if (l >= n) l = n - 1;
@@ -1878,7 +1909,7 @@ static void draw_iv(int W, int H) {
     char *sn = san(nm, false);
     int u = g_texte(2, 0, sn, W - 24, C_WHITE, AT_B);
     free(sn);
-    snprintf(t, sizeof t, "  %d из %d", cur + 1, n);
+    snprintf(t, sizeof t, TR("  %d из %d"), cur + 1, n);
     g_text(2 + u, 0, t, W - 8 - u, C_MUTED, 0);
     g_text(W - 4, 0, " x ", 3, C_TEXT, AT_B);
     hit_add(W - 4, 0, 3, 1, A_BTN, B_IV_X, 0, HV_RED);
@@ -1903,7 +1934,7 @@ static void draw_iv(int W, int H) {
             int ix = ax + (aw - ow) / 2, iy = ay + (ah - oh) / 2;
             for (int r = 0; r < oh; r++) g_imgrow(ix, iy + r, ow, r, pc);
             hit_add(ix, iy, ow, oh, A_BLOCK, 0, 0, 0);   /* по самой картинке — не закрывать */
-        } else g_ctext(0, ay + ah / 2, W, img_hold() ? "картинки скрыты, пока запрос не принят" : url[0] ? "загрузка..." : "картинка недоступна", C_MUTED, 0);
+        } else g_ctext(0, ay + ah / 2, W, img_hold() ? TR("картинки скрыты, пока запрос не принят") : url[0] ? TR("загрузка...") : TR("картинка недоступна"), C_MUTED, 0);
     }
     /* соседние картинки канала: круглые кнопки по бокам */
     int my = H / 2 - 1;
@@ -1915,7 +1946,7 @@ static void draw_iv(int W, int H) {
         for (int r = 0; r < 2; r++) g_circle_row(W - 5, my + r, 4, 2, r, C_BTN2, ">", C_WHITE);
         hit_add(W - 5, my, 4, 2, A_BTN, B_IV_NEXT, 0, HV_ICON);
     }
-    g_ctext(0, H - 1, W, W >= 60 ? "Left/Right - соседние картинки   Esc - закрыть" : "Left/Right  Esc", C_MUTED, 0);
+    g_ctext(0, H - 1, W, W >= 60 ? TR("Left/Right - соседние картинки   Esc - закрыть") : "Left/Right  Esc", C_MUTED, 0);
 }
 
 /* ---- №53 эмбеды карточкой и №41 опросы: раскладка строк (без сети и без картинок — только счёт строк) ---- */
@@ -2019,7 +2050,7 @@ static void date_text(i64 ts, char *out, size_t n) {
                                        "сентября", "октября", "ноября", "декабря" };
     struct tm t;
     plat_localtime(ts, &t);
-    snprintf(out, n, "%d %s %d г.", t.tm_mday, mon[(t.tm_mon % 12 + 12) % 12], t.tm_year + 1900);
+    snprintf(out, n, TR("%d %s %d г."), t.tm_mday, tr(mon[(t.tm_mon % 12 + 12) % 12]), t.tm_year + 1900);
 }
 /* Строки ленты с группировкой как в Discord: аватар, имя и время — у первого сообщения серии;
  * следующие сообщения того же автора в течение 7 минут — без заголовка. Ответ и новый день начинают серию. */
@@ -2044,7 +2075,7 @@ static int build_mlines(int tw) {
         if (m->ref_id) ml_push(&n, i, L_REPLY, 0, 0);
         if (!cont) ml_push(&n, i, L_HEAD, 0, 0);
         if (m->forwarded) ml_push(&n, i, L_FWD, 0, 0);   /* «-> Переслано», текст оригинала — с полоской */
-        if (msg_filtered(m) && !filt_open(m->id)) {   /* №120: скрыто фильтром — одна строка */
+        if ((msg_filtered(m) || (m->author_id != S.me_id && ignored(m->author_id))) && !filt_open(m->id)) {   /* №120 фильтр, №108 игнор — одна строка */
             ml_push(&n, i, L_FILT, 0, 0);
             continue;
         }
@@ -2073,7 +2104,7 @@ static int build_mlines(int tw) {
             if (m->voice_secs && s[q] == ATT_MARK) { at = le < len ? le + 1 : le; continue; }   /* №69: файл — в плеере */
             int url = blk ? -1 : image_line(s, q, le);
             /* текстовый файл — блок превью (кроме спойлера: он остаётся строкой, содержимое не грузится) */
-            int turl = blk || url >= 0 || (s[q] == ATT_MARK && le - q > 12 && !strncmp(s + q + 1 + strlen("[файл: "), "SPOILER_", 8)) ? -1 : text_line(s, q, le);
+            int turl = blk || url >= 0 || (s[q] == ATT_MARK && le - q > 12 && !strncmp(s + q + 1 + strlen(TR("[файл: ")), "SPOILER_", 8)) ? -1 : text_line(s, q, le);
             if (turl >= 0) {
                 int tr = txt_rows(m, s, (size_t)turl, width);
                 for (int r = 0; r < tr; r++) ml_push(&n, i, L_TXTB, turl, r);
@@ -2091,7 +2122,7 @@ static int build_mlines(int tw) {
             } while (q < le);
             if (url >= 0) {
                 /* вложение-спойлер (SPOILER_ в имени): до щелчка картинка не запрашивается вовсе */
-                bool sp = !strncmp(s + q + 1 + strlen("[файл: "), "SPOILER_", 8) && !spoil_open(m->id);
+                bool sp = !strncmp(s + q + 1 + strlen(TR("[файл: ")), "SPOILER_", 8) && !spoil_open(m->id);
                 int pr = sp ? (ph > 6 ? 6 : ph) : preview_rows(s, (size_t)url, pw, ph);
                 for (int r = 0; r < pr; r++) { ml_push(&n, i, L_PREVIEW, url, r); if (sp) U.ml[n - 1].st = ST_SPOIL; }
                 lastw = 1000;
@@ -2292,7 +2323,7 @@ static void link_click(int k) {
             if (dmid) jump_to(dch, dmid); else ui_open_channel(dch);
             return;
         }
-        ui_notice("канал из ссылки вам недоступен - ссылка скопирована");
+        ui_notice(TR("канал из ссылки вам недоступен - ссылка скопирована"));
         copy_text(u);
         return;
     }
@@ -2300,9 +2331,9 @@ static void link_click(int k) {
     copy_text(u);
     bool nonlat = false;
     for (const char *q = h; *q; q++) if ((unsigned char)*q >= 0x80) nonlat = true;
-    if (nonlat) ui_notice("ОСТОРОЖНО: нелатинские буквы в адресе %s (скопирован)", sh);
-    else if (lkt[k].warn) ui_notice("ОСТОРОЖНО: ссылка ведёт на %s (скопирован)", sh);
-    else ui_notice("ссылка скопирована (%s)", sh);
+    if (nonlat) ui_notice(TR("ОСТОРОЖНО: нелатинские буквы в адресе %s (скопирован)"), sh);
+    else if (lkt[k].warn) ui_notice(TR("ОСТОРОЖНО: ссылка ведёт на %s (скопирован)"), sh);
+    else ui_notice(TR("ссылка скопирована (%s)"), sh);
     free(sh);
 }
 static int g_mdline(int x, int y, int mi, const char *s, size_t src, size_t off, size_t len, int w) {
@@ -2426,18 +2457,18 @@ static const TextPeek *text_attachment_peek(const char *url, size_t want) {
     static char buf[4096];
     memset(&tp, 0, sizeof tp);
     (void)want;
-    if (!O.demo) { snprintf(tp.error, sizeof tp.error, "просмотр текста ещё не подключён"); return &tp; }
-    if (strstr(url, "404")) { snprintf(tp.error, sizeof tp.error, "файл недоступен (404)"); return &tp; }
+    if (!O.demo) { snprintf(tp.error, sizeof tp.error, TR("просмотр текста ещё не подключён")); return &tp; }
+    if (strstr(url, "404")) { snprintf(tp.error, sizeof tp.error, TR("файл недоступен (404)")); return &tp; }
     size_t o = 0;
     for (int i = 1; i <= 40 && o + 100 < sizeof buf; i++)
-        o += (size_t)snprintf(buf + o, sizeof buf - o, "%d\tстрока текста номер %d: The quick brown fox, съешь же ещё этих булок\n", i, i);
+        o += (size_t)snprintf(buf + o, sizeof buf - o, TR("%d\tстрока текста номер %d: The quick brown fox, съешь же ещё этих булок\n"), i, i);
     tp.text = buf; tp.len = o; tp.size = (long)o;
     return &tp;
 }
 #endif
 static const TextPeek *txt_peek_g(const char *url, size_t want) {
     static TextPeek held;
-    if (img_hold()) { memset(&held, 0, sizeof held); snprintf(held.error, sizeof held.error, "скрыто, пока запрос не принят"); return &held; }
+    if (img_hold()) { memset(&held, 0, sizeof held); snprintf(held.error, sizeof held.error, TR("скрыто, пока запрос не принят")); return &held; }
     return text_attachment_peek(url, want);
 }
 #define TXT_ROWS 20                               /* свёрнуто: столько строк, развёрнуто — окно 30 строк с прокруткой */
@@ -2510,9 +2541,9 @@ static int txt_rows(const Message *m, const char *s, size_t url_off, int tw) {
 }
 static void fmt_size(long b, char *out, size_t n) {
     if (b < 0) snprintf(out, n, "?");
-    else if (b < 1024) snprintf(out, n, "%ld Б", b);
-    else if (b < 1024 * 1024) snprintf(out, n, "%ld,%ld КБ", b / 1024, (b % 1024) * 10 / 1024);
-    else snprintf(out, n, "%ld,%ld МБ", b >> 20, ((b >> 10) % 1024) * 10 / 1024);
+    else if (b < 1024) snprintf(out, n, TR("%ld Б"), b);
+    else if (b < 1024 * 1024) snprintf(out, n, TR("%ld,%ld КБ"), b / 1024, (b % 1024) * 10 / 1024);
+    else snprintf(out, n, TR("%ld,%ld МБ"), b >> 20, ((b >> 10) % 1024) * 10 / 1024);
 }
 /* Строка r блока текстового вложения сообщения mi (url — смещение ссылки в content) в клетках (x, y), ширина tw. */
 static void draw_txt(int mi, const char *s, size_t url_off, int r, int x, int y, int tw) {
@@ -2523,7 +2554,7 @@ static void draw_txt(int mi, const char *s, size_t url_off, int r, int x, int y,
         size_t a = url_off;
         while (a > 0 && s[a - 1] != '\n') a--;
         if (s[a] == ATT_MARK) a++;
-        const char *nb = s + a + strlen("[файл: "), *ne = memchr(nb, ']', (size_t)(s + url_off - nb));
+        const char *nb = s + a + strlen(TR("[файл: ")), *ne = memchr(nb, ']', (size_t)(s + url_off - nb));
         if (ne) snprintf(name, sizeof name, "%.*s", (int)(ne - nb), nb);
     }
     int k = txt_find(m->id);
@@ -2558,14 +2589,14 @@ static void draw_txt(int mi, const char *s, size_t url_off, int r, int x, int y,
         g_hbox(x, y, bw);
         int bx = x + 2;
         if (n > TXT_ROWS || open) {
-            int w = g_button(bx, y, open ? "Свернуть" : "Развернуть", bw - 4, 0, B_NOP);
+            int w = g_button(bx, y, open ? TR("Свернуть") : TR("Развернуть"), bw - 4, 0, B_NOP);
             if (w > 0) { U.hit[U.nhit - 1].sub = B_TXT_EXP; U.hit[U.nhit - 1].arg = mi; bx += w + 1; }
         }
-        int w = g_button(bx, y, "Скачать", x + bw - 2 - bx, 0, B_NOP);
+        int w = g_button(bx, y, TR("Скачать"), x + bw - 2 - bx, 0, B_NOP);
         if (w > 0) { U.hit[U.nhit - 1].sub = B_TXT_DL; U.hit[U.nhit - 1].arg = mi; bx += w + 1; }
         if (n > vis) {
             int a = open ? txt_open[k].scroll + 1 : 1;
-            snprintf(t, sizeof t, " строки %d-%d из %d%s ", a, a + vis - 1, n, tp && tp->truncated ? "+" : "");
+            snprintf(t, sizeof t, TR(" строки %d-%d из %d%s "), a, a + vis - 1, n, tp && tp->truncated ? "+" : "");
             if (vw(t) < x + bw - 2 - bx) g_rtext(x + bw - 2, y, t, x + bw - 2 - bx, C_MUTED, 0);
         }
         return;
@@ -2573,7 +2604,7 @@ static void draw_txt(int mi, const char *s, size_t url_off, int r, int x, int y,
     g_ch(x, y, '|', C_LINE, 0);
     g_ch(x + bw - 1, y, '|', C_LINE, 0);
     g_rect(x + 1, y, bw - 2, 1, C_CODEBG);
-    if (!tp || tp->busy) { if (r == 1) g_text(x + 2, y, "загрузка...", iw, C_MUTED, 0); return; }
+    if (!tp || tp->busy) { if (r == 1) g_text(x + 2, y, TR("загрузка..."), iw, C_MUTED, 0); return; }
     if (tp->error[0]) { if (r == 1) { char *e = san(tp->error, false); g_texte(x + 2, y, e, iw, C_RED, 0); free(e); } return; }
     int li = (open ? txt_open[k].scroll : 0) + r - 1;
     if (li >= n) return;
@@ -2647,7 +2678,7 @@ static void draw_emb_row(int tx, int y, int tw, const Message *m, int ei, int ro
             if (r->r < oh) { g_imgrow(x, y, ow, r->r, pc); ovl_note(x, y, ow, oh, r->r, url); }
         } else {
             g_rect(x, y, pw, 1, C_PH);
-            if (r->r == ph / 2) g_ctext(x, y, pw, "[ картинка ]", C_MUTED, 0);
+            if (r->r == ph / 2) g_ctext(x, y, pw, TR("[ картинка ]"), C_MUTED, 0);
         }
         break;
     }
@@ -2661,7 +2692,7 @@ static void vmsg_toggle(int mi) {
     if (vs && vs->mid == S.msgs[mi].id && (vs->active || vs->loading)) { vmsg_stop(); return; }
     if (!vmsg_play(S.msgs[mi].id)) {
         vs = vmsg_state();
-        if (vs && vs->err[0]) { char *e = san(vs->err, false); ui_notice("голосовое: %s", e); free(e); }
+        if (vs && vs->err[0]) { char *e = san(vs->err, false); ui_notice(TR("голосовое: %s"), e); free(e); }
     }
 }
 static void draw_vmsg_row(int tx, int y, int tw, int mi) {
@@ -2684,7 +2715,7 @@ static void draw_vmsg_row(int tx, int y, int tw, int mi) {
         int fill = dur > 0 ? (int)((i64)bw * pos / dur) : 0;
         for (int i = 0; i < bw; i++) g_ch(bx + i, y, i < fill ? '=' : '-', i < fill ? C_WHITE : C_MUTED, i < fill ? AT_B : 0);
     }
-    if (load) g_text(bx, y, "загрузка...", bw, C_MUTED, 0);
+    if (load) g_text(bx, y, TR("загрузка..."), bw, C_MUTED, 0);
     else if (mine && !vs->active && vs->err[0]) { char *e = san(vs->err, false); g_texte(bx, y, e, bw, C_RED, 0); free(e); }
     g_text(tx + w - tw2 - 1, y, t, tw2, C_MUTED, 0);
 }
@@ -2696,7 +2727,7 @@ static void poll_click(int mi, int ai) {
     Message *m = &S.msgs[mi];
     const Poll *p = m->poll;
     if (ai < 0 || ai >= p->n) return;
-    if (poll_closed(p)) { ui_notice("опрос завершён"); return; }
+    if (poll_closed(p)) { ui_notice(TR("опрос завершён")); return; }
     u32 ids[10];
     int n = 0;
     if (p->multi) { for (int i = 0; i < p->n; i++) { bool on = p->a[i].me; if (i == ai) on = !on; if (on) ids[n++] = p->a[i].id; } }
@@ -2725,7 +2756,7 @@ static void draw_poll_row(int tx, int y, int tw, int mi, int row) {
     char t[200];
     if (row == 0) { g_texte(x, y, p->question ? p->question : "", w, C_WHITE, AT_B); return; }
     if (row == 1) {
-        g_text(x, y, closed ? "Опрос завершён" : p->multi ? "Можно выбрать несколько ответов" : "Выберите один ответ", w, C_MUTED, 0);
+        g_text(x, y, closed ? TR("Опрос завершён") : p->multi ? TR("Можно выбрать несколько ответов") : TR("Выберите один ответ"), w, C_MUTED, 0);
         return;
     }
     int ai = row - 2;
@@ -2747,23 +2778,23 @@ static void draw_poll_row(int tx, int y, int tw, int mi, int row) {
         char left[48] = "";
         if (!closed && p->expiry) {
             i64 s = p->expiry - wall_ms() / 1000;
-            if (s >= 86400) snprintf(left, sizeof left, " - осталось %lld дн.", (long long)(s / 86400));
-            else if (s >= 3600) snprintf(left, sizeof left, " - осталось %lld ч", (long long)(s / 3600));
-            else snprintf(left, sizeof left, " - осталось %lld мин", (long long)(s / 60 + 1));
+            if (s >= 86400) snprintf(left, sizeof left, TR(" - осталось %lld дн."), (long long)(s / 86400));
+            else if (s >= 3600) snprintf(left, sizeof left, TR(" - осталось %lld ч"), (long long)(s / 3600));
+            else snprintf(left, sizeof left, TR(" - осталось %lld мин"), (long long)(s / 60 + 1));
         }
-        snprintf(t, sizeof t, "%d голос(ов)%s", total, closed ? " - итог" : left);
+        snprintf(t, sizeof t, TR("%d голос(ов)%s"), total, closed ? TR(" - итог") : left);
         g_texte(x, y, t, w, C_MUTED, 0);
         return;
     }
     /* кнопки: убрать голос, завершить (автор) */
     int u = 0;
     if (!closed && mine) {
-        u = g_text(x, y, "[Убрать голос]", w, C_URL, 0);
+        u = g_text(x, y, TR("[Убрать голос]"), w, C_URL, 0);
         hit_add(x, y, u, 1, A_POLLB, 0, mi, HV_UL);
         u += 2;
     }
     if (!closed && m->author_id == S.me_id) {
-        int v = g_text(x + u, y, "[Завершить опрос]", w - u, C_RED, 0);
+        int v = g_text(x + u, y, TR("[Завершить опрос]"), w - u, C_RED, 0);
         hit_add(x + u, y, v, 1, A_POLLB, 1, mi, HV_UL);
     }
 }
@@ -2801,7 +2832,7 @@ static void comp_press(int mi, int ci) {
     if (mi < 0 || mi >= S.nmsgs || !S.msgs[mi].comp || ci < 0 || ci >= S.msgs[mi].comp->n) return;
     const Message *m = &S.msgs[mi];
     const Comp *c = &m->comp->c[ci];
-    if (c->disabled) { ui_notice("кнопка недоступна"); return; }
+    if (c->disabled) { ui_notice(TR("кнопка недоступна")); return; }
     if (c->type == CT_SELECT) { CSEL.on = true; CSEL.msg = m->id; CSEL.ci = ci; CSEL.sel = 0; CSEL.chosen = 0; U.dirty = true; return; }
     if (c->style == 5) {                         /* ссылка: показать и скопировать, не открывать */
         const char *u = comp_str(m, ci, CS_URL);
@@ -2825,7 +2856,7 @@ static void draw_comp_row(int tx, int y, int tw, int mi, int row) {
         char t[160];
         if (c->type == CT_SELECT) {
             const char *ph = comp_str(m, i, CS_PLACEHOLDER);
-            snprintf(t, sizeof t, "%s", *ph ? ph : "Выберите вариант");
+            snprintf(t, sizeof t, "%s", *ph ? ph : TR("Выберите вариант"));
             int w = tw - u < 48 ? tw - u : 48;
             if (w < 10) break;
             g_rect(tx + u, y, w, 1, C_RAIL);
@@ -2850,6 +2881,130 @@ static void draw_comp_row(int tx, int y, int tw, int mi, int row) {
 }
 /* Окно выбора варианта списка бота: Up/Down, Enter/щелчок — выбрать (несколько — отметить и «Готово»). */
 static const char *un(u64 uid);
+static int help_wrap(const char *s, int w, char ***out);
+/* Обновление: окно появляется само, когда найдена новая версия (раз за сессию на версию; «Позже» — не показывать
+ * её снова до перезапуска), во время загрузки и когда готово. Ссылки из «что нового» не открываются. */
+static int lg_para(int x, int y, int w, const char *t, u32 fg, bool center);
+static bool upd_on;
+static char upd_shown[32], upd_later[32];
+static void draw_update(int W, int H) {
+    const UpdateState *us = update_state();
+    if (!us || (us->phase != UP_AVAILABLE && us->phase != UP_DOWNLOADING && us->phase != UP_READY && us->phase != UP_FAILED)) { upd_on = false; return; }
+    int bw = W - 4 < 64 ? W - 4 : 64, bh = H - 2 < 20 ? H - 2 : 20;
+    if (bw < 30 || bh < 6) return;
+    bool compact = bh < 12;                      /* маленькое окно (50x12): заголовок, текст сколько влезет, кнопки */
+    int warn_rows = 0;
+    if (us->phase == UP_AVAILABLE && us->shared_dir) {   /* предупреждение — целиком: окно выше, если нужно */
+        char *wt = san(us->warn, true), **ls;
+        warn_rows = help_wrap(wt, bw - 6, &ls);
+        for (int i = 0; i < warn_rows; i++) free(ls[i]);
+        free(ls); free(wt);
+        int need = (compact ? 4 : 8) + warn_rows;
+        if (need > bh) bh = need < H - 2 ? need : H - 2;
+    }
+    int px = (W - bw) / 2, py = (H - bh) / 2;
+    g_dim(0, 0, W, H);
+    ovl_cut(0, 0, W, H);
+    hit_add(0, 0, W, H, A_BLOCK, 0, 0, 0);
+    u32 ut = bg_at(px, py), ub = bg_at(px, py + bh - 1);
+    g_rect(px, py, bw, bh, C_FEED);
+    g_round_corners(px, py, bw, bh, 0, ut);
+    g_round_corners(px, py + bh - 1, bw, bh, bh - 1, ub);
+    char t[200];
+    char *ver = san(us->version, false);
+    if (us->phase == UP_READY) snprintf(t, sizeof t, TR("Версия %s загружена"), ver);
+    else if (us->phase == UP_FAILED) snprintf(t, sizeof t, "%s", TR("Обновление не удалось"));
+    else if (us->phase == UP_DOWNLOADING) snprintf(t, sizeof t, TR("Загрузка версии %s"), ver);
+    else snprintf(t, sizeof t, TR("Доступна версия %s"), ver);
+    free(ver);
+    g_texte(px + 3, py + 1, t, bw - 6, C_WHITE, AT_B);
+    snprintf(t, sizeof t, TR("сейчас у вас %s"), ASTRA_VERSION);
+    if (!compact) g_texte(px + 3, py + 2, t, bw - 6, C_MUTED, 0);
+    int y = compact ? py + 2 : py + 4, yb = py + bh - (compact ? 3 : 4);
+    if (us->phase == UP_AVAILABLE && us->shared_dir) {   /* каталог программы доступен на запись другим — спросить */
+        if (!compact) g_text(px + 3, y++, TR("ВНИМАНИЕ"), bw - 6, C_GOLD, AT_B);
+        char *wt = san(us->warn, true), **ls;
+        int n = help_wrap(wt, bw - 6, &ls);
+        for (int i = 0; i < n; i++) { if (y <= yb) g_text(px + 3, y++, ls[i], bw - 6, compact ? C_GOLD : C_TEXT, 0); free(ls[i]); }
+        free(ls); free(wt);
+    } else if (us->phase == UP_FAILED) {
+        char *e = san(us->err[0] ? us->err : TR("причина неизвестна"), false);
+        y += lg_para(px + 3, y, bw - 6, e, C_RED, false);
+        free(e);
+    } else {
+        if (!compact) g_text(px + 3, y++, TR("ЧТО НОВОГО"), bw - 6, C_MUTED, AT_B);
+        char *nt = san(us->notes[0] ? us->notes : TR("(описания нет)"), true), **ls;
+        int n = help_wrap(nt, bw - 6, &ls);
+        for (int i = 0; i < n; i++) { if (y < yb) g_text(px + 3, y++, ls[i], bw - 6, C_TEXT, 0); free(ls[i]); }
+        if (n > 0 && y >= yb) g_text(px + 3, yb, "...", 3, C_MUTED, 0);
+        free(ls); free(nt);
+    }
+    int by = py + bh - 2;
+    if (us->phase == UP_DOWNLOADING) {           /* полоса загрузки */
+        int barw = bw - 22, fill = us->size > 0 ? (int)(us->got * barw / us->size) : 0;
+        if (fill > barw) fill = barw;
+        for (int i = 0; i < barw; i++) g_ch(px + 3 + i, by, i < fill ? '#' : '-', i < fill ? C_GREEN : C_LINE, i < fill ? AT_B : 0);
+        snprintf(t, sizeof t, TR("%.1f / %.1f МБ"), us->got / 1048576.0, us->size / 1048576.0);
+        g_text(px + 4 + barw, by, t, bw - barw - 6, C_MUTED, 0);
+        return;
+    }
+    if (us->phase == UP_AVAILABLE && us->shared_dir) {
+        int u = g_button(px + bw - 3 - 36, by, TR("Отмена"), 12, 0, B_UP_CANCEL);
+        g_button(px + bw - 3 - 36 + u + 1, by, TR("Обновить всё равно"), 24, 2, B_UP_ANYWAY);
+    } else if (us->phase == UP_READY) {
+        int u = g_button(px + bw - 3 - 30, by, TR("Позже"), 12, 0, B_UP_LATER);
+        g_button(px + bw - 3 - 30 + u + 1, by, TR("Перезапустить"), 18, 1, B_UP_RESTART);
+    } else if (us->phase == UP_FAILED) {
+        g_button(px + bw - 3 - 12, by, TR("Закрыть"), 12, 0, B_UP_LATER);
+    } else {
+        int u = g_button(px + bw - 3 - 26, by, TR("Позже"), 12, 0, B_UP_LATER);
+        g_button(px + bw - 3 - 26 + u + 1, by, TR("Обновить"), 14, 1, B_UP_APPLY);
+    }
+}
+static bool rules_on;                            /* №128: открыт экран правил */
+static void draw_rules(int W, int H) {
+    const RulesState *rs = guild_rules_state();
+    if (!rs) { rules_on = false; return; }
+    int bw = W - 4 < 70 ? W - 4 : 70, bh = H - 4 < 26 ? H - 4 : 26;
+    int px = (W - bw) / 2, py = (H - bh) / 2;
+    g_dim(0, 0, W, H);
+    ovl_cut(0, 0, W, H);
+    hit_add(0, 0, W, H, A_BLOCK, 0, 0, 0);
+    u32 ut = bg_at(px, py), ub = bg_at(px, py + bh - 1);
+    g_rect(px, py, bw, bh, C_FEED);
+    g_round_corners(px, py, bw, bh, 0, ut);
+    g_round_corners(px, py + bh - 1, bw, bh, bh - 1, ub);
+    Guild *g = guild_find(rs->gid);
+    char t[160];
+    snprintf(t, sizeof t, TR("Правила сервера %s"), g && g->name ? g->name : "");
+    g_texte(px + 3, py + 1, t, bw - 8, C_WHITE, AT_B);
+    g_text(px + bw - 3, py + 1, "x", 1, C_TEXT, AT_B);
+    hit_add(px + bw - 4, py + 1, 3, 1, A_BTN, B_RULES_X, 0, HV_RED);
+    int y = py + 3, yb = py + bh - 3;
+    if (rs->busy) g_text(px + 3, y, TR("загрузка..."), bw - 6, C_MUTED, 0);
+    else if (rs->err[0]) { char *e = san(rs->err, false); g_texte(px + 3, y, e, bw - 6, C_RED, 0); free(e); }
+    else {
+        if (rs->desc && *rs->desc) {
+            char *d = san(rs->desc, false), **ls;
+            int n = help_wrap(d, bw - 6, &ls);
+            for (int i = 0; i < n; i++) { if (y < yb) g_text(px + 3, y++, ls[i], bw - 6, C_MUTED, 0); free(ls[i]); }
+            free(ls); free(d);
+            y++;
+        }
+        for (int r = 0; r < rs->n && y < yb; r++) {
+            char *rt = san(rs->rules[r] ? rs->rules[r] : "", false), **ls;
+            snprintf(t, sizeof t, "%d. ", r + 1);
+            int n = help_wrap(rt, bw - 10, &ls);
+            for (int i = 0; i < n; i++) {
+                if (y < yb) { if (!i) g_text(px + 3, y, t, 4, C_WHITE, AT_B); g_text(px + 7, y++, ls[i], bw - 10, C_TEXT, 0); }
+                free(ls[i]);
+            }
+            free(ls); free(rt);
+        }
+    }
+    int u = g_button(px + bw - 3 - 24, py + bh - 2, TR("Позже"), 10, 0, B_RULES_X);
+    g_button(px + bw - 3 - 24 + u + 1, py + bh - 2, TR("Принимаю"), 14, 1, B_RULES_OK);
+}
 static bool tm_on;                               /* №97: открыто окно участников ветки */
 static void draw_tmembers(int W, int H) {
     const ThreadMembers *tm = thread_members_state();
@@ -2866,14 +3021,14 @@ static void draw_tmembers(int W, int H) {
     g_round_corners(px, py, bw, bh, 0, ut);
     g_round_corners(px, py + bh - 1, bw, bh, bh - 1, ub);
     char t[64];
-    snprintf(t, sizeof t, "Участники ветки - %d", tm->n);
+    snprintf(t, sizeof t, TR("Участники ветки - %d"), tm->n);
     g_text(px + 3, py + 1, t, bw - 8, C_WHITE, AT_B);
     g_text(px + bw - 3, py + 1, "x", 1, C_TEXT, AT_B);
     hit_add(px + bw - 4, py + 1, 3, 1, A_BTN, B_TM_X, 0, HV_RED);
-    if (tm->busy) g_text(px + 3, py + 3, "загрузка...", bw - 6, C_MUTED, 0);
+    if (tm->busy) g_text(px + 3, py + 3, TR("загрузка..."), bw - 6, C_MUTED, 0);
     else if (tm->err[0]) { char *e = san(tm->err, false); g_texte(px + 3, py + 3, e, bw - 6, C_RED, 0); free(e); }
     else for (int i = 0; i < tm->n && i < rows; i++) g_texte(px + 3, py + 3 + i, un(tm->ids[i]), bw - 6, C_TEXT, 0);
-    if (tm->n > rows) { snprintf(t, sizeof t, "и ещё %d", tm->n - rows); g_text(px + 3, py + bh - 1, t, bw - 6, C_MUTED, 0); }
+    if (tm->n > rows) { snprintf(t, sizeof t, TR("и ещё %d"), tm->n - rows); g_text(px + 3, py + bh - 1, t, bw - 6, C_MUTED, 0); }
 }
 static void comp_sel_close(void) { CSEL.on = false; U.dirty = true; }
 static void comp_sel_done(void) {
@@ -2882,7 +3037,7 @@ static void comp_sel_done(void) {
     int opts[25], n = 0;
     for (int k = 0; k < m->comp->c[CSEL.ci].nopt && k < 25; k++) if (CSEL.chosen >> k & 1) opts[n++] = k;
     const Comp *c = &m->comp->c[CSEL.ci];
-    if (n < (c->min ? c->min : 1)) { ui_notice("выберите не меньше %d", c->min ? c->min : 1); return; }
+    if (n < (c->min ? c->min : 1)) { ui_notice(TR("выберите не меньше %d"), c->min ? c->min : 1); return; }
     char err[200] = "";
     if (!comp_select(S.open_ch, m->id, CSEL.ci, opts, n, err, sizeof err) && err[0]) { char *se = san(err, false); ui_notice("%s", se); free(se); }
     comp_sel_close();
@@ -2898,7 +3053,7 @@ static void comp_sel_pick(int k) {
     else {
         int cnt = 0;
         for (int q = 0; q < 25; q++) cnt += CSEL.chosen >> q & 1;
-        if (cnt >= mx) { ui_notice("можно выбрать не больше %d", mx); return; }
+        if (cnt >= mx) { ui_notice(TR("можно выбрать не больше %d"), mx); return; }
         CSEL.chosen |= 1u << k;
     }
     U.dirty = true;
@@ -2919,7 +3074,7 @@ static void draw_comp_sel(int W, int H) {
     g_round_corners(px, py, bw, bh, 0, ut);
     g_round_corners(px, py + bh - 1, bw, bh, bh - 1, ub);
     const char *ph = comp_str(m, CSEL.ci, CS_PLACEHOLDER);
-    g_texte(px + 3, py + 1, *ph ? ph : "Выберите вариант", bw - 8, C_WHITE, AT_B);
+    g_texte(px + 3, py + 1, *ph ? ph : TR("Выберите вариант"), bw - 8, C_WHITE, AT_B);
     g_text(px + bw - 3, py + 1, "x", 1, C_TEXT, AT_B);
     hit_add(px + bw - 4, py + 1, 3, 1, A_BTN, B_CSEL_X, 0, HV_RED);
     if (CSEL.sel >= n) CSEL.sel = n - 1;
@@ -2937,10 +3092,10 @@ static void draw_comp_sel(int W, int H) {
     }
     char t[96];
     if (mx > 1) {
-        snprintf(t, sizeof t, "Space отметить  Enter готово (до %d)  Esc отмена", mx);
-        int u = g_button(px + bw - 12, py + bh - 1, "Готово", 10, 1, B_CSEL_OK);
+        snprintf(t, sizeof t, TR("Space отметить  Enter готово (до %d)  Esc отмена"), mx);
+        int u = g_button(px + bw - 12, py + bh - 1, TR("Готово"), 10, 1, B_CSEL_OK);
         (void)u;
-    } else snprintf(t, sizeof t, "Up/Down выбор  Enter выбрать  Esc отмена");
+    } else snprintf(t, sizeof t, TR("Up/Down выбор  Enter выбрать  Esc отмена"));
     g_texte(px + 3, py + 3 + rows, t, bw - 16, C_MUTED, 0);
 }
 static bool comp_sel_key(const Key *k) {
@@ -2976,7 +3131,7 @@ static void draw_mline(int idx, int x, int y, int w) {
         /* «Новые сообщения»: красная черта и плашка «НОВОЕ» справа, как в Discord */
         for (int i = x + 2; i < x + w - 9; i++) g_ch(i, y, '-', C_RED, 0);
         g_pill(x + w - 9, y, 7, C_RED);
-        g_text(x + w - 8, y, "НОВОЕ", 5, C_WHITE, AT_B);
+        g_text(x + w - 8, y, TR("НОВОЕ"), 5, C_WHITE, AT_B);
         return;
     }
     bool sel = U.focus == F_MESSAGES && U.sel_msg == l->mi;
@@ -2998,19 +3153,19 @@ static void draw_mline(int idx, int x, int y, int w) {
         hit_add(tx - 1, y, tw + 1, 1, A_REPLYJ, 0, l->mi, HV_UL);   /* щелчок — к исходному сообщению */
         break;
     }
-    case L_FWD: g_text(tx, y, "-> Переслано", tw, C_MUTED, AT_B); break;
+    case L_FWD: g_text(tx, y, TR("-> Переслано"), tw, C_MUTED, AT_B); break;
     case L_FAIL: {
-        int u = g_text(tx, y, "Не отправлено. ", tw, C_RED, AT_B);
-        int w2 = g_text(tx + u, y, "Повторить", tw - u, C_URL, AT_U);
+        int u = g_text(tx, y, TR("Не отправлено. "), tw, C_RED, AT_B);
+        int w2 = g_text(tx + u, y, TR("Повторить"), tw - u, C_URL, AT_U);
         hit_add(tx + u, y, w2, 1, A_BTN, B_MRETRY, l->mi, HV_UL);
         u += w2 + g_text(tx + u + w2, y, " - ", tw - u - w2, C_MUTED, 0);
-        int w3 = g_text(tx + u, y, "Удалить", tw - u, C_URL, AT_U);
+        int w3 = g_text(tx + u, y, TR("Удалить"), tw - u, C_URL, AT_U);
         hit_add(tx + u, y, w3, 1, A_BTN, B_MDISCARD, l->mi, HV_UL);
         break;
     }
     case L_EPH: {
-        int u = g_text(tx, y, "(i) Видно только вам - ", tw, C_MUTED, 0);
-        int w2 = g_text(tx + u, y, "Скрыть", tw - u, C_URL, AT_U);
+        int u = g_text(tx, y, TR("(i) Видно только вам - "), tw, C_MUTED, 0);
+        int w2 = g_text(tx + u, y, TR("Скрыть"), tw - u, C_URL, AT_U);
         hit_add(tx + u, y, w2, 1, A_BTN, B_EPH_HIDE, l->mi, HV_UL);
         break;
     }
@@ -3036,7 +3191,7 @@ static void draw_mline(int idx, int x, int y, int w) {
             U.hit[U.nhit - 1].tip = T_DATE;
             u += tu;
         }
-        if (m->flags & 4096) g_text(tx + u, y, "  [тихое]", tw - u, C_MUTED, 0);   /* без уведомлений */
+        if (m->flags & 4096) g_text(tx + u, y, TR("  [тихое]"), tw - u, C_MUTED, 0);   /* без уведомлений */
         break;
     }
     case L_TEXT: {
@@ -3050,7 +3205,7 @@ static void draw_mline(int idx, int x, int y, int w) {
             bool first = !(pl && pl->mi == l->mi && pl->kind == L_TEXT && (pl->st & ST_CODE));
             if (first && tw >= 30 && n_cbt < (int)(sizeof cbt / sizeof *cbt)) {
                 cbt[n_cbt].mi = l->mi; cbt[n_cbt].off = l->off;
-                g_text(tx + tw - 13, y, "[копировать]", 12, C_MUTED, 0);
+                g_text(tx + tw - 13, y, TR("[копировать]"), 12, C_MUTED, 0);
                 hit_add(tx + tw - 13, y, 12, 1, A_CODECP, 0, n_cbt++, HV_UL);
             }
         } else {
@@ -3062,21 +3217,21 @@ static void draw_mline(int idx, int x, int y, int w) {
             if (l->st & ST_QUOTE) { g_ch(qx, y, '|', C_QUOTE, AT_B); qx += 2; qw -= 2; src += src + 2 <= (size_t)l->off ? 2 : 1; }
             u = (qx - tx) + g_mdline(qx, y, l->mi, s, src, (size_t)l->off, (size_t)l->len, qw);
         }
-        if (l->ed) g_text(tx + u, y, " (изменено)", tw - u, C_MUTED, 0);
+        if (l->ed) g_text(tx + u, y, TR(" (изменено)"), tw - u, C_MUTED, 0);
 #ifdef MC_PACKA
         if (m->state == MS_PENDING) g_fgset(tx, y, u, C_MUTED, 0);        /* ещё не подтверждено сервером */
         else if (m->state == MS_FAILED) g_fgset(tx, y, u, C_RED, 0);       /* не отправлено */
 #endif
         break;
     }
-    case L_EDITED: g_text(tx, y, "(изменено)", tw, C_MUTED, 0); break;
+    case L_EDITED: g_text(tx, y, TR("(изменено)"), tw, C_MUTED, 0); break;
     case L_EMB: draw_emb_row(tx, y, tw, m, l->off, l->len); break;
     case L_POLL: draw_poll_row(tx, y, tw, l->mi, l->len); break;
     case L_COMP: draw_comp_row(tx, y, tw, l->mi, l->len); break;
     case L_VMSG: draw_vmsg_row(tx, y, tw, l->mi); break;
     case L_FILT: {
-        int u = g_text(tx, y, "скрыто фильтром ", tw, C_MUTED, 0);
-        int v = g_text(tx + u, y, "[показать]", tw - u, C_URL, 0);
+        int u = g_text(tx, y, ignored(m->author_id) ? TR("сообщение от того, кого вы игнорируете ") : TR("скрыто фильтром "), tw, C_MUTED, 0);
+        int v = g_text(tx + u, y, TR("[показать]"), tw - u, C_URL, 0);
         hit_add(tx + u, y, v, 1, A_FILTSHOW, 0, l->mi, HV_UL);
         break;
     }
@@ -3088,7 +3243,7 @@ static void draw_mline(int idx, int x, int y, int w) {
             int sh = ph > 6 ? 6 : ph;
             u32 under = bg_at(tx, y);
             g_rect(tx, y, pw, 1, C_BTN2);
-            if (l->len == sh / 2) g_ctext(tx, y, pw, "СПОЙЛЕР", C_WHITE, AT_B);
+            if (l->len == sh / 2) g_ctext(tx, y, pw, TR("СПОЙЛЕР"), C_WHITE, AT_B);
             g_round_corners(tx, y, pw, sh, l->len, under);
             hit_add(tx, y, pw, 1, A_SPOIL, 0, l->mi, HV_BG);
             break;
@@ -3107,7 +3262,7 @@ static void draw_mline(int idx, int x, int y, int w) {
         } else {
             iv_hit(tx, y, pw, l->mi, l->off);
             g_rect(tx, y, pw, 1, C_PH);
-            if (l->len == ph / 2) g_ctext(tx, y, pw, img_click && !img_hold() ? "[ картинка: щелчок ]" : "[ картинка ]", C_MUTED, 0);
+            if (l->len == ph / 2) g_ctext(tx, y, pw, img_click && !img_hold() ? TR("[ картинка: щелчок ]") : TR("[ картинка ]"), C_MUTED, 0);
             g_round_corners(tx, y, pw, ph, l->len, under);
         }
         break;
@@ -3209,10 +3364,10 @@ static int help_build(int w, HLine **out, int *kwo) {
             char pnd[40];
             deco_ascii(pn, pnd, sizeof pnd);
             snprintf(pk, sizeof pk, "%s x3", pnd);
-            items[nh++] = (HelpItem){ pk, "паник-кей: стереть токен и ссылку VLESS и выйти (аккаунт Discord не трогается)" };
+            items[nh++] = (HelpItem){ pk, TR("паник-кей: стереть токен и ссылку VLESS и выйти (аккаунт Discord не трогается)") };
             continue;
         }
-        items[nh++] = HELP[i];
+        items[nh++] = (HelpItem){ HELP[i].k ? tr(HELP[i].k) : NULL, tr(HELP[i].d) };
     }
     for (int i = 0; i < nh; i++) if (items[i].k && vw(items[i].k) > kw) kw = vw(items[i].k);
     kw += 2;
@@ -3273,30 +3428,30 @@ static void search_off(void);
 static const char *focus_hint(void) {
     /* в особом режиме строки ввода — подсказка режима, а не колонки; Esc ближе к началу: узкая строка обрезается справа */
     switch (U.mode) {
-    case M_REPLY: return "Enter ответить  Esc отмена ответа  Shift+Enter новая строка  F1 справка";
-    case M_EDIT: return "Enter сохранить  Esc отмена правки  Shift+Enter новая строка  F1 справка";
-    case M_REACT: return "Enter поставить  эмодзи, :код: или номер  Esc отмена  F1 справка";
-    case M_DELETE: return "y удалить  любая другая клавиша - отмена";
-    case M_VLINK: return "вставьте ссылку vless://  Enter проверить  Esc отмена  ссылка не показывается";
-    case M_VLOFF: return "y отключить VLESS  любая другая клавиша - отмена";
-    case M_FILE: return "Enter отправить файл  Esc отмена  путь можно вставить  до 10 МБ  F1 справка";
-    case M_UNFRIEND: return "y удалить из друзей  любая другая клавиша - отмена";
+    case M_REPLY: return TR("Enter ответить  Esc отмена ответа  Shift+Enter новая строка  F1 справка");
+    case M_EDIT: return TR("Enter сохранить  Esc отмена правки  Shift+Enter новая строка  F1 справка");
+    case M_REACT: return TR("Enter поставить  эмодзи, :код: или номер  Esc отмена  F1 справка");
+    case M_DELETE: return TR("y удалить  любая другая клавиша - отмена");
+    case M_VLINK: return TR("вставьте ссылку vless://  Enter проверить  Esc отмена  ссылка не показывается");
+    case M_VLOFF: return TR("y отключить VLESS  любая другая клавиша - отмена");
+    case M_FILE: return TR("Enter отправить файл  Esc отмена  путь можно вставить  до 10 МБ  F1 справка");
+    case M_UNFRIEND: return TR("y удалить из друзей  любая другая клавиша - отмена");
     default: break;
     }
-    if (U.menu) return "Up/Down выбор  Enter выполнить  Esc закрыть";
-    if (U.pick) return "имя друга - фильтр  Up/Down выбор  Enter создать ЛС  Esc закрыть";
-    if (U.sq_edit) return "Enter искать  Esc закрыть  Backspace стереть";
-    if (U.sr_focus) return U.rp == RP_PINS ? "Up/Down сообщение  Enter перейти к нему  End загрузить ещё  Esc закрыть" :
-                           U.rp == RP_INBOX ? "Left/Right вкладки  Up/Down выбор  Enter открыть  Esc закрыть" :
-                           "Up/Down результат  Enter перейти к каналу  Esc закрыть поиск  Tab колонки";
+    if (U.menu) return TR("Up/Down выбор  Enter выполнить  Esc закрыть");
+    if (U.pick) return TR("имя друга - фильтр  Up/Down выбор  Enter создать ЛС  Esc закрыть");
+    if (U.sq_edit) return TR("Enter искать  Esc закрыть  Backspace стереть");
+    if (U.sr_focus) return U.rp == RP_PINS ? TR("Up/Down сообщение  Enter перейти к нему  End загрузить ещё  Esc закрыть") :
+                           U.rp == RP_INBOX ? TR("Left/Right вкладки  Up/Down выбор  Enter открыть  Esc закрыть") :
+                           TR("Up/Down результат  Enter перейти к каналу  Esc закрыть поиск  Tab колонки");
     if (U.focus == F_MESSAGES && friends_screen())
-        return "Left/Right вкладки  Up/Down друг  Enter написать/принять  Del удалить/отклонить  . меню  F1 справка";
-    if (vless_state() == VL_DOWN && !U.help) return "R переподключить  C сменить ссылку  D отключить VLESS  F1 справка";
+        return TR("Left/Right вкладки  Up/Down друг  Enter написать/принять  Del удалить/отклонить  . меню  F1 справка");
+    if (vless_state() == VL_DOWN && !U.help) return TR("R переподключить  C сменить ссылку  D отключить VLESS  F1 справка");
     switch (U.focus) {
-    case F_GUILDS: return "Up/Down сервер  Enter открыть  Tab дальше  F1 справка  Ctrl+Q выход";
-    case F_CHANNELS: return "Enter открыть/свернуть  +/- громкость  F4 звонок  Esc серверы  Tab дальше  F1 справка";
-    case F_MESSAGES: return "r ответ  e правка  d удалить  + реакция  1-9 реакция  правый щелчок - меню  Esc ввод  F1 справка";
-    default: return "Enter отправить  Up правка последнего  PgUp/PgDn листать  Tab колонки  F1 справка";
+    case F_GUILDS: return TR("Up/Down сервер  Enter открыть  Tab дальше  F1 справка  Ctrl+Q выход");
+    case F_CHANNELS: return TR("Enter открыть/свернуть  +/- громкость  F4 звонок  Esc серверы  Tab дальше  F1 справка");
+    case F_MESSAGES: return TR("r ответ  e правка  d удалить  + реакция  1-9 реакция  правый щелчок - меню  Esc ввод  F1 справка");
+    default: return TR("Enter отправить  Up правка последнего  PgUp/PgDn листать  Tab колонки  F1 справка");
     }
 }
 
@@ -3338,18 +3493,28 @@ static int draw_status(int x0, int x1, int y) {
     int x = x0, left = x1 - x0 - (x1 >= U.gw ? 1 : 0);
     bool ram = show_ram && left >= 40;           /* №13: место под память — справа, подсказки короче */
     if (ram) left -= 11;
+#ifdef ASTRA_VIDEO
+    if (sh_running) {                            /* постоянный индикатор эфира; щелчок — остановить */
+        char lv[96];
+        snprintf(lv, sizeof lv, TR(" (o) ЭФИР %dp %.0f к/с %.1f Мбит/с "), SHS.h, SHS.fps_out, SHS.mbps);
+        int xs = x;
+        st_seg(&x, y, &left, lv, C_WHITE, AT_B, C_RED);
+        hit_add(xs, y, x - xs, 1, A_BTN, B_SHARE, 0, HV_RED);
+        st_seg(&x, y, &left, "  ", C_MUTED, 0, 0);
+    }
+#endif
     st_seg(&x, y, &left, "  ", C_MUTED, 0, 0);
     if (S.call.ringing) {
         Channel *cc = chan_find(S.call.channel_id);
         char lab[96] = "", t[160];
         if (cc) chan_label(cc, lab, sizeof lab);
-        snprintf(t, sizeof t, " ЗВОНОК: %s  F2 принять  F3 отклонить ", lab);
+        snprintf(t, sizeof t, TR(" ЗВОНОК: %s  F2 принять  F3 отклонить "), lab);
         st_seg(&x, y, &left, t, C_WHITE, AT_B, C_GREEN);
         st_seg(&x, y, &left, "  ", C_MUTED, 0, 0);
     }
     if (S.typing_until > now_ms() && S.typing_name[0]) {
         char t[120];
-        snprintf(t, sizeof t, "~ %s печатает...", S.typing_name);
+        snprintf(t, sizeof t, TR("~ %s печатает..."), S.typing_name);
         int xs = x;
         st_seg(&x, y, &left, t, C_TEXT, 0, 0);
         g_fgset(xs + 2, y, vw(S.typing_name), C_WHITE, AT_B);
@@ -3362,7 +3527,7 @@ static int draw_status(int x0, int x1, int y) {
     } else st_hint(&x, y, &left, focus_hint());
     if (ram) {                                   /* №13: память процесса справа в строке состояния */
         char rm[24];
-        snprintf(rm, sizeof rm, "%.1f МБ", (double)plat_private_bytes() / (1024.0 * 1024.0));
+        snprintf(rm, sizeof rm, TR("%.1f МБ"), (double)plat_private_bytes() / (1024.0 * 1024.0));
         g_rtext(x1 - 2, y, rm, 10, C_MUTED, 0);
     }
     return x;
@@ -3372,32 +3537,32 @@ static int draw_status(int x0, int x1, int y) {
 static void draw_small(int W, int H) {
     char t[96];
     bool narrow = W < 50;                        /* узко: сначала главное — текущий размер и выход */
-    if (narrow) snprintf(t, sizeof t, "сейчас %dx%d, нужно 50x12", W, H);
-    else snprintf(t, sizeof t, "нужно не меньше 50x12, сейчас %dx%d", W, H);
-    if (H > 0) g_text(0, 0, "Astra DS: окно слишком маленькое", H == 1 ? W - 1 : W, C_WHITE, AT_B);
+    if (narrow) snprintf(t, sizeof t, TR("сейчас %dx%d, нужно 50x12"), W, H);
+    else snprintf(t, sizeof t, TR("нужно не меньше 50x12, сейчас %dx%d"), W, H);
+    if (H > 0) g_text(0, 0, TR("Astra DS: окно слишком маленькое"), H == 1 ? W - 1 : W, C_WHITE, AT_B);
     if (H > 1) g_text(0, 1, t, H == 2 ? W - 1 : W, C_TEXT, 0);
-    if (H > 2) g_text(0, 2, narrow ? "Ctrl+Q - выход" : "растяните окно или уменьшите шрифт; Ctrl+Q - выход", H == 3 ? W - 1 : W, C_MUTED, 0);
+    if (H > 2) g_text(0, 2, narrow ? TR("Ctrl+Q - выход") : TR("растяните окно или уменьшите шрифт; Ctrl+Q - выход"), H == 3 ? W - 1 : W, C_MUTED, 0);
 }
 
 /* Состояние сети для заголовка канала. */
 static void net_tag(char *rtag, size_t n, u32 *rfg, bool narrow) {
     char gst[128];
     deco_ascii(gw_status_text(), gst, sizeof gst);
-    if (!gst[0] && O.demo) snprintf(gst, sizeof gst, "демо");
+    if (!gst[0] && O.demo) snprintf(gst, sizeof gst, TR("демо"));
     bool bad = !O.demo && (!S.ready || strcmp(gst, "в сети"));
     *rfg = bad ? C_GOLD : C_MUTED;
     if (!bad && g_gw_ping > 0) {                 /* №148: пинг шлюза цветом — до 100 мс зелёный, до 250 жёлтый, дальше красный */
-        snprintf(gst + strlen(gst), sizeof gst - strlen(gst), " %d мс", g_gw_ping);
+        snprintf(gst + strlen(gst), sizeof gst - strlen(gst), TR(" %d мс"), g_gw_ping);
         *rfg = g_gw_ping < 100 ? C_GREEN : g_gw_ping < 250 ? C_GOLD : C_RED;
     }
     VlessState vst = vless_state();
     char vlt[48] = "";
     if (vst == VL_UP) {
         int ms = vless_latency_ms();
-        if (ms >= 0) snprintf(vlt, sizeof vlt, "VLESS %d мс", ms); else snprintf(vlt, sizeof vlt, "VLESS");
+        if (ms >= 0) snprintf(vlt, sizeof vlt, TR("VLESS %d мс"), ms); else snprintf(vlt, sizeof vlt, "VLESS");
     } else if (vst == VL_STARTING) snprintf(vlt, sizeof vlt, "VLESS ...");
     snprintf(rtag, n, "%s%s%s", gst, gst[0] && vlt[0] ? " | " : "", vlt);
-    if (vst == VL_DOWN) { snprintf(rtag, n, "%s", narrow ? "VLESS!" : "VLESS: нет связи"); *rfg = C_RED; }
+    if (vst == VL_DOWN) { snprintf(rtag, n, "%s", narrow ? "VLESS!" : TR("VLESS: нет связи")); *rfg = C_RED; }
 }
 
 static void draw_help(int W, int H) {
@@ -3410,7 +3575,7 @@ static void draw_help(int W, int H) {
     g_text(bx, 0, "[x]", 3, C_TEXT, AT_B);
     hit_add(bx, 0, 3, 1, A_BTN, B_HELP_CLOSE, 0, HV_RED);
     int rx = g_rtext(bx - 2, 0, rtag, W / 3, rfg, 0);
-    g_text(1, 0, "справка: Up/Down листать, F1 или Esc закрыть", rx - 3, C_WHITE, AT_B);
+    g_text(1, 0, TR("справка: Up/Down листать, F1 или Esc закрыть"), rx - 3, C_WHITE, AT_B);
     int body_h = H - 2;
     bool two = W - 2 >= 96;
     int hcolw = two ? (W - 2 - 2) / 2 : W - 2, kw;
@@ -3432,7 +3597,7 @@ static void draw_help(int W, int H) {
         int y = 1 + ry, row = ry + U.help_scroll;
         if (ry == body_h - 1 && hrows - U.help_scroll > body_h) {
             g_pill(1, y, W - 2, C_ACC);
-            g_ctext(1, y, W - 2, "ниже ещё: Down / PgDn", C_WHITE, AT_B);
+            g_ctext(1, y, W - 2, TR("ниже ещё: Down / PgDn"), C_WHITE, AT_B);
             continue;
         }
         for (int col = 0; col < (two ? 2 : 1); col++) {
@@ -3456,70 +3621,70 @@ static int menu_items(int kind, const Message *m, int *ids, const char **names, 
     static char fxl[64];
     if (kind == MENU_SET) {
         VoiceFx fx = voicefx_get();
-        snprintf(fxl, sizeof fxl, "Смена голоса: %s     F11", fx == VFX_LOW ? "ниже" : fx == VFX_HIGH ? "выше" : "выкл");
+        snprintf(fxl, sizeof fxl, TR("Смена голоса: %s     F11"), fx == VFX_LOW ? TR("ниже") : fx == VFX_HIGH ? TR("выше") : TR("выкл"));
         ids[n] = MI_FX; danger[n] = false; names[n++] = fxl;
-        ids[n] = MI_VADDN; danger[n] = false; names[n++] = "Порог голоса -3 дБ     F9";
-        ids[n] = MI_VADUP; danger[n] = false; names[n++] = "Порог голоса +3 дБ    F10";
-        ids[n] = MI_HELP; danger[n] = false; names[n++] = "Справка                F1";
-        ids[n] = MI_QUIT; danger[n] = true; names[n++] = "Выйти              Ctrl+Q";
+        ids[n] = MI_VADDN; danger[n] = false; names[n++] = TR("Порог голоса -3 дБ     F9");
+        ids[n] = MI_VADUP; danger[n] = false; names[n++] = TR("Порог голоса +3 дБ    F10");
+        ids[n] = MI_HELP; danger[n] = false; names[n++] = TR("Справка                F1");
+        ids[n] = MI_QUIT; danger[n] = true; names[n++] = TR("Выйти              Ctrl+Q");
         return n;
     }
     if (kind == MENU_GUILD) {
         u64 g = cur_guild_id();
-        ids[n] = MI_G_INV; danger[n] = false; names[n++] = "Пригласить людей";
-        if (can_manage_guild(g)) { ids[n] = MI_G_SET; danger[n] = false; names[n++] = "Настройки сервера"; }
+        ids[n] = MI_G_INV; danger[n] = false; names[n++] = TR("Пригласить людей");
+        if (can_manage_guild(g)) { ids[n] = MI_G_SET; danger[n] = false; names[n++] = TR("Настройки сервера"); }
         if (can_manage_channels(g)) {
-            ids[n] = MI_G_CH; danger[n] = false; names[n++] = "Создать канал";
-            ids[n] = MI_G_CAT; danger[n] = false; names[n++] = "Создать категорию";
-            ids[n] = MI_G_MOVE; danger[n] = false; names[n++] = U.moving ? "Готово: перестановка" : "Переставить каналы";
+            ids[n] = MI_G_CH; danger[n] = false; names[n++] = TR("Создать канал");
+            ids[n] = MI_G_CAT; danger[n] = false; names[n++] = TR("Создать категорию");
+            ids[n] = MI_G_MOVE; danger[n] = false; names[n++] = U.moving ? TR("Готово: перестановка") : TR("Переставить каналы");
         }
 #ifdef MC_PACKA
         {
             Guild *gg = guild_find(g);
             static char nl[64];
             static const char *const lv[] = { "все сообщения", "только упоминания", "ничего", "по умолчанию" };
-            ids[n] = MI_G_MUTE; danger[n] = false; names[n++] = gg && gg->muted ? "Включить уведомления сервера" : "Заглушить сервер";
-            snprintf(nl, sizeof nl, "Уведомления: %s", lv[gg ? gg->notify & 3 : 3]);
+            ids[n] = MI_G_MUTE; danger[n] = false; names[n++] = gg && gg->muted ? TR("Включить уведомления сервера") : TR("Заглушить сервер");
+            snprintf(nl, sizeof nl, TR("Уведомления: %s"), tr(lv[gg ? gg->notify & 3 : 3]));
             ids[n] = MI_G_NOTIFY; danger[n] = false; names[n++] = nl;
         }
 #endif
-        if (!guild_is_owner(g)) { ids[n] = MI_G_LEAVE; danger[n] = true; names[n++] = "Покинуть сервер"; }
+        if (!guild_is_owner(g)) { ids[n] = MI_G_LEAVE; danger[n] = true; names[n++] = TR("Покинуть сервер"); }
         return n;
     }
     if (kind == MENU_CHAN) {
         Channel *c = chan_find(U.menu_cid);
         u64 g = c ? c->guild_id : 0;
-        if (g && can_manage_channels(g)) { ids[n] = MI_C_EDIT; danger[n] = false; names[n++] = "Изменить канал"; }
-        if (g && can_manage_roles(g)) { ids[n] = MI_C_PERMS; danger[n] = false; names[n++] = "Права канала"; }
+        if (g && can_manage_channels(g)) { ids[n] = MI_C_EDIT; danger[n] = false; names[n++] = TR("Изменить канал"); }
+        if (g && can_manage_roles(g)) { ids[n] = MI_C_PERMS; danger[n] = false; names[n++] = TR("Права канала"); }
 #ifdef MC_WAVE2
-        if (g && c->type != CH_CATEGORY && can_create_invite(c->id)) { ids[n] = MI_C_INV; danger[n] = false; names[n++] = "Пригласить людей"; }
+        if (g && c->type != CH_CATEGORY && can_create_invite(c->id)) { ids[n] = MI_C_INV; danger[n] = false; names[n++] = TR("Пригласить людей"); }
 #else
-        if (g && c->type != CH_CATEGORY) { ids[n] = MI_C_INV; danger[n] = false; names[n++] = "Пригласить людей"; }
+        if (g && c->type != CH_CATEGORY) { ids[n] = MI_C_INV; danger[n] = false; names[n++] = TR("Пригласить людей"); }
 #endif
 #ifdef MC_PACKA
         if (c) {
             static char cl[64];
             static const char *const lv[] = { "все сообщения", "только упоминания", "ничего", "как у сервера" };
-            ids[n] = MI_C_MUTE; danger[n] = false; names[n++] = c->muted ? "Включить уведомления" : (g ? "Заглушить канал" : "Заглушить беседу");
-            if (g) { snprintf(cl, sizeof cl, "Уведомления: %s", lv[c->notify & 3]); ids[n] = MI_C_NOTIFY; danger[n] = false; names[n++] = cl; }
+            ids[n] = MI_C_MUTE; danger[n] = false; names[n++] = c->muted ? TR("Включить уведомления") : (g ? TR("Заглушить канал") : TR("Заглушить беседу"));
+            if (g) { snprintf(cl, sizeof cl, TR("Уведомления: %s"), tr(lv[c->notify & 3])); ids[n] = MI_C_NOTIFY; danger[n] = false; names[n++] = cl; }
         }
 #endif
         if (c && c->type == CH_GROUP) {
-            ids[n] = MI_GDM_ADD; danger[n] = false; names[n++] = "Добавить друзей";
-            ids[n] = MI_GDM_LEAVE; danger[n] = true; names[n++] = "Покинуть группу";
+            ids[n] = MI_GDM_ADD; danger[n] = false; names[n++] = TR("Добавить друзей");
+            ids[n] = MI_GDM_LEAVE; danger[n] = true; names[n++] = TR("Покинуть группу");
         }
-        if (c && c->guild_id && (c->type == CH_TEXT || c->type == CH_NEWS)) { ids[n] = MI_C_ARCH; danger[n] = false; names[n++] = "Архив веток"; }
+        if (c && c->guild_id && (c->type == CH_TEXT || c->type == CH_NEWS)) { ids[n] = MI_C_ARCH; danger[n] = false; names[n++] = TR("Архив веток"); }
         if (is_thread(c)) {
-            ids[n] = MI_T_RENAME; danger[n] = false; names[n++] = "Переименовать ветку";
-            ids[n] = MI_T_ARCH; danger[n] = false; names[n++] = c->tflags & TF_ARCHIVED ? "Вернуть из архива" : "В архив";
-            ids[n] = MI_T_LOCK; danger[n] = false; names[n++] = c->tflags & TF_LOCKED ? "Открыть ветку" : "Закрыть ветку";
-            ids[n] = MI_T_MEMB; danger[n] = false; names[n++] = "Участники ветки";
+            ids[n] = MI_T_RENAME; danger[n] = false; names[n++] = TR("Переименовать ветку");
+            ids[n] = MI_T_ARCH; danger[n] = false; names[n++] = c->tflags & TF_ARCHIVED ? TR("Вернуть из архива") : TR("В архив");
+            ids[n] = MI_T_LOCK; danger[n] = false; names[n++] = c->tflags & TF_LOCKED ? TR("Открыть ветку") : TR("Закрыть ветку");
+            ids[n] = MI_T_MEMB; danger[n] = false; names[n++] = TR("Участники ветки");
         }
-        if (c && c->type == CH_GROUP) { ids[n] = MI_GDM_RENAME; danger[n] = false; names[n++] = "Переименовать группу"; }
-        if (is_voice_t(c)) { ids[n] = MI_C_VSTATUS; danger[n] = false; names[n++] = "Изменить статус"; }
-        if (is_thread(c)) { ids[n] = MI_T_JOIN; danger[n] = false; names[n++] = c->tflags & TF_JOINED ? "Покинуть ветку" : "Вступить в ветку"; }
-        ids[n] = MI_C_ID; danger[n] = false; names[n++] = "Копировать ID канала";
-        if (g && can_manage_channels(g)) { ids[n] = MI_C_DEL; danger[n] = true; names[n++] = c->type == CH_CATEGORY ? "Удалить категорию" : "Удалить канал"; }
+        if (c && c->type == CH_GROUP) { ids[n] = MI_GDM_RENAME; danger[n] = false; names[n++] = TR("Переименовать группу"); }
+        if (is_voice_t(c)) { ids[n] = MI_C_VSTATUS; danger[n] = false; names[n++] = TR("Изменить статус"); }
+        if (is_thread(c)) { ids[n] = MI_T_JOIN; danger[n] = false; names[n++] = c->tflags & TF_JOINED ? TR("Покинуть ветку") : TR("Вступить в ветку"); }
+        ids[n] = MI_C_ID; danger[n] = false; names[n++] = TR("Копировать ID канала");
+        if (g && can_manage_channels(g)) { ids[n] = MI_C_DEL; danger[n] = true; names[n++] = c->type == CH_CATEGORY ? TR("Удалить категорию") : TR("Удалить канал"); }
         return n;
     }
     if (kind == MENU_STATUS) {
@@ -3528,51 +3693,52 @@ static int menu_items(int kind, const Message *m, int *ids, const char **names, 
         static const char *const nm[4] = { "В сети", "Не активен", "Не беспокоить", "Невидимый" };
         static const u8 ps[4] = { PS_ONLINE, PS_IDLE, PS_DND, PS_INVISIBLE };
         for (int i = 0; i < 4; i++) {
-            snprintf(st[i], sizeof st[i], "%s %s", cur == ps[i] ? "*" : " ", nm[i]);
+            snprintf(st[i], sizeof st[i], "%s %s", cur == ps[i] ? "*" : " ", tr(nm[i]));
             ids[n] = MI_ST_ON + i; danger[n] = false; names[n++] = st[i];
         }
-        ids[n] = MI_FOCUS30; danger[n] = false; names[n++] = "Режим фокуса: 30 мин";
-        ids[n] = MI_FOCUS60; danger[n] = false; names[n++] = "Режим фокуса: 1 ч";
-        ids[n] = MI_FOCUS120; danger[n] = false; names[n++] = "Режим фокуса: 2 ч";
-        if (focus_until()) { ids[n] = MI_FOCUSOFF; danger[n] = false; names[n++] = "Выключить режим фокуса"; }
+        ids[n] = MI_STATUS_SET; danger[n] = false; names[n++] = TR("Статус на время и текст...");
+        ids[n] = MI_FOCUS30; danger[n] = false; names[n++] = TR("Режим фокуса: 30 мин");
+        ids[n] = MI_FOCUS60; danger[n] = false; names[n++] = TR("Режим фокуса: 1 ч");
+        ids[n] = MI_FOCUS120; danger[n] = false; names[n++] = TR("Режим фокуса: 2 ч");
+        if (focus_until()) { ids[n] = MI_FOCUSOFF; danger[n] = false; names[n++] = TR("Выключить режим фокуса"); }
         return n;
     }
     if (kind == MENU_FRIEND) {
         const Relation *r = rel_find(U.menu_uid);
-        if (r && r->type == REL_BLOCKED) { ids[n] = MI_FR_UNBLOCK; danger[n] = false; names[n++] = "Разблокировать     Enter"; return n; }
-        ids[n] = MI_FR_MSG; danger[n] = false; names[n++] = "Написать           Enter";
-        ids[n] = MI_FR_DEL; danger[n] = true; names[n++] = "Удалить из друзей    Del";
+        if (r && r->type == REL_BLOCKED) { ids[n] = MI_FR_UNBLOCK; danger[n] = false; names[n++] = TR("Разблокировать     Enter"); return n; }
+        ids[n] = MI_FR_MSG; danger[n] = false; names[n++] = TR("Написать           Enter");
+        ids[n] = MI_FR_DEL; danger[n] = true; names[n++] = TR("Удалить из друзей    Del");
         return n;
     }
 #ifdef MC_PACKA
     if (m && m->state != MS_SENT) {              /* ещё не на сервере: только повтор, отмена, копия */
-        if (m->state == MS_FAILED) { ids[n] = MI_MRETRY; danger[n] = false; names[n++] = "Повторить отправку"; }
-        ids[n] = MI_MDISCARD; danger[n] = true; names[n++] = m->state == MS_FAILED ? "Удалить неотправленное" : "Отменить отправку";
-        ids[n] = MI_COPY; danger[n] = false; names[n++] = "Копировать текст";
+        if (m->state == MS_FAILED) { ids[n] = MI_MRETRY; danger[n] = false; names[n++] = TR("Повторить отправку"); }
+        ids[n] = MI_MDISCARD; danger[n] = true; names[n++] = m->state == MS_FAILED ? TR("Удалить неотправленное") : TR("Отменить отправку");
+        ids[n] = MI_COPY; danger[n] = false; names[n++] = TR("Копировать текст");
         return n;
     }
 #endif
-    ids[n] = MI_REPLY; danger[n] = false; names[n++] = "Ответить          r";
-    if (m && m->author_id == S.me_id) { ids[n] = MI_EDIT; danger[n] = false; names[n++] = "Изменить          e"; }
-    ids[n] = MI_REACT; danger[n] = false; names[n++] = "Добавить реакцию  +";
+    ids[n] = MI_REPLY; danger[n] = false; names[n++] = TR("Ответить          r");
+    if (m && m->author_id == S.me_id) { ids[n] = MI_EDIT; danger[n] = false; names[n++] = TR("Изменить          e"); }
+    ids[n] = MI_REACT; danger[n] = false; names[n++] = TR("Добавить реакцию  +");
 #ifdef MC_WAVE1
 #ifdef MC_RAW
-    ids[n] = MI_PIN; danger[n] = false; names[n++] = m && m->pinned ? "Открепить сообщение" : "Закрепить сообщение";
+    ids[n] = MI_PIN; danger[n] = false; names[n++] = m && m->pinned ? TR("Открепить сообщение") : TR("Закрепить сообщение");
 #else
-    ids[n] = MI_PIN; danger[n] = false; names[n++] = "Закрепить сообщение";
+    ids[n] = MI_PIN; danger[n] = false; names[n++] = TR("Закрепить сообщение");
 #endif
-    ids[n] = MI_UNREAD; danger[n] = false; names[n++] = "Отметить непрочитанным";
+    ids[n] = MI_UNREAD; danger[n] = false; names[n++] = TR("Отметить непрочитанным");
 #endif
     {
         const Channel *oc = chan_find(S.open_ch);
-        if (oc && oc->guild_id && (oc->type == CH_TEXT || oc->type == CH_NEWS)) { ids[n] = MI_THREAD; danger[n] = false; names[n++] = "Создать ветку"; }
+        if (oc && oc->guild_id && (oc->type == CH_TEXT || oc->type == CH_NEWS)) { ids[n] = MI_THREAD; danger[n] = false; names[n++] = TR("Создать ветку"); }
     }
-    ids[n] = MI_FORWARD; danger[n] = false; names[n++] = "Переслать";
-    if (m && m->nreacts) { ids[n] = MI_REACTS; danger[n] = false; names[n++] = "Просмотр реакций"; }
-    ids[n] = MI_COPY; danger[n] = false; names[n++] = "Копировать текст";
-    ids[n] = MI_COPYLINK; danger[n] = false; names[n++] = "Копировать ссылку на сообщение";
-    ids[n] = MI_COPYID; danger[n] = false; names[n++] = "Копировать ID сообщения";
-    if (m && m->author_id == S.me_id) { ids[n] = MI_DELETE; danger[n] = true; names[n++] = "Удалить сообщение d"; }
+    ids[n] = MI_FORWARD; danger[n] = false; names[n++] = TR("Переслать");
+    if (m && m->nreacts) { ids[n] = MI_REACTS; danger[n] = false; names[n++] = TR("Просмотр реакций"); }
+    ids[n] = MI_COPY; danger[n] = false; names[n++] = TR("Копировать текст");
+    ids[n] = MI_COPYLINK; danger[n] = false; names[n++] = TR("Копировать ссылку на сообщение");
+    ids[n] = MI_COPYID; danger[n] = false; names[n++] = TR("Копировать ID сообщения");
+    if (m && m->author_id == S.me_id) { ids[n] = MI_DELETE; danger[n] = true; names[n++] = TR("Удалить сообщение d"); }
     return n;
 }
 static void draw_menu(int ax, int ay, int aw, int ah) {
@@ -3605,8 +3771,8 @@ static void draw_menu(int ax, int ay, int aw, int ah) {
 }
 
 /* ---- экран настроек пользователя (шестерёнка в панели пользователя) ---- */
-static const char *const SET_SEC[] = { "Моя учётная запись", "Конфиденциальность", "Внешний вид", "Голос и видео", "Уведомления", "Горячие клавиши", "Производительность" };
-enum { SS_ACC, SS_PRIV, SS_LOOK, SS_VOICE, SS_NOTIF, SS_KEYS, SS_PERF, NSEC };
+static const char *const SET_SEC[] = { "Моя учётная запись", "Конфиденциальность", "Внешний вид", "Голос и видео", "Уведомления", "Горячие клавиши", "Производительность", "Обновления" };
+enum { SS_ACC, SS_PRIV, SS_LOOK, SS_VOICE, SS_NOTIF, SS_KEYS, SS_PERF, SS_UPD, NSEC };
 _Static_assert(sizeof SET_SEC / sizeof *SET_SEC == NSEC, "SET_SEC и SS_* разошлись");
 /* №140/146: устройства ввода/вывода — список читается при входе в «Голос и видео» (не на каждый кадр);
  * тест микрофона открыт только пока открыт этот раздел (ui_tick закрывает при уходе). */
@@ -3627,22 +3793,40 @@ static void dev_step(int out, int d) {
 static void dev_field(int x, int y, int w, int out) {
     const char *cur = voice_device(out);
     bool none = DEV.n[out] < 0;
-    g_text(x, y, out ? "УСТРОЙСТВО ВЫВОДА" : "УСТРОЙСТВО ВВОДА", w, C_MUTED, AT_B);
+    g_text(x, y, out ? TR("УСТРОЙСТВО ВЫВОДА") : TR("УСТРОЙСТВО ВВОДА"), w, C_MUTED, AT_B);
     if (w < 12) return;
     g_rect(x, y + 1, w, 1, C_RAIL);
-    if (none) { g_texte(x + 1, y + 1, "звук недоступен", w - 2, C_MUTED, 0); return; }
+    if (none) { g_texte(x + 1, y + 1, TR("звук недоступен"), w - 2, C_MUTED, 0); return; }
     g_text(x + 1, y + 1, "<", 1, C_TEXT, AT_B);
     g_text(x + w - 2, y + 1, ">", 1, C_TEXT, AT_B);
-    g_texte(x + 3, y + 1, cur && *cur ? (streamer_on() ? "выбрано (скрыто)" : cur) : "По умолчанию", w - 6, C_WHITE, 0);
+    g_texte(x + 3, y + 1, cur && *cur ? (streamer_on() ? TR("выбрано (скрыто)") : cur) : TR("По умолчанию"), w - 6, C_WHITE, 0);
     hit_add(x, y + 1, 3, 1, A_DEV, out, -1, HV_BG);
     hit_add(x + 3, y + 1, w - 6, 1, A_DEV, out, 1, HV_BG);
     hit_add(x + w - 3, y + 1, 3, 1, A_DEV, out, 1, HV_BG);
 }
 /* №16 полный экран окна: Alt+Enter и кнопка в «Внешний вид»; в консоли — средствами терминала. */
+#ifdef ASTRA_VIDEO
+/* Демонстрация экрана (видео-версия). Пока идёт: режим стримера включён, индикатор в строке состояния,
+ * автостоп — выход из звонка, смена канала звонка, закрытие окна-источника, блокировка экрана, паника.
+ * Своё окно исключено из захвата всегда (term_capture_exclude с запуска). Кадры никуда не пишутся. */
+static char sh_t[24][80];
+static const char *sh_names[25];
+static uintptr_t sh_ids[24];
+static int sh_n;
+static const char *const SH_MODES[] = { "720p 24 к/с (около 10 МБ, нагрузка выше)", "480p 15 к/с - облегчённый" };
+static void share_ui_stop(const char *why) {
+    if (!sh_running) return;
+    share_stop();
+    sh_running = false;
+    streamer_set(sh_prev_streamer);
+    if (why && *why) ui_notice("%s", tr(why));
+    U.dirty = true;
+}
+#endif
 static bool full_toggle(void) {
     int r = term_fullscreen(-1);
     if (r < 0) return false;
-    ui_notice(r ? "во весь экран (Alt+Enter - вернуть)" : "обычное окно");
+    ui_notice(r ? TR("во весь экран (Alt+Enter - вернуть)") : TR("обычное окно"));
     U.full = U.dirty = true;
     return true;
 }
@@ -3659,10 +3843,10 @@ int plat_key_vk(const Key *k) {
 }
 /* Масштаб окна (№15): Ctrl+= / Ctrl+- / Ctrl+0 и кнопки в «Внешний вид». */
 static void zoom_step(int step) {
-    if (term_zoom(step)) ui_notice("Масштаб %d %%", term_zoom_pct());
-    else if (term_subcell_scale() <= 0) ui_notice("в консоли масштаб меняет сам терминал");
-    else if (step) ui_notice("Масштаб %d %% - это предел", term_zoom_pct());
-    else ui_notice("Масштаб уже %d %%", term_zoom_pct());
+    if (term_zoom(step)) ui_notice(TR("Масштаб %d %%"), term_zoom_pct());
+    else if (term_subcell_scale() <= 0) ui_notice(TR("в консоли масштаб меняет сам терминал"));
+    else if (step) ui_notice(TR("Масштаб %d %% - это предел"), term_zoom_pct());
+    else ui_notice(TR("Масштаб уже %d %%"), term_zoom_pct());
     U.full = U.dirty = true;
 }
 /* Подпись и значение с переносом; вернуть занятые строки + 1 (промежуток). */
@@ -3689,15 +3873,15 @@ static void draw_settings(int W, int H) {
     /* разделы справа в левой колонке, как в Discord */
     int lw = 22, lx = ls - lw - 2;
     if (lx < 1) lx = 1;
-    g_text(lx + 1, 1, "НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ", lw, C_MUTED, AT_B);
+    g_text(lx + 1, 1, TR("НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ"), lw, C_MUTED, AT_B);
     for (int i = 0; i < NSEC; i++) {
         int y = 2 + i;
         if (i == U.set_sec) g_pill(lx, y, lw, C_SEL);
-        g_text(lx + 1, y, SET_SEC[i], lw - 2, i == U.set_sec ? C_WHITE : C_MUTED, i == U.set_sec ? AT_B : 0);
+        g_text(lx + 1, y, tr(SET_SEC[i]), lw - 2, i == U.set_sec ? C_WHITE : C_MUTED, i == U.set_sec ? AT_B : 0);
         hit_add(lx, y, lw, 1, A_SETSEC, 0, i, HV_PILL);
     }
     for (int i = lx + 1; i < lx + lw - 1; i++) g_ch(i, 3 + NSEC, '-', 0x3f4147u, 0);
-    g_text(lx + 1, 4 + NSEC, "Выйти из Astra DS", lw - 2, C_RED, 0);
+    g_text(lx + 1, 4 + NSEC, TR("Выйти из Astra DS"), lw - 2, C_RED, 0);
     hit_add(lx, 4 + NSEC, lw, 1, A_BTN, B_QUIT, 0, HV_PILL);
     /* закрыть: круглая кнопка x и подпись ESC */
     int cxb = W - 6;
@@ -3707,7 +3891,7 @@ static void draw_settings(int W, int H) {
     hit_add(cxb, 1, 4, 3, A_BTN, B_SET_CLOSE, 0, HV_BG);
     int x = ls + 3, w = W - ls - 12, y = 1;
     if (w > 70) w = 70;
-    g_text(x, y, SET_SEC[U.set_sec], w, C_WHITE, AT_B);
+    g_text(x, y, tr(SET_SEC[U.set_sec]), w, C_WHITE, AT_B);
     y += 2;
     char t[200];
     switch (U.set_sec) {
@@ -3717,16 +3901,16 @@ static void draw_settings(int W, int H) {
         g_round_corners(x, y, w, 9, 0, C_FEED);
         g_rect(x, y + 2, w, 7, C_RAIL);
         g_round_corners(x, y + 8, w, 9, 8, C_FEED);
-        const char *me = S.me_name && *S.me_name ? S.me_name : "вы";
+        const char *me = S.me_name && *S.me_name ? S.me_name : TR("вы");
         for (int r = 0; r < 3; r++) g_avatar(x + 2, y + 2 + r, 6, 3, r, S.me_id, me);
         g_text(x + 10, y + 3, me, w - 12, C_WHITE, AT_B);
-        snprintf(t, sizeof t, "%s", O.invisible ? "Невидимый" : "В сети");
-        set_row(x + 2, y + 6, w - 4, "СТАТУС", t, C_TEXT);
+        snprintf(t, sizeof t, "%s", O.invisible ? TR("Невидимый") : TR("В сети"));
+        set_row(x + 2, y + 6, w - 4, TR("СТАТУС"), t, C_TEXT);
         y += 10;
-        snprintf(t, sizeof t, "хранится в системном хранилище (%s), на диск не пишется", keyring_name());
-        y += set_row(x, y, w, "ТОКЕН", t, C_TEXT);
-        y += set_row(x, y, w, "ДАННЫЕ", "сообщения не кэшируются, журналов нет, список участников сервера не загружается", C_TEXT);
-        g_button(x, y, "Изменить профиль", w, 1, B_MEPROF);   /* №113 */
+        snprintf(t, sizeof t, TR("хранится в системном хранилище (%s), на диск не пишется"), keyring_name());
+        y += set_row(x, y, w, TR("ТОКЕН"), t, C_TEXT);
+        y += set_row(x, y, w, TR("ДАННЫЕ"), TR("сообщения не кэшируются, журналов нет, список участников сервера не загружается"), C_TEXT);
+        g_button(x, y, TR("Изменить профиль"), w, 1, B_MEPROF);   /* №113 */
         break;
     }
     case SS_VOICE: {
@@ -3744,12 +3928,12 @@ static void draw_settings(int W, int H) {
             dev_field(x, y + 3, w, 1);
             y += 6;
         }
-        g_text(x, y, "ПРОВЕРКА МИКРОФОНА", w, C_MUTED, AT_B);
-        int u = g_button(x, y + 1, mic_test_on ? "Остановить" : "Проверить микрофон", w, mic_test_on ? 2 : 1, B_MICTEST);
+        g_text(x, y, TR("ПРОВЕРКА МИКРОФОНА"), w, C_MUTED, AT_B);
+        int u = g_button(x, y + 1, mic_test_on ? TR("Остановить") : TR("Проверить микрофон"), w, mic_test_on ? 2 : 1, B_MICTEST);
         int bx = x + u + 2, bw = w - u - 2;
         if (bw > 40) bw = 40;
         int lv = mic_test_on ? voice_mic_level() : -1;
-        if (mic_test_on && lv < 0) g_texte(bx, y + 1, "микрофон не открылся", w - u - 2, C_RED, 0);
+        if (mic_test_on && lv < 0) g_texte(bx, y + 1, TR("микрофон не открылся"), w - u - 2, C_RED, 0);
         else if (bw >= 10) {
             /* полоса уровня -60..0 дБ; золотая черта — порог активации голосом */
             int fill = lv < 0 ? 0 : lv * bw / 100, thr = (voice_vad_db() + 60) * bw / 60;
@@ -3760,75 +3944,107 @@ static void draw_settings(int W, int H) {
                 g_ch(bx + i, y + 1, i == thr ? '|' : i < fill ? '#' : '-', i == thr ? C_GOLD : i < fill ? (loud ? C_GREEN : C_TEXT) : C_LINE, i < fill || i == thr ? AT_B : 0);
         }
         y += 3;
-        g_text(x, y, "МИКРОФОН И ЗВУК", w, C_MUTED, AT_B);
-        u = g_button(x, y + 1, vs.self_mute ? "Микрофон выкл (F5)" : "Микрофон вкл (F5)", w, vs.self_mute ? 2 : 0, B_MIC);
-        g_button(x + u + 1, y + 1, vs.self_deaf ? "Звук выкл (F6)" : "Звук вкл (F6)", w - u - 1, vs.self_deaf ? 2 : 0, B_DEAF);
+        g_text(x, y, TR("МИКРОФОН И ЗВУК"), w, C_MUTED, AT_B);
+        u = g_button(x, y + 1, vs.self_mute ? TR("Микрофон выкл (F5)") : TR("Микрофон вкл (F5)"), w, vs.self_mute ? 2 : 0, B_MIC);
+        g_button(x + u + 1, y + 1, vs.self_deaf ? TR("Звук выкл (F6)") : TR("Звук вкл (F6)"), w - u - 1, vs.self_deaf ? 2 : 0, B_DEAF);
         y += 3;
-        g_text(x, y, "КЛАВИША РАЦИИ", w, C_MUTED, AT_B);
+        g_text(x, y, TR("КЛАВИША РАЦИИ"), w, C_MUTED, AT_B);
 #ifdef _WIN32
         {
             int vk = voice_ptt_bound();
             char kn[48] = "";
             if (vk) plat_key_name(vk, kn, sizeof kn);
-            if (ptt_capture) snprintf(t, sizeof t, "нажмите клавишу или боковую кнопку мыши (Esc - отмена)");
-            else if (vk) snprintf(t, sizeof t, "%s", kn[0] ? kn : "задана");
-            else snprintf(t, sizeof t, "F8 (с --ptt)");
-            u = g_button(x, y + 1, ptt_capture ? "Отмена" : "Назначить", w, 0, ptt_capture ? B_PTT_CLR : B_PTT_SET);
-            if (vk && !ptt_capture) u += 1 + g_button(x + u + 1, y + 1, "Сбросить", w - u - 1, 0, B_PTT_CLR);
+            if (ptt_capture) snprintf(t, sizeof t, TR("нажмите клавишу или боковую кнопку мыши (Esc - отмена)"));
+            else if (vk) snprintf(t, sizeof t, "%s", kn[0] ? kn : TR("задана"));
+            else snprintf(t, sizeof t, TR("F8 (с --ptt)"));
+            u = g_button(x, y + 1, ptt_capture ? TR("Отмена") : TR("Назначить"), w, 0, ptt_capture ? B_PTT_CLR : B_PTT_SET);
+            if (vk && !ptt_capture) u += 1 + g_button(x + u + 1, y + 1, TR("Сбросить"), w - u - 1, 0, B_PTT_CLR);
             int tu = g_texte(x + u + 2, y + 1, t, w - u - 2, ptt_capture ? C_GOLD : C_WHITE, AT_B);
             bool global = vk == 0x05 || vk == 0x06 || (vk >= 0x7C && vk <= 0x87) || vk == 0x13 || vk == 0x91;
-            if (vk && !global && !ptt_capture) g_texte(x + u + 4 + tu, y + 1, "работает только когда окно активно", w - u - 4 - tu, C_MUTED, 0);
+            if (vk && !global && !ptt_capture) g_texte(x + u + 4 + tu, y + 1, TR("работает только когда окно активно"), w - u - 4 - tu, C_MUTED, 0);
         }
 #else
-        g_texte(x, y + 1, "F8 с --ptt (выбор клавиши на Linux недоступен)", w, C_TEXT, 0);
+        g_texte(x, y + 1, TR("F8 с --ptt (выбор клавиши на Linux недоступен)"), w, C_TEXT, 0);
 #endif
         y += 3;
         bool va = voice_vad_is_auto();
-        snprintf(t, sizeof t, "ПОРОГ АКТИВАЦИИ ГОЛОСОМ: %s%d дБ%s", va ? "авто, сейчас " : "", voice_vad_db(), O.ptt ? " (рация --ptt)" : "");
+        snprintf(t, sizeof t, TR("ПОРОГ АКТИВАЦИИ ГОЛОСОМ: %s%d дБ%s"), va ? TR("авто, сейчас ") : "", voice_vad_db(), O.ptt ? TR(" (рация --ptt)") : "");
         g_text(x, y, t, w, C_MUTED, AT_B);
-        u = g_button(x, y + 1, va ? "[x] Автоматически" : "[ ] Автоматически", w, va ? 1 : 0, B_VADAUTO);
+        u = g_button(x, y + 1, va ? TR("[x] Автоматически") : TR("[ ] Автоматически"), w, va ? 1 : 0, B_VADAUTO);
         if (!va) {
-            u += 1 + g_button(x + u + 1, y + 1, "-3 дБ (F9)", w - u - 1, 0, B_VADDN);
-            g_button(x + u + 1, y + 1, "+3 дБ (F10)", w - u - 1, 0, B_VADUP);
+            u += 1 + g_button(x + u + 1, y + 1, TR("-3 дБ (F9)"), w - u - 1, 0, B_VADDN);
+            g_button(x + u + 1, y + 1, TR("+3 дБ (F10)"), w - u - 1, 0, B_VADUP);
         }
         y += 3;
+        g_text(x, y, TR("ЗВУКИ И ФИЛЬТР"), w, C_MUTED, AT_B);
+        u = g_button(x, y + 1, voice_hpf_on() ? TR("[x] Фильтр гула (ниже 90 Гц)") : TR("[ ] Фильтр гула (ниже 90 Гц)"), w, voice_hpf_on() ? 1 : 0, B_HPF);
+        g_button(x + u + 1, y + 1, sounds_enabled() ? TR("[x] Звуки звонка и событий") : TR("[ ] Звуки звонка и событий"), w - u - 1, sounds_enabled() ? 1 : 0, B_SOUNDS);
+        g_button(x, y + 2, voice_duck_others_on() ? TR("[x] Приглушать другие программы во время звонка") : TR("[ ] Приглушать другие программы во время звонка"),
+                 w, voice_duck_others_on() ? 1 : 0, B_DUCK);
+        y += 4;
         VoiceFx fx = voicefx_get();
-        g_text(x, y, "СМЕНА ГОЛОСА", w, C_MUTED, AT_B);
-        snprintf(t, sizeof t, "Голос: %s (F11)", fx == VFX_LOW ? "ниже" : fx == VFX_HIGH ? "выше" : "как есть");
+        g_text(x, y, TR("СМЕНА ГОЛОСА"), w, C_MUTED, AT_B);
+        snprintf(t, sizeof t, TR("Голос: %s (F11)"), fx == VFX_LOW ? TR("ниже") : fx == VFX_HIGH ? TR("выше") : TR("как есть"));
         g_button(x, y + 1, t, w, fx != VFX_OFF ? 1 : 0, B_FX);
         break;
     }
     case SS_LOOK: {
-        y += set_row(x, y, w, "ТЕМА", "тёмная", C_TEXT);
-        g_text(x, y, "КАРТИНКИ", w, C_MUTED, AT_B);   /* №71 */
-        g_button(x, y + 1, img_click ? "[x] Загружать только по щелчку" : "[ ] Загружать только по щелчку", w, img_click ? 1 : 0, B_IMGCLICK);
+        g_text(x, y, "ЯЗЫК / LANGUAGE", w, C_MUTED, AT_B);
+        g_button(x, y + 1, g_lang_en ? "English  (Русский)" : "Русский  (English)", w, 0, B_LANG);
+        y += 3;
+        y += set_row(x, y, w, TR("ТЕМА"), TR("тёмная"), C_TEXT);
+        g_text(x, y, TR("КАРТИНКИ"), w, C_MUTED, AT_B);   /* №71 */
+        g_button(x, y + 1, img_click ? TR("[x] Загружать только по щелчку") : TR("[ ] Загружать только по щелчку"), w, img_click ? 1 : 0, B_IMGCLICK);
         y += 3;
         if (term_subcell_scale() > 0) {          /* №16 */
-            g_text(x, y, "ОКНО", w, C_MUTED, AT_B);
-            g_button(x, y + 1, "Во весь экран (Alt+Enter)", w, 0, B_FULL);
+            g_text(x, y, TR("ОКНО"), w, C_MUTED, AT_B);
+            g_button(x, y + 1, TR("Во весь экран (Alt+Enter)"), w, 0, B_FULL);
             y += 3;
         }
         if (term_subcell_scale() <= 0) {
-            set_row(x, y, w, "МАСШТАБ", "в консоли размер шрифта меняет сам терминал", C_TEXT);
+            set_row(x, y, w, TR("МАСШТАБ"), TR("в консоли размер шрифта меняет сам терминал"), C_TEXT);
             break;
         }
-        snprintf(t, sizeof t, "МАСШТАБ: %d %%", term_zoom_pct());
+        snprintf(t, sizeof t, TR("МАСШТАБ: %d %%"), term_zoom_pct());
         g_text(x, y, t, w, C_MUTED, AT_B);
         int u = g_button(x, y + 1, "- (Ctrl+-)", w, 0, B_ZOOM_DN);
         u += 1 + g_button(x + u + 1, y + 1, "100 % (Ctrl+0)", w - u - 1, term_zoom_pct() == 100 ? 1 : 0, B_ZOOM_0);
         g_button(x + u + 1, y + 1, "+ (Ctrl+=)", w - u - 1, 0, B_ZOOM_UP);
         break;
     }
+    case SS_UPD: {                               /* автообновление (update.c): только по явной кнопке */
+        const UpdateState *us = update_state();
+        snprintf(t, sizeof t, "%s %s", APP_NAME, ASTRA_VERSION);
+        y += set_row(x, y, w, TR("ТЕКУЩАЯ ВЕРСИЯ"), t, C_TEXT);
+        g_button(x, y, update_auto() ? TR("[x] Проверять обновления при запуске") : TR("[ ] Проверять обновления при запуске"), w, update_auto() ? 1 : 0, B_UP_AUTO);
+        y += 2;
+        y += lg_para(x, y, w, TR("Раз в сутки, на GitHub; скачивание и замена - только по кнопке 'Обновить'."), C_MUTED, false) + 1;
+        int u = g_button(x, y, TR("Проверить сейчас"), w, 0, B_UP_CHECK);
+        const char *st2 = "";
+        u32 sc = C_MUTED;
+        if (us) switch (us->phase) {
+        case UP_CHECKING: st2 = TR("проверка..."); break;
+        case UP_NONE: st2 = TR("у вас последняя версия"); sc = C_GREEN; break;
+        case UP_AVAILABLE: snprintf(t, sizeof t, TR("доступна версия %s"), us->version); st2 = t; sc = C_GOLD; break;
+        case UP_DOWNLOADING: st2 = TR("загрузка..."); break;
+        case UP_READY: st2 = TR("готово - нужен перезапуск"); sc = C_GREEN; break;
+        case UP_FAILED: st2 = us->err[0] ? us->err : TR("не получилось"); sc = C_RED; break;
+        default: break;
+        }
+        if (*st2) { char *e = san(st2, false); g_texte(x + u + 2, y, e, w - u - 2, sc, 0); free(e); }
+        if (us && (us->phase == UP_AVAILABLE || us->phase == UP_READY)) g_button(x, y + 2, us->phase == UP_READY ? TR("Перезапустить") : TR("Обновить"), w, 1, us->phase == UP_READY ? B_UP_RESTART : B_UP_APPLY);
+        break;
+    }
     case SS_PERF: {                              /* №153: сколько занимает программа сейчас */
-        snprintf(t, sizeof t, "%.1f МБ (частная память процесса)", (double)plat_private_bytes() / (1024.0 * 1024.0));
-        y += set_row(x, y, w, "ПАМЯТЬ", t, C_TEXT);
-        snprintf(t, sizeof t, "картинки на экране %zu КБ; сетка %dx%d клеток %zu КБ; строк ленты %d",
+        snprintf(t, sizeof t, TR("%.1f МБ (частная память процесса)"), (double)plat_private_bytes() / (1024.0 * 1024.0));
+        y += set_row(x, y, w, TR("ПАМЯТЬ"), t, C_TEXT);
+        snprintf(t, sizeof t, TR("картинки на экране %zu КБ; сетка %dx%d клеток %zu КБ; строк ленты %d"),
                  img_cache_bytes() / 1024, U.gw, U.gh, (size_t)U.gw * (size_t)U.gh * sizeof(Cell) / 1024, U.mlcap);
-        y += set_row(x, y, w, "ИНТЕРФЕЙС", t, C_TEXT);
-        if (g_gw_ping > 0) snprintf(t, sizeof t, "%d мс", g_gw_ping); else snprintf(t, sizeof t, "нет данных");
-        y += set_row(x, y, w, "ПИНГ ШЛЮЗА", t, g_gw_ping <= 0 ? C_MUTED : g_gw_ping < 100 ? C_GREEN : g_gw_ping < 250 ? C_GOLD : C_RED);
-        if (vless_state() == VL_UP) { snprintf(t, sizeof t, "%d мс", vless_latency_ms()); y += set_row(x, y, w, "VLESS", t, C_TEXT); }
-        g_button(x, y, show_ram ? "[x] Память в строке состояния" : "[ ] Память в строке состояния", w, show_ram ? 1 : 0, B_RAMBAR);
+        y += set_row(x, y, w, TR("ИНТЕРФЕЙС"), t, C_TEXT);
+        if (g_gw_ping > 0) snprintf(t, sizeof t, TR("%d мс"), g_gw_ping); else snprintf(t, sizeof t, TR("нет данных"));
+        y += set_row(x, y, w, TR("ПИНГ ШЛЮЗА"), t, g_gw_ping <= 0 ? C_MUTED : g_gw_ping < 100 ? C_GREEN : g_gw_ping < 250 ? C_GOLD : C_RED);
+        if (vless_state() == VL_UP) { snprintf(t, sizeof t, TR("%d мс"), vless_latency_ms()); y += set_row(x, y, w, "VLESS", t, C_TEXT); }
+        g_button(x, y, show_ram ? TR("[x] Память в строке состояния") : TR("[ ] Память в строке состояния"), w, show_ram ? 1 : 0, B_RAMBAR);
         break;
     }
     case SS_NOTIF: {
@@ -3836,51 +4052,51 @@ static void draw_settings(int W, int H) {
             static const char *const nmode[] = { "выкл", "без текста", "с текстом" };
             int nm = notify_mode();
             if (nm < 0 || nm > 2) nm = 1;
-            snprintf(t, sizeof t, "Показывать уведомления: %s", nmode[nm]);
-            g_text(x, y, "УВЕДОМЛЕНИЯ СИСТЕМЫ", w, C_MUTED, AT_B);
+            snprintf(t, sizeof t, TR("Показывать уведомления: %s"), tr(nmode[nm]));
+            g_text(x, y, TR("УВЕДОМЛЕНИЯ СИСТЕМЫ"), w, C_MUTED, AT_B);
             g_button(x, y + 1, t, w, nm == 2 ? 2 : 0, B_NOTIFY);
             y += 2;
-            if (nm == 2) { g_texte(x, y, "Windows (и Linux) сохраняют уведомления в своей истории на диске - текст ЛС останется там.", w, C_GOLD, 0); y++; }
-            else if (nm == 1) { g_texte(x, y, "Без имён и текста: только «новое сообщение» / «упоминание».", w, C_MUTED, 0); y++; }
+            if (nm == 2) { g_texte(x, y, TR("Windows (и Linux) сохраняют уведомления в своей истории на диске - текст ЛС останется там."), w, C_GOLD, 0); y++; }
+            else if (nm == 1) { g_texte(x, y, TR("Без имён и текста: только 'новое сообщение' / 'упоминание'."), w, C_MUTED, 0); y++; }
             y++;
         }
         const char *aw = alert_words();
         bool sm = streamer_on();
-        y += set_row(x, y, w, "СЛОВА-ТРЕВОГИ", sm && aw && *aw ? "скрыто (режим стримера)" : aw && *aw ? aw : "не заданы", aw && *aw ? C_TEXT : C_MUTED);
-        g_texte(x, y - 1, "Сообщение с таким словом подсвечивается и считается упоминанием.", w, C_MUTED, 0);
-        g_button(x, y + 1, "Изменить слова", w, 1, B_ALERTS);
+        y += set_row(x, y, w, TR("СЛОВА-ТРЕВОГИ"), sm && aw && *aw ? TR("скрыто (режим стримера)") : aw && *aw ? aw : TR("не заданы"), aw && *aw ? C_TEXT : C_MUTED);
+        g_texte(x, y - 1, TR("Сообщение с таким словом подсвечивается и считается упоминанием."), w, C_MUTED, 0);
+        g_button(x, y + 1, TR("Изменить слова"), w, 1, B_ALERTS);
         y += 3;
         const char *fw = filter_words();         /* №120 */
-        y += set_row(x, y, w, "ФИЛЬТР СЛОВ", sm && fw && *fw ? "скрыто (режим стримера)" : fw && *fw ? fw : "не задан", fw && *fw ? C_TEXT : C_MUTED);
-        g_texte(x, y - 1, "Сообщение с таким словом сворачивается: «скрыто фильтром [показать]».", w, C_MUTED, 0);
-        g_button(x, y + 1, "Изменить фильтр", w, 1, B_FILTER);
+        y += set_row(x, y, w, TR("ФИЛЬТР СЛОВ"), sm && fw && *fw ? TR("скрыто (режим стримера)") : fw && *fw ? fw : TR("не задан"), fw && *fw ? C_TEXT : C_MUTED);
+        g_texte(x, y - 1, TR("Сообщение с таким словом сворачивается: 'скрыто фильтром [показать]'."), w, C_MUTED, 0);
+        g_button(x, y + 1, TR("Изменить фильтр"), w, 1, B_FILTER);
         break;
     }
     case SS_PRIV: {
         VlessState vst = vless_state();
         int ms = vless_latency_ms();
-        if (vst == VL_UP) snprintf(t, sizeof t, "работает: весь трафик через туннель, %d мс", ms);
-        else if (vst == VL_STARTING) snprintf(t, sizeof t, "запускается...");
-        else if (vst == VL_DOWN) snprintf(t, sizeof t, "нет связи - клиент напрямую не ходит");
-        else snprintf(t, sizeof t, "выключен: трафик идёт напрямую");
+        if (vst == VL_UP) snprintf(t, sizeof t, TR("работает: весь трафик через туннель, %d мс"), ms);
+        else if (vst == VL_STARTING) snprintf(t, sizeof t, TR("запускается..."));
+        else if (vst == VL_DOWN) snprintf(t, sizeof t, TR("нет связи - клиент напрямую не ходит"));
+        else snprintf(t, sizeof t, TR("выключен: трафик идёт напрямую"));
         y += set_row(x, y, w, "VLESS", t, vst == VL_DOWN ? C_RED : vst == VL_UP ? C_GREEN : C_TEXT);
-        int u = g_button(x, y, "Сменить ссылку (C)", w, 1, B_VL_C);
+        int u = g_button(x, y, TR("Сменить ссылку (C)"), w, 1, B_VL_C);
         if (vst != VL_OFF) {
-            u += 1 + g_button(x + u + 1, y, "Переподключиться (R)", w - u - 1, 0, B_VL_R);
-            g_button(x + u + 1, y, "Отключить (D)", w - u - 1, 2, B_VL_D);
+            u += 1 + g_button(x + u + 1, y, TR("Переподключиться (R)"), w - u - 1, 0, B_VL_R);
+            g_button(x + u + 1, y, TR("Отключить (D)"), w - u - 1, 2, B_VL_D);
         }
         y += 2;
-        g_text(x, y, "ПРИ ЗАПУСКЕ", w, C_MUTED, AT_B);
-        g_button(x, y + 1, startup_direct() ? "[ ] Спрашивать про VLESS при запуске" : "[x] Спрашивать про VLESS при запуске", w, 0, B_STARTASK);
+        g_text(x, y, TR("ПРИ ЗАПУСКЕ"), w, C_MUTED, AT_B);
+        g_button(x, y + 1, startup_direct() ? TR("[ ] Спрашивать про VLESS при запуске") : TR("[x] Спрашивать про VLESS при запуске"), w, 0, B_STARTASK);
         y += 3;
-        g_text(x, y, "РЕЖИМ СТРИМЕРА", w, C_MUTED, AT_B);
-        g_button(x, y + 1, streamer_on() ? "[x] Скрывать личное на экране" : "[ ] Скрывать личное на экране", w, streamer_on() ? 1 : 0, B_STREAMER);
+        g_text(x, y, TR("РЕЖИМ СТРИМЕРА"), w, C_MUTED, AT_B);
+        g_button(x, y + 1, streamer_on() ? TR("[x] Скрывать личное на экране") : TR("[ ] Скрывать личное на экране"), w, streamer_on() ? 1 : 0, B_STREAMER);
         y += 3;
         const char *pn = panic_key_name();
-        if (pn && *pn && streamer_on()) snprintf(t, sizeof t, "задан (скрыто: режим стримера)");
-        else if (pn && *pn) snprintf(t, sizeof t, "%s x3: стереть токен и ссылку VLESS и выйти", pn);
-        else snprintf(t, sizeof t, "не задан (флаг --panic=КЛАВИША, например F12)");
-        set_row(x, y, w, "ПАНИК-КЕЙ", t, C_TEXT);
+        if (pn && *pn && streamer_on()) snprintf(t, sizeof t, TR("задан (скрыто: режим стримера)"));
+        else if (pn && *pn) snprintf(t, sizeof t, TR("%s x3: стереть токен и ссылку VLESS и выйти"), pn);
+        else snprintf(t, sizeof t, TR("не задан (флаг --panic=КЛАВИША, например F12)"));
+        set_row(x, y, w, TR("ПАНИК-КЕЙ"), t, C_TEXT);
         break;
     }
     default: {
@@ -3913,7 +4129,7 @@ static void draw_members(int x, int w, int H, u64 gid) {
     }
     bool me = false;
     for (int k = 0; k < n; k++) if (ids[k] == S.me_id) me = true;
-    if (!me && n < 48) { ids[n] = S.me_id; nm[n] = S.me_name ? S.me_name : "вы"; col[n] = user_color(gid, S.me_id); n++; }
+    if (!me && n < 48) { ids[n] = S.me_id; nm[n] = S.me_name ? S.me_name : TR("вы"); col[n] = user_color(gid, S.me_id); n++; }
     for (int i = 1; i < n; i++)                  /* по имени, как в Discord */
         for (int j = i; j > 0 && strcmp(nm[j - 1], nm[j]) > 0; j--) {
             u64 a = ids[j]; ids[j] = ids[j - 1]; ids[j - 1] = a;
@@ -3921,12 +4137,12 @@ static void draw_members(int x, int w, int H, u64 gid) {
             u32 c = col[j]; col[j] = col[j - 1]; col[j - 1] = c;
         }
     char t[64];
-    snprintf(t, sizeof t, "В ЧАТЕ - %d", n);
+    snprintf(t, sizeof t, TR("В ЧАТЕ - %d"), n);
     g_text(x + 2, 2, t, w - 3, C_MUTED, AT_B);
     int y = 3;
     for (int i = 0; i < n && y < H - 1; i++, y++) {
         if (y == H - 2 && i < n - 1) {
-            snprintf(t, sizeof t, "и ещё %d", n - i);
+            snprintf(t, sizeof t, TR("и ещё %d"), n - i);
             g_text(x + 2, y, t, w - 3, C_MUTED, 0);
             break;
         }
@@ -3944,7 +4160,7 @@ static void forum_go(int i) {
     u64 t = forum_post_open(i);
     arch_view = 0;
     if (t) open_channel(t);
-    else ui_notice("пост недоступен");
+    else ui_notice(TR("пост недоступен"));
 }
 static void forum_page(int d) {
     const ForumState *fs = forum_state();
@@ -3960,19 +4176,19 @@ static void draw_forum(int cx, int cw, int H, const Channel *oc) {
     int x = cx + 2, w = cw - 4, y = 2;
     if (w < 20) return;
     if (arch_view == oc->id) {                   /* №93: архив веток канала */
-        int u = g_text(x, y, "Архив веток", w, C_WHITE, AT_B);
-        g_text(x + u + 2, y, "[закрыть]", w - u - 2, C_URL, 0);
+        int u = g_text(x, y, TR("Архив веток"), w, C_WHITE, AT_B);
+        g_text(x + u + 2, y, TR("[закрыть]"), w - u - 2, C_URL, 0);
         hit_add(x + u + 2, y, 9, 1, A_BTN, B_ARCH_X, 0, HV_UL);
     } else {
-        const char *st = fs && fs->sort ? "Сортировка: по дате создания" : "Сортировка: по активности";
+        const char *st = fs && fs->sort ? TR("Сортировка: по дате создания") : TR("Сортировка: по активности");
         int u = g_button(x, y, st, w, 0, B_FSORT);
-        g_button(x + u + 1, y, "Новый пост", w - u - 1, 1, B_FNEW);   /* №96 */
+        g_button(x + u + 1, y, TR("Новый пост"), w - u - 1, 1, B_FNEW);   /* №96 */
     }
     y += 2;
     int bot = H - 3;                             /* строка H-2 — страницы, H-1 — состояние */
-    if (!fs || fs->cid != oc->id || (fs->busy && !fs->n)) g_text(x, y, "загрузка...", w, C_MUTED, 0);
+    if (!fs || fs->cid != oc->id || (fs->busy && !fs->n)) g_text(x, y, TR("загрузка..."), w, C_MUTED, 0);
     else if (fs->err[0]) { char *e = san(fs->err, false); g_texte(x, y, e, w, C_RED, 0); free(e); }
-    else if (!fs->n) g_text(x, y, arch_view == oc->id ? "В архиве веток нет." : "Здесь пока нет постов.", w, C_MUTED, 0);
+    else if (!fs->n) g_text(x, y, arch_view == oc->id ? TR("В архиве веток нет.") : TR("Здесь пока нет постов."), w, C_MUTED, 0);
     else {
         int vis = (bot - y + 1) / 4;
         if (vis < 1) vis = 1;
@@ -3989,9 +4205,9 @@ static void draw_forum(int cx, int cw, int H, const Channel *oc) {
             /* 1: заголовок (закреплено / в архиве — серым после него) */
             char *nm = san(fp->name ? fp->name : "", false);
             int u = 0;
-            if (fp->pinned) u += g_text(x + 2, y, "[закреплено] ", w - 4, C_GOLD, AT_B);
+            if (fp->pinned) u += g_text(x + 2, y, TR("[закреплено] "), w - 4, C_GOLD, AT_B);
             u += g_texte(x + 2 + u, y, nm, w - 4 - u - (fp->archived ? 11 : 0), C_WHITE, AT_B);
-            if (fp->archived) g_text(x + 2 + u, y, " (в архиве)", w - 4 - u, C_MUTED, 0);
+            if (fp->archived) g_text(x + 2 + u, y, TR(" (в архиве)"), w - 4 - u, C_MUTED, 0);
             free(nm);
             /* 2: автор и начало первого сообщения */
             const char *au = fp->owner_id ? user_name(fp->owner_id) : NULL;
@@ -4005,7 +4221,7 @@ static void draw_forum(int cx, int cw, int H, const Channel *oc) {
                 free(sa);
                 a = g_texte(x + 2, y + 1, t, w - 4, C_TEXT, AT_B);
             }
-            g_texte(x + 2 + a, y + 1, pv[0] ? pv : "(без текста)", w - 4 - a, C_MUTED, 0);
+            g_texte(x + 2 + a, y + 1, pv[0] ? pv : TR("(без текста)"), w - 4 - a, C_MUTED, 0);
             free(pv);
             /* 3: сколько сообщений, когда последнее, участвую ли */
             char t3[160], d[64] = "";
@@ -4013,9 +4229,9 @@ static void draw_forum(int cx, int cw, int H, const Channel *oc) {
                 i64 ts = (i64)(((fp->last_msg >> 22) + 1420070400000ULL) / 1000);
                 struct tm tm;
                 plat_localtime(ts, &tm);
-                snprintf(d, sizeof d, "  посл.: %02d.%02d.%04d", tm.tm_mday, tm.tm_mon + 1, tm.tm_year + 1900);
+                snprintf(d, sizeof d, TR("  посл.: %02d.%02d.%04d"), tm.tm_mday, tm.tm_mon + 1, tm.tm_year + 1900);
             }
-            snprintf(t3, sizeof t3, "o %d сообщ.%s%s", fp->msg_count, d, fp->joined ? "  вы участник" : "");
+            snprintf(t3, sizeof t3, TR("o %d сообщ.%s%s"), fp->msg_count, d, fp->joined ? TR("  вы участник") : "");
             g_texte(x + 2, y + 2, t3, w - 4, C_MUTED, 0);
             hit_add(x, y, w, 3, A_FPOST, 0, i, HV_BG);
         }
@@ -4024,8 +4240,8 @@ static void draw_forum(int cx, int cw, int H, const Channel *oc) {
     if (fs && fs->cid == oc->id && (fs->page > 0 || fs->more)) {
         char pg[64];
         int tot = fs->total > 0 ? (fs->total + 24) / 25 : 0;
-        if (tot) snprintf(pg, sizeof pg, "<  стр. %d из %d  >", fs->page + 1, tot);
-        else snprintf(pg, sizeof pg, "<  стр. %d  >", fs->page + 1);
+        if (tot) snprintf(pg, sizeof pg, TR("<  стр. %d из %d  >"), fs->page + 1, tot);
+        else snprintf(pg, sizeof pg, TR("<  стр. %d  >"), fs->page + 1);
         int px = cx + (cw - vw(pg)) / 2;
         g_text(px, H - 2, pg, cw - 2, C_TEXT, 0);
         if (fs->page > 0) hit_add(px, H - 2, 2, 1, A_BTN, B_FPREV, 0, HV_UL);
@@ -4087,9 +4303,9 @@ static const SlashOpt *sl_opt(void) {
 }
 static const char *sl_type(int t) {
     switch (t) {
-    case CO_STRING: return "текст"; case CO_INTEGER: return "целое число"; case CO_NUMBER: return "число";
-    case CO_BOOLEAN: return "да/нет"; case CO_USER: return "пользователь"; case CO_CHANNEL: return "#канал";
-    default: return "значение";
+    case CO_STRING: return TR("текст"); case CO_INTEGER: return TR("целое число"); case CO_NUMBER: return TR("число");
+    case CO_BOOLEAN: return TR("да/нет"); case CO_USER: return TR("пользователь"); case CO_CHANNEL: return TR("#канал");
+    default: return TR("значение");
     }
 }
 static void draw_ac(int x, int w, int ybot);
@@ -4111,11 +4327,11 @@ static int ring_strip(int cx, int cw, int y, const Channel *oc, bool draw) {
         n_rgt = 0;
         g_rect(cx, y, cw, 1, C_RAIL);
         char t[96];
-        snprintf(t, sizeof t, "Звонок в группе: в звонке %d", k);
+        snprintf(t, sizeof t, TR("Звонок в группе: в звонке %d"), k);
         int u = g_text(cx + 2, y, t, cw - 4, C_GREEN, AT_B);
         if (nr) {
-            u += 2 + g_text(cx + 4 + u, y, "[не звонить никому]", cw - 6 - u, C_URL, 0);
-            hit_add(cx + 4 + u - vw("[не звонить никому]"), y, vw("[не звонить никому]"), 1, A_BTN, B_RING_ALL_STOP, 0, HV_UL);
+            u += 2 + g_text(cx + 4 + u, y, TR("[не звонить никому]"), cw - 6 - u, C_URL, 0);
+            hit_add(cx + 4 + u - vw(TR("[не звонить никому]")), y, vw(TR("[не звонить никому]")), 1, A_BTN, B_RING_ALL_STOP, 0, HV_UL);
         }
     }
     for (int i = 0; i < oc->nrecip && n_rgt < 16; i++) {
@@ -4128,8 +4344,8 @@ static int ring_strip(int cx, int cw, int y, const Channel *oc, bool draw) {
             int yy = y + rows;
             g_rect(cx, yy, cw, 1, C_RAIL);
             char t[160];
-            snprintf(t, sizeof t, "%s - %s  ", un(u), rg ? "звоним..." : "не в звонке");
-            const char *act = rg ? "[не звонить]" : "[позвонить ещё раз]";
+            snprintf(t, sizeof t, "%s - %s  ", un(u), rg ? TR("звоним...") : TR("не в звонке"));
+            const char *act = rg ? TR("[не звонить]") : TR("[позвонить ещё раз]");
             int u0 = g_text(cx + 4, yy, t, cw - 6, rg ? C_GOLD : C_MUTED, 0);
             int u1 = g_text(cx + 4 + u0, yy, act, cw - 6 - u0, C_URL, 0);
             rgt[n_rgt] = u;
@@ -4197,20 +4413,20 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
         chan_label(oc, lab0, sizeof lab0);
         const char *mk0 = oc->guild_id && !is_voice(oc) ? "#" : "";
         if (is_thread(oc)) snprintf(wt, sizeof wt, "%s", lab0);
-        else if (oc->guild_id) snprintf(wt, sizeof wt, "Добро пожаловать на канал %s%s!", mk0, lab0);
+        else if (oc->guild_id) snprintf(wt, sizeof wt, TR("Добро пожаловать на канал %s%s!"), mk0, lab0);
         else snprintf(wt, sizeof wt, "%s", lab0);
         /* нет права «Читать историю сообщений»: Discord отдаёт [] — как в Discord, говорим об этом
          * вместо «Это начало канала»; новые сообщения при этом приходят и показываются ниже */
         if (oc->guild_id && !oc->can_history && !is_voice(oc))
-            snprintf(ws, sizeof ws, "У вас нет прав на просмотр истории сообщений в этом канале.");
+            snprintf(ws, sizeof ws, TR("У вас нет прав на просмотр истории сообщений в этом канале."));
         else if (is_thread(oc)) {
             const Channel *pc = chan_find(oc->parent_id);
             char pl[96] = "";
             if (pc) chan_label(pc, pl, sizeof pl);
-            snprintf(ws, sizeof ws, "Это начало ветки%s%s%s.", pl[0] ? " в " : "", pl[0] && !is_forum(pc) ? "#" : "", pl);
+            snprintf(ws, sizeof ws, TR("Это начало ветки%s%s%s."), pl[0] ? TR(" в ") : "", pl[0] && !is_forum(pc) ? "#" : "", pl);
         }
-        else if (oc->guild_id) snprintf(ws, sizeof ws, "Это начало канала %s%s!", mk0, lab0);
-        else snprintf(ws, sizeof ws, "Это начало истории ваших личных сообщений с %s.", lab0);
+        else if (oc->guild_id) snprintf(ws, sizeof ws, TR("Это начало канала %s%s!"), mk0, lab0);
+        else snprintf(ws, sizeof ws, TR("Это начало истории ваших личных сообщений с %s."), lab0);
         char **a1, **a2;
         int n1 = help_wrap(wt, cw - 3, &a1), n2 = help_wrap(ws, cw - 3, &a2);
         wl = xmalloc((size_t)(n1 + n2 + 1) * sizeof *wl);
@@ -4241,48 +4457,48 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
     if (vst == VL_DOWN && !panel) {
         /* VLESS не работает: окно висит, пока пользователь не выберет, что делать (напрямую клиент
          * сам не ходит). Причина — итог последней проверки ссылки или слова модуля vless. */
-        char *r = san(streamer_on() ? "подробности скрыты (режим стримера)" : U.vl_note[0] ? U.vl_note : vless_error(), false);
+        char *r = san(streamer_on() ? TR("подробности скрыты (режим стримера)") : U.vl_note[0] ? U.vl_note : vless_error(), false);
         char rd[200];
-        deco_ascii(*r ? r : "туннель не отвечает", rd, sizeof rd);
+        deco_ascii(*r ? r : TR("туннель не отвечает"), rd, sizeof rd);
         free(r);
         bool wide = cw - 12 >= 46;
         nwhy = help_wrap(rd, cw - 12, &why);
         int nr = nwhy < 3 ? nwhy : 3;
         if (frows < 12 && nr > 1) nr = 1;
-        cl[cn++] = "VLESS: нет связи";
+        cl[cn++] = TR("VLESS: нет связи");
         for (int i = 0; i < nr; i++) cl[cn++] = why[i];
         tfg = C_RED;
         if (U.busy[0]) {
             cl[cn++] = U.busy;
-            cl[cn++] = wide ? "ждите до 10 с: экран не отвечает до конца проверки" : "ждите до 10 с";
+            cl[cn++] = wide ? TR("ждите до 10 с: экран не отвечает до конца проверки") : TR("ждите до 10 с");
         } else if (U.mode == M_VLINK) {
-            cl[cn++] = wide ? "вставьте ссылку в поле ввода внизу" : "вставьте ссылку внизу";
-            cl[cn++] = wide ? "на экране она не показывается: только звёздочки" : "она не показывается";
-            cb[nb++] = (CBtn){ "Назад (Esc)", B_VL_BACK, 0 };
-            cb[nb++] = (CBtn){ "Проверить (Enter)", B_VL_CHECK, 1 };
+            cl[cn++] = wide ? TR("вставьте ссылку в поле ввода внизу") : TR("вставьте ссылку внизу");
+            cl[cn++] = wide ? TR("на экране она не показывается: только звёздочки") : TR("она не показывается");
+            cb[nb++] = (CBtn){ TR("Назад (Esc)"), B_VL_BACK, 0 };
+            cb[nb++] = (CBtn){ TR("Проверить (Enter)"), B_VL_CHECK, 1 };
         } else if (U.mode == M_VLOFF) {
-            cl[cn++] = wide ? "трафик пойдёт напрямую, Discord увидит ваш IP" : "Discord увидит ваш IP";
-            cb[nb++] = (CBtn){ "Отмена", B_NO, 0 };
-            cb[nb++] = (CBtn){ "Отключить (y)", B_YES, 2 };
+            cl[cn++] = wide ? TR("трафик пойдёт напрямую, Discord увидит ваш IP") : TR("Discord увидит ваш IP");
+            cb[nb++] = (CBtn){ TR("Отмена"), B_NO, 0 };
+            cb[nb++] = (CBtn){ TR("Отключить (y)"), B_YES, 2 };
         } else {
-            cl[cn++] = U.focus == F_INPUT && U.in.len ? (wide ? "в поле ввода текст: Esc, затем R / C / D" : "сначала Esc")
-                                                      : (wide ? "напрямую клиент не ходит - выберите:" : "выберите:");
-            cb[nb++] = (CBtn){ wide ? "Отключить VLESS (D)" : "Отключить (D)", B_VL_D, 2 };
-            cb[nb++] = (CBtn){ "Сменить ссылку (C)", B_VL_C, 0 };
-            cb[nb++] = (CBtn){ "Переподключиться (R)", B_VL_R, 1 };
+            cl[cn++] = U.focus == F_INPUT && U.in.len ? (wide ? TR("в поле ввода текст: Esc, затем R / C / D") : TR("сначала Esc"))
+                                                      : (wide ? TR("напрямую клиент не ходит - выберите:") : TR("выберите:"));
+            cb[nb++] = (CBtn){ wide ? TR("Отключить VLESS (D)") : TR("Отключить (D)"), B_VL_D, 2 };
+            cb[nb++] = (CBtn){ TR("Сменить ссылку (C)"), B_VL_C, 0 };
+            cb[nb++] = (CBtn){ TR("Переподключиться (R)"), B_VL_R, 1 };
         }
     } else if (!oc) {
         if (!S.ready && !O.demo) {
             char gst[128];
             deco_ascii(gw_status_text(), gst, sizeof gst);
-            snprintf(c1, sizeof c1, "%s", gst[0] ? gst : "подключение...");
-            cl[cn++] = "Astra DS"; cl[cn++] = c1; cl[cn++] = "Ctrl+Q - выход";
+            snprintf(c1, sizeof c1, "%s", gst[0] ? gst : TR("подключение..."));
+            cl[cn++] = APP_NAME; cl[cn++] = c1; cl[cn++] = TR("Ctrl+Q - выход");
         } else {
-            cl[cn++] = "Выберите канал слева";
-            cl[cn++] = "щелчок мышью или Tab, Up/Down, Enter";
+            cl[cn++] = TR("Выберите канал слева");
+            cl[cn++] = TR("щелчок мышью или Tab, Up/Down, Enter");
         }
     } else if (!nml && !welcome) {
-        if (U.loading || !U.hist_state[0]) cl[cn++] = "загрузка истории...";
+        if (U.loading || !U.hist_state[0]) cl[cn++] = TR("загрузка истории...");
         else {
             const char *sp = strstr(U.hist_state, ": ");
             if (sp) {
@@ -4291,7 +4507,7 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
                 cl[cn++] = c1;
                 cl[cn++] = c2;
                 tfg = C_RED;
-            } else cl[cn++] = U.hist_state;
+            } else cl[cn++] = tr(U.hist_state);   /* «в канале пока нет сообщений» хранится по-русски (сравнение выше) */
         }
     }
     if (cn) g_card(cx, feed_top, cw, frows, -1, cl, cn, cb, nb, tfg, vst == VL_DOWN);
@@ -4311,14 +4527,14 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
                     bool title = v - 3 < nwt;
                     g_text(cx + 2, y, wl[v - 3], cw - 3, title ? C_WHITE : C_MUTED, title ? AT_B : 0);
                 } else if (chset && v - 3 == nwl + 1) {
-                    int bw = vw("| Настроить канал") + 4;
+                    int bw = vw(TR("| Настроить канал")) + 4;
                     if (bw > cw - 3) bw = cw - 3;
                     g_pill(cx + 2, y, bw, C_BTN2);
-                    g_text(cx + 4, y, "| Настроить канал", bw - 4, C_TEXT, 0);
+                    g_text(cx + 4, y, TR("| Настроить канал"), bw - 4, C_TEXT, 0);
                     hit_add(cx + 2, y, bw, 1, A_BTN, B_NOP, 0, HV_PILL); U.hit[U.nhit - 1].tip = T_CHSET;
                 }
             } else {
-                g_ctext(cx, y, cw, U.loading ? "загрузка..." : "загрузить более старые сообщения (PgUp)", C_MUTED, 0);
+                g_ctext(cx, y, cw, U.loading ? TR("загрузка...") : TR("загрузить более старые сообщения (PgUp)"), C_MUTED, 0);
                 if (!U.loading) hit_add(cx, y, cw, 1, A_BTN, B_OLDER, 0, HV_UL);
             }
         }
@@ -4357,29 +4573,29 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
         if (below && S.detached) {
             /* после перехода к старому сообщению: как в Discord — «Вернуться к настоящему» */
             g_pill(cx + 1, feed_bot, cw - 2, C_ACC);
-            int u = g_text(cx + 2, feed_bot, " Вы просматриваете старые сообщения", cw - 4, C_WHITE, 0);
-            if (cw - 4 - u > 24) g_rtext(cx + cw - 3, feed_bot, "Вернуться к настоящему", 22, C_WHITE, AT_B);
+            int u = g_text(cx + 2, feed_bot, TR(" Вы просматриваете старые сообщения"), cw - 4, C_WHITE, 0);
+            if (cw - 4 - u > 24) g_rtext(cx + cw - 3, feed_bot, TR("Вернуться к настоящему"), 22, C_WHITE, AT_B);
             hit_add(cx + 1, feed_bot, cw - 2, 1, A_BTN, B_PRESENT, 0, HV_UL);
         } else if (below) {
             /* самый длинный текст, рядом с которым помещается «Перейти к новым»; иначе — самый
              * длинный, который помещается сам; «ниже ещё N строк: PgDn» видно всегда */
             static const char *const pre_txt[] = { " Вы просматриваете старые сообщения:", " Старые сообщения:", "" };
-            const char *ns = plural(U.msg_scroll, "строка", "строки", "строк");
+            const char *ns = plural(U.msg_scroll, TR("строка"), TR("строки"), TR("строк"));
             char t[200];
             int pick = -1;
             for (int q = 0; q < 3; q++) {
-                snprintf(t, sizeof t, "%s ниже ещё %d %s: PgDn", pre_txt[q], U.msg_scroll, ns);
+                snprintf(t, sizeof t, TR("%s ниже ещё %d %s: PgDn"), tr(pre_txt[q]), U.msg_scroll, ns);
                 if (vw(t) + 19 <= cw - 4) { pick = q; break; }
             }
             if (pick < 0)
                 for (int q = 0; q < 3; q++) {
-                    snprintf(t, sizeof t, "%s ниже ещё %d %s: PgDn", pre_txt[q], U.msg_scroll, ns);
+                    snprintf(t, sizeof t, TR("%s ниже ещё %d %s: PgDn"), tr(pre_txt[q]), U.msg_scroll, ns);
                     if (vw(t) <= cw - 4 || q == 2) { pick = q; break; }
                 }
-            snprintf(t, sizeof t, "%s ниже ещё %d %s: PgDn", pre_txt[pick], U.msg_scroll, ns);
+            snprintf(t, sizeof t, TR("%s ниже ещё %d %s: PgDn"), pre_txt[pick], U.msg_scroll, ns);
             g_pill(cx + 1, feed_bot, cw - 2, C_ACC);
             int u = g_text(cx + 2, feed_bot, t, cw - 4, C_WHITE, 0);
-            if (cw - 4 - u > 18) g_rtext(cx + cw - 3, feed_bot, "Перейти к новым", 15, C_WHITE, AT_B);
+            if (cw - 4 - u > 18) g_rtext(cx + cw - 3, feed_bot, TR("Перейти к новым"), 15, C_WHITE, AT_B);
             hit_add(cx + 1, feed_bot, cw - 2, 1, A_BTN, B_BOTTOM, 0, HV_UL);
         }
         /* полоса прокрутки: тонкая, справа */
@@ -4401,9 +4617,9 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
         Channel *cc = chan_find(S.call.channel_id);
         char lab[96] = "?", t[140];
         if (cc) chan_label(cc, lab, sizeof lab);
-        snprintf(t, sizeof t, "звонит: %s", lab);
-        const char *l2[2] = { "Входящий звонок", t };
-        CBtn b2[2] = { { "Отклонить (F3)", B_CALL_NO, 2 }, { "Принять (F2)", B_CALL_OK, 1 } };
+        snprintf(t, sizeof t, TR("звонит: %s"), lab);
+        const char *l2[2] = { TR("Входящий звонок"), t };
+        CBtn b2[2] = { { TR("Отклонить (F3)"), B_CALL_NO, 2 }, { TR("Принять (F2)"), B_CALL_OK, 1 } };
         g_card(cx, feed_top, cw, frows, feed_top, l2, 2, b2, 2, C_WHITE, false);
     }
     if (U.mode == M_DELETE) {
@@ -4411,8 +4627,8 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
         char pv[200];
         snprintf(pv, sizeof pv, "%s", m && m->content ? m->content : "");
         for (char *p = pv; *p; p++) if (*p == '\n') *p = ' ';
-        const char *l2[3] = { "Удалить сообщение", "Вы точно хотите удалить это сообщение?", pv };
-        CBtn b2[2] = { { "Отмена", B_NO, 0 }, { "Удалить (y)", B_YES, 2 } };
+        const char *l2[3] = { TR("Удалить сообщение"), TR("Вы точно хотите удалить это сообщение?"), pv };
+        CBtn b2[2] = { { TR("Отмена"), B_NO, 0 }, { TR("Удалить (y)"), B_YES, 2 } };
         g_card(cx, feed_top, cw, frows, -1, l2, pv[0] ? 3 : 2, b2, 2, C_WHITE, true);
     }
 
@@ -4425,16 +4641,16 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
         int y0 = H - 3 - ex - 1;
         if (y0 > feed_top + 1 && b0 > nm0) {
             g_rect(cx + 2, y0, cw - 4, 1, C_EMBBG);
-            const char *t1 = file_spoil ? "[x] спойлер" : "[ ] спойлер", *t2 = file_alt[0] ? "[описание: есть]" : "[описание]";
+            const char *t1 = file_spoil ? TR("[x] спойлер") : TR("[ ] спойлер"), *t2 = file_alt[0] ? TR("[описание: есть]") : TR("[описание]");
             int rx2 = cx + cw - 4;
-            rx2 -= g_button(rx2 - 13, y0, "Отправить", 13, 1, B_FSEND) + 1;
+            rx2 -= g_button(rx2 - 13, y0, TR("Отправить"), 13, 1, B_FSEND) + 1;
             int w2 = vw(t2); rx2 -= w2 + 1;
             g_text(rx2, y0, t2, w2, file_alt[0] ? C_TEXT : C_URL, 0); hit_add(rx2, y0, w2, 1, A_BTN, B_FALT, 0, HV_UL);
             int w1 = vw(t1); rx2 -= w1 + 2;
             g_text(rx2, y0, t1, w1, file_spoil ? C_GOLD : C_URL, 0); hit_add(rx2, y0, w1, 1, A_BTN, B_FSPOIL, 0, HV_UL);
             int nw = vwn(U.in.p + nm0, b0 - nm0), ny = y0;
             if (nw + 8 > rx2 - cx - 4 && y0 - 1 > feed_top + 1) { ny = y0 - 1; g_rect(cx + 2, ny, cw - 4, 1, C_EMBBG); rx2 = cx + cw - 4; }
-            int u0 = g_text(cx + 3, ny, "файл: ", rx2 - cx - 4, C_MUTED, 0);
+            int u0 = g_text(cx + 3, ny, TR("файл: "), rx2 - cx - 4, C_MUTED, 0);
             u0 += g_textn(cx + 3 + u0, ny, U.in.p + nm0, b0 - nm0, rx2 - cx - 5 - u0, C_WHITE, AT_B);
             char pth[1024], sz[48];
             size_t pl = b0 - a0 < sizeof pth - 1 ? b0 - a0 : sizeof pth - 1;
@@ -4442,9 +4658,9 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
             pth[pl] = 0;
             long long fsz = plat_file_size(pth);
             wipe(pth, sizeof pth);
-            if (fsz < 0) snprintf(sz, sizeof sz, "  нет такого файла");
-            else if (fsz >= 1024 * 1024) snprintf(sz, sizeof sz, "  %.1f МБ%s", (double)fsz / (1024.0 * 1024.0), fsz > FILE_MAX ? " - больше 10 МБ" : "");
-            else snprintf(sz, sizeof sz, "  %lld КБ", (fsz + 1023) / 1024);
+            if (fsz < 0) snprintf(sz, sizeof sz, TR("  нет такого файла"));
+            else if (fsz >= 1024 * 1024) snprintf(sz, sizeof sz, TR("  %.1f МБ%s"), (double)fsz / (1024.0 * 1024.0), fsz > FILE_MAX ? TR(" - больше 10 МБ") : "");
+            else snprintf(sz, sizeof sz, TR("  %lld КБ"), (fsz + 1023) / 1024);
             g_text(cx + 3 + u0, ny, sz, rx2 - cx - 4 - u0, fsz < 0 || fsz > FILE_MAX ? C_RED : C_MUTED, 0);
         }
     }
@@ -4455,7 +4671,7 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
         int y0 = H - 3 - ex - nr - 1;
         if (nr > 0 && y0 > feed_top + 2) {
             g_rect(cx + 2, y0, cw - 4, nr + 1, C_EMBBG);
-            g_text(cx + 4, y0, "предпросмотр", cw - 6, C_MUTED, 0);
+            g_text(cx + 4, y0, TR("предпросмотр"), cw - 6, C_MUTED, 0);
             for (int r = 0; r < nr; r++) {
                 size_t s0, a, e;
                 if (ew_line(U.in.p, pw2, r, &s0, &a, &e)) g_mdline(cx + 4, y0 + 1 + r, -1, U.in.p, s0, a, e - a, pw2);
@@ -4466,27 +4682,30 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
     char lab[200] = "";
     Message *t = U.target ? msg_find(U.target, NULL) : NULL;
     bool cancel = false;
-    if (U.mode == M_REPLY) { snprintf(lab, sizeof lab, "Ответ пользователю %s", t && t->author ? t->author : "?"); cancel = true; }
-    else if (U.mode == M_EDIT) { snprintf(lab, sizeof lab, "Изменение сообщения: Enter - сохранить, Esc - отмена"); cancel = true; }
-    else if (U.mode == M_REACT) { snprintf(lab, sizeof lab, "Реакция: эмодзи, :код: или номер (Esc - отмена)"); cancel = true; }
-    else if (U.mode == M_DELETE) snprintf(lab, sizeof lab, "удалить сообщение? y - да, любая другая - нет");
-    else if (U.mode == M_VLINK) snprintf(lab, sizeof lab, "ссылка VLESS (скрыта), %d симв.: Enter - проверить, Esc - отмена", in_chars());
-    else if (U.mode == M_VLOFF) snprintf(lab, sizeof lab, "трафик пойдёт напрямую, Discord увидит ваш IP. Отключить? y - да");
+    if (U.mode == M_REPLY) { snprintf(lab, sizeof lab, TR("Ответ пользователю %s"), t && t->author ? t->author : "?"); cancel = true; }
+    else if (U.mode == M_EDIT) { snprintf(lab, sizeof lab, TR("Изменение сообщения: Enter - сохранить, Esc - отмена")); cancel = true; }
+    else if (U.mode == M_REACT) { snprintf(lab, sizeof lab, TR("Реакция: эмодзи, :код: или номер (Esc - отмена)")); cancel = true; }
+    else if (U.mode == M_DELETE) snprintf(lab, sizeof lab, TR("удалить сообщение? y - да, любая другая - нет"));
+    else if (U.mode == M_VLINK) snprintf(lab, sizeof lab, TR("ссылка VLESS (скрыта), %d симв.: Enter - проверить, Esc - отмена"), in_chars());
+    else if (U.mode == M_VLOFF) snprintf(lab, sizeof lab, TR("трафик пойдёт напрямую, Discord увидит ваш IP. Отключить? y - да"));
     else if (U.mode == M_FILE) {
-        if (U.file_err[0] && streamer_on()) snprintf(lab, sizeof lab, "Файл не отправлен (подробности скрыты: режим стримера)");
-        else if (U.file_err[0]) snprintf(lab, sizeof lab, "Файл не отправлен: %.150s", U.file_err);
-        else snprintf(lab, sizeof lab, cw >= 90 ? "Отправка файла (до 10 МБ): путь или перетащите в окно, Enter" : "Отправка файла (до 10 МБ): путь, Enter");
+        if (U.file_err[0] && streamer_on()) snprintf(lab, sizeof lab, TR("Файл не отправлен (подробности скрыты: режим стримера)"));
+        else if (U.file_err[0]) snprintf(lab, sizeof lab, TR("Файл не отправлен: %.150s"), U.file_err);
+        else snprintf(lab, sizeof lab, cw >= 90 ? TR("Отправка файла (до 10 МБ): путь или перетащите в окно, Enter") : TR("Отправка файла (до 10 МБ): путь, Enter"));
         cancel = true;
     }
-    else if (oc && is_thread(oc) && (oc->tflags & TF_DELETED)) snprintf(lab, sizeof lab, "эту ветку удалили");
-    else if (dm_held(oc)) snprintf(lab, sizeof lab, "%s: картинки и аватары скрыты до ответа", oc->dmflags & DMF_SPAM ? "Возможный спам" : "Запрос на общение");
-    else if (oc && oc->guild_id && !oc->can_send) snprintf(lab, sizeof lab, "нет права писать в этот канал");
+    else if (oc && is_thread(oc) && (oc->tflags & TF_DELETED)) snprintf(lab, sizeof lab, TR("эту ветку удалили"));
+    else if (oc && oc->guild_id && guild_find(oc->guild_id) && guild_find(oc->guild_id)->pending) {
+        snprintf(lab, sizeof lab, TR("Писать можно после принятия правил сервера"));
+    }
+    else if (dm_held(oc)) snprintf(lab, sizeof lab, TR("%s: картинки и аватары скрыты до ответа"), oc->dmflags & DMF_SPAM ? TR("Возможный спам") : TR("Запрос на общение"));
+    else if (oc && oc->guild_id && !oc->can_send) snprintf(lab, sizeof lab, TR("нет права писать в этот канал"));
     u32 labfg = U.mode == M_FILE && U.file_err[0] ? C_RED : C_TEXT;
     if (!lab[0] && SL.cmd >= 0 && cmds_state() && SL.cmd < cmds_state()->n) {   /* №57: какую опцию вводим */
         const SlashCmd *sc = &cmds_state()->c[SL.cmd];
         const SlashOpt *so = sl_opt();
-        if (so) snprintf(lab, sizeof lab, "/%s: %s (%s%s) %d из %d - %s; Esc - отмена", cs_show(sc->name), cs_show(so->name_show),
-                         sl_type(so->type), so->required ? ", обязательно" : ", Enter - пропустить", SL.opt + 1, sc->nopt, cs_show(so->desc));
+        if (so) snprintf(lab, sizeof lab, TR("/%s: %s (%s%s) %d из %d - %s; Esc - отмена"), cs_show(sc->name), cs_show(so->name_show),
+                         sl_type(so->type), so->required ? TR(", обязательно") : TR(", Enter - пропустить"), SL.opt + 1, sc->nopt, cs_show(so->desc));
         labfg = C_URL;
         cancel = true;
     }
@@ -4501,7 +4720,7 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
     } else if (!lab[0] && sl.slowmode > 0 && U.mode == M_NORMAL && !U.in.len) {
         char w[48];
         wait_len(sl.slowmode, w, sizeof w);
-        snprintf(lab, sizeof lab, "Медленный режим: раз в %s", w);
+        snprintf(lab, sizeof lab, TR("Медленный режим: раз в %s"), w);
         labfg = C_MUTED;
     }
     int pct = 0;
@@ -4511,13 +4730,13 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
         int k = pct < 0 ? 0 : pct > 100 ? 10 : pct / 10;
         for (int i = 0; i < 10; i++) bar[i] = i < k ? '#' : '-';
         bar[10] = 0;
-        snprintf(lab, sizeof lab, "Отправка файла [%s] %d%%", bar, pct);
+        snprintf(lab, sizeof lab, TR("Отправка файла [%s] %d%%"), bar, pct);
     }
     if (U.busy[0]) { snprintf(lab, sizeof lab, "%s", U.busy); cancel = false; }
     g_hbox(cx + 1, H - 3 - ex, cw - 2);
 #ifdef MC_PACKA
     if (!lab[0] && U.mode == M_NORMAL && U.in.len && (strstr(U.in.p, "http://") || strstr(U.in.p, "https://")) && cw >= 40) {
-        const char *pt = U.no_embeds ? " [ ] превью ссылок " : " [x] превью ссылок ";
+        const char *pt = U.no_embeds ? TR(" [ ] превью ссылок ") : TR(" [x] превью ссылок ");
         int bx2 = cx + cw - 4 - vw(pt);
         g_text(bx2, H - 3 - ex, pt, vw(pt), U.no_embeds ? C_MUTED : C_TEXT, 0);
         hit_add(bx2 + 1, H - 3 - ex, vw(pt) - 2, 1, A_BTN, B_EMBEDS, 0, HV_UL);
@@ -4527,7 +4746,7 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
         int bx = cx + cw - 7;
         if (U.mode == M_REPLY && cw >= 44) {
             /* «@ ВКЛ» / «@ ВЫКЛ» — упоминать ли автора ответа (щелчок переключает) */
-            const char *pt = U.no_ping ? " @ ВЫКЛ " : " @ ВКЛ ";
+            const char *pt = U.no_ping ? TR(" @ ВЫКЛ ") : TR(" @ ВКЛ ");
             bx -= vw(pt);
             g_text(bx, H - 3 - ex, pt, vw(pt), U.no_ping ? C_MUTED : C_URL, AT_B);
             hit_add(bx + 1, H - 3 - ex, vw(pt) - 2, 1, A_BTN, B_PING, 0, HV_UL);
@@ -4538,13 +4757,15 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
         int lim = (cancel ? bx - 1 : cx + cw - 5) - (U.mode == M_REPLY && cw >= 44 ? (U.no_ping ? 8 : 7) : 0);
         u += (U.mode == M_FILE ? g_texte : g_text)(cx + 3 + u, H - 3 - ex, lab, lim - cx - 3 - u, labfg, 0);
         g_text(cx + 3 + u, H - 3 - ex, " ", 1, C_TEXT, 0);
-        if (U.mode == M_REPLY) g_fgset(cx + 4 + vw("Ответ пользователю "), H - 3 - ex, vw(t && t->author ? t->author : "?"), C_WHITE, AT_B);
+        if (U.mode == M_REPLY) g_fgset(cx + 4 + vw(TR("Ответ пользователю ")), H - 3 - ex, vw(t && t->author ? t->author : "?"), C_WHITE, AT_B);
         if (cancel) { g_text(bx, H - 3 - ex, " (x) ", 5, C_TEXT, AT_B); hit_add(bx + 1, H - 3 - ex, 3, 1, A_BTN, B_CANCEL, 0, HV_RED); }
+        if (oc && oc->guild_id && guild_find(oc->guild_id) && guild_find(oc->guild_id)->pending)
+            rq_btn(cx + cw - 3, H - 3 - ex, TR("Правила"), C_GOLD, B_RULES, 0);   /* №128 */
         if (dm_held(oc) && cw >= 60) {           /* №109: ответ на запрос прямо из беседы */
             int ci = -1;
             for (int q = 0; q < S.nchans; q++) if (S.chans[q].id == oc->id) ci = q;
-            int rx = rq_btn(cx + cw - 3, H - 3 - ex, "Отклонить", C_RED, B_RQ_NO, ci);
-            rq_btn(rx - 1, H - 3 - ex, "Принять", C_GREEN, B_RQ_OK, ci);
+            int rx = rq_btn(cx + cw - 3, H - 3 - ex, TR("Отклонить"), C_RED, B_RQ_NO, ci);
+            rq_btn(rx - 1, H - 3 - ex, TR("Принять"), C_GREEN, B_RQ_OK, ci);
         }
     }
     int y = H - 2 - ex;
@@ -4637,19 +4858,20 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
     if (act && U.cur >= U.in.len && used < iw) { g_ch(ix + used, y, ' ', C_TEXT, AT_I); used++; }
     if (!U.in.len && used < iw) {
         char ph[160];
-        if (U.mode == M_REACT) snprintf(ph, sizeof ph, "эмодзи, :код: или номер реакции");
-        else if (vlink) snprintf(ph, sizeof ph, "вставьте ссылку vless://... - на экране она не покажется");
-        else if (file) snprintf(ph, sizeof ph, "путь к файлу, например C:\\Users\\Вы\\Desktop\\кот.png (кавычки можно)");
-        else if (U.mode == M_VLOFF) snprintf(ph, sizeof ph, "y - отключить VLESS, любая другая клавиша - отмена");
-        else if (ask) snprintf(ph, sizeof ph, "y - удалить, любая другая клавиша - отмена");
-        else if (!oc) snprintf(ph, sizeof ph, "откройте канал слева");
+        if (U.mode == M_REACT) snprintf(ph, sizeof ph, TR("эмодзи, :код: или номер реакции"));
+        else if (vlink) snprintf(ph, sizeof ph, TR("вставьте ссылку vless://... - на экране она не покажется"));
+        else if (file) snprintf(ph, sizeof ph, TR("путь к файлу, например C:\\Users\\Вы\\Desktop\\кот.png (кавычки можно)"));
+        else if (U.mode == M_VLOFF) snprintf(ph, sizeof ph, TR("y - отключить VLESS, любая другая клавиша - отмена"));
+        else if (ask) snprintf(ph, sizeof ph, TR("y - удалить, любая другая клавиша - отмена"));
+        else if (!oc) snprintf(ph, sizeof ph, TR("откройте канал слева"));
         else {
             char l2[96];
             chan_label(oc, l2, sizeof l2);
-            if (is_thread(oc) && (oc->tflags & TF_DELETED)) snprintf(ph, sizeof ph, "Эту ветку удалили - писать в неё нельзя.");
-            else if (oc->guild_id && !oc->can_send) snprintf(ph, sizeof ph, "У вас нет прав на отправку сообщений в этом канале.");
-            else if (sl.timeout_until) snprintf(ph, sizeof ph, "Вы не можете писать до конца тайм-аута.");
-            else snprintf(ph, sizeof ph, "+ Написать %s%s", oc->guild_id && !is_voice(oc) ? "#" : oc->guild_id ? "" : "@", l2);
+            if (is_thread(oc) && (oc->tflags & TF_DELETED)) snprintf(ph, sizeof ph, TR("Эту ветку удалили - писать в неё нельзя."));
+            else if (oc->guild_id && guild_find(oc->guild_id) && guild_find(oc->guild_id)->pending) snprintf(ph, sizeof ph, TR("Сначала примите правила сервера (кнопка 'Правила')."));
+            else if (oc->guild_id && !oc->can_send) snprintf(ph, sizeof ph, TR("У вас нет прав на отправку сообщений в этом канале."));
+            else if (sl.timeout_until) snprintf(ph, sizeof ph, TR("Вы не можете писать до конца тайм-аута."));
+            else snprintf(ph, sizeof ph, TR("+ Написать %s%s"), oc->guild_id && !is_voice(oc) ? "#" : oc->guild_id ? "" : "@", l2);
         }
         g_texte_w(ix + used, y, ph, iw - used, C_MUTED, 0, false);
     }
@@ -4712,9 +4934,9 @@ static void draw_voice_view(int x, int y, int w, int h, const Channel *c, const 
     }
     int ty = top + lh + (lh ? 1 : 0) + (k ? 1 : 0);
     g_ctext(x, ty, w, lab, C_WHITE, AT_B);
-    if (!k) g_ctext(x, ty + 1, w, "Сейчас в голосовом чате никого нет", C_TEXT, 0);
-    const char *bt = here ? "Отключиться" : "Присоединиться к голосовому каналу";
-    if (vw(bt) + 6 > w - 2) bt = here ? "Отключиться" : "Присоединиться";
+    if (!k) g_ctext(x, ty + 1, w, TR("Сейчас в голосовом чате никого нет"), C_TEXT, 0);
+    const char *bt = here ? TR("Отключиться") : TR("Присоединиться к голосовому каналу");
+    if (vw(bt) + 6 > w - 2) bt = here ? TR("Отключиться") : TR("Присоединиться");
     int bw = vw(bt) + 6;
     if (bw > w - 2) bw = w - 2;
     int bx = x + (w - bw) / 2, by = ty + 3;
@@ -4724,7 +4946,7 @@ static void draw_voice_view(int x, int y, int w, int h, const Channel *c, const 
     g_ch(bx + bw - 1, by, '|', C_LINE, 0);
     g_text(bx + 3, by, bt, bw - 6, here ? C_RED : C_WHITE, 0);
     hit_add(bx + 1, by, bw - 2, 1, A_BTN, here ? B_LEAVE : B_JOIN, 0, here ? HV_RED : HV_BG);
-    if (!here && !c->can_connect) g_ctext(x, by + 2, w, "нет права подключаться к этому каналу", C_RED, 0);
+    if (!here && !c->can_connect) g_ctext(x, by + 2, w, TR("нет права подключаться к этому каналу"), C_RED, 0);
 }
 
 /* ======================= друзья, новая ЛС, поиск (фаза 4) =======================
@@ -4735,12 +4957,12 @@ static const char *const FR_TABS_S[] = { "В сети", "Все", "Ожид.", "
 static const char *un(u64 uid) { const char *n = user_name(uid); return n && *n ? n : "?"; }
 static const char *status_text(const Relation *r) {
     switch (r->type) {
-    case REL_IN: return "Входящий запрос дружбы";
-    case REL_OUT: return "Исходящий запрос дружбы";
-    case REL_BLOCKED: return "Заблокирован";
+    case REL_IN: return TR("Входящий запрос дружбы");
+    case REL_OUT: return TR("Исходящий запрос дружбы");
+    case REL_BLOCKED: return TR("Заблокирован");
     default: break;
     }
-    return r->status == PS_ONLINE ? "В сети" : r->status == PS_IDLE ? "Не активен" : r->status == PS_DND ? "Не беспокоить" : "Не в сети";
+    return r->status == PS_ONLINE ? TR("В сети") : r->status == PS_IDLE ? TR("Не активен") : r->status == PS_DND ? TR("Не беспокоить") : TR("Не в сети");
 }
 static u32 status_col(int st) { return st == PS_ONLINE ? C_GREEN : st == PS_IDLE ? C_GOLD : st == PS_DND ? C_RED : 0x80848eu; }
 static bool fr_in_tab(const Relation *r, int tab) {
@@ -4821,7 +5043,7 @@ static void rq_answer(int ci, bool ok) {
     u64 cid = S.chans[ci].id;
     bool r = ok ? dm_request_accept(cid, err, sizeof err) : dm_request_reject(cid, err, sizeof err);
     if (!r && err[0]) { char *e = san(err, false); ui_notice("%s", e); free(e); }
-    else ui_notice(ok ? "запрос принят" : "запрос отклонён");
+    else ui_notice(ok ? TR("запрос принят") : TR("запрос отклонён"));
     rebuild_rows();
 }
 static int rq_btn(int x_end, int y, const char *t, u32 fg, int sub, int arg) {
@@ -4835,10 +5057,10 @@ static void draw_requests(int cx, int cw, int H) {
     int ix[64];
     int nr = rq_list(0, ix, 64), ns = rq_list(1, ix, 64);
     g_text(cx + 2, 0, "?!", 2, C_MUTED, AT_B);
-    int x = cx + 5 + g_text(cx + 5, 0, "Запросы на общение", cw - 8, C_WHITE, AT_B) + 2;
+    int x = cx + 5 + g_text(cx + 5, 0, TR("Запросы на общение"), cw - 8, C_WHITE, AT_B) + 2;
     char t[64];
     for (int tb = 0; tb < 2; tb++) {
-        snprintf(t, sizeof t, "%s %d", tb ? "Спам" : "Запросы", tb ? ns : nr);
+        snprintf(t, sizeof t, "%s %d", tb ? TR("Спам") : TR("Запросы"), tb ? ns : nr);
         int w = vw(t) + 2;
         if (x + w > cx + cw - 2) break;
         if (RQ.tab == tb) g_pill(x, 0, w, C_SEL);
@@ -4847,17 +5069,17 @@ static void draw_requests(int cx, int cw, int H) {
         x += w + 1;
     }
     int n = rq_list(RQ.tab, ix, 64), y = 2;
-    g_texte(cx + 2, y, RQ.tab ? "Спам: картинки и аватары не загружаются, пока вы не примете запрос." :
-                               "Сообщения от людей не из друзей. Картинки и аватары - после «Принять».", cw - 4, C_MUTED, 0);
+    g_texte(cx + 2, y, RQ.tab ? TR("Спам: картинки и аватары не загружаются, пока вы не примете запрос.") :
+                               TR("Сообщения от людей не из друзей. Картинки и аватары - после 'Принять'."), cw - 4, C_MUTED, 0);
     y += 2;
-    if (!n) { g_text(cx + 2, y, RQ.tab ? "Спама нет." : "Запросов нет.", cw - 4, C_MUTED, 0); }
+    if (!n) { g_text(cx + 2, y, RQ.tab ? TR("Спама нет.") : TR("Запросов нет."), cw - 4, C_MUTED, 0); }
     for (int i = 0; i < n && y < H - 2; i++, y += 2) {
         const Channel *c = &S.chans[ix[i]];
         char lab[96];
         chan_label(c, lab, sizeof lab);
         g_text(cx + 2, y, "[?]", 3, C_MUTED, AT_B);  /* аватар — заглушка */
-        int bx = rq_btn(cx + cw - 2, y, "Отклонить", C_RED, B_RQ_NO, ix[i]);
-        bx = rq_btn(bx - 1, y, "Принять", C_GREEN, B_RQ_OK, ix[i]);
+        int bx = rq_btn(cx + cw - 2, y, TR("Отклонить"), C_RED, B_RQ_NO, ix[i]);
+        bx = rq_btn(bx - 1, y, TR("Принять"), C_GREEN, B_RQ_OK, ix[i]);
         g_texte(cx + 6, y, lab, bx - cx - 8, C_WHITE, AT_B);
         hit_add(cx + 1, y, bx - cx - 2, 1, A_OPENCH, 0, ix[i], HV_PILL);
         for (int q = cx + 2; q < cx + cw - 2; q++) g_ch(q, y + 1, '-', C_LINE, 0);
@@ -4873,26 +5095,31 @@ static void draw_friends(int cx, int cw, int H) {
     /* шапка: oo Друзья | В сети  Все  Ожидание (1)  Заблокированные  (Добавить в друзья) */
     int x = cx + 1;
     x += g_text(x, 0, "oo", 2, C_MUTED, AT_B) + 1;
-    x += g_text(x, 0, "Друзья", 8, C_WHITE, AT_B) + 1;
+    x += g_text(x, 0, TR("Друзья"), 8, C_WHITE, AT_B) + 1;
     g_ch(x, 0, '|', C_LINE, 0);
     x += 2;
     char nb[8];
     snprintf(nb, sizeof nb, "%d", nin > 99 ? 99 : nin);
     int full = 0;
-    for (int i = 0; i < 4; i++) full += vw(FR_TABS[i]) + 3 + (i == 2 && nin ? vw(nb) + 3 : 0);
+    for (int i = 0; i < 4; i++) full += vw(tr(FR_TABS[i])) + 3 + (i == 2 && nin ? vw(nb) + 3 : 0);
     const char *const *tabs = x + full + 20 <= cx + cw ? FR_TABS : FR_TABS_S;
     int fulls = 0;
-    for (int i = 0; i < 4; i++) fulls += vw(FR_TABS_S[i]) + 3 + (i == 2 && nin ? vw(nb) + 3 : 0);
+    for (int i = 0; i < 4; i++) fulls += vw(tr(FR_TABS_S[i])) + 3 + (i == 2 && nin ? vw(nb) + 3 : 0);
     if (x + fulls > cx + cw - 1) {
         /* узко: не все вкладки влезают — переключатель «< Вкладка (1) >», стрелки — соседние вкладки */
         int t = U.fr_tab & 3;
-        int bw = t == 2 && nin ? vw(nb) + 3 : 0, w = vw(FR_TABS[t]) + 2 + bw;
-        if (x + 4 + w + 2 > cx + cw) { tabs = FR_TABS_S; w = vw(FR_TABS_S[t]) + 2 + bw; }
+        int bw = t == 2 && nin ? vw(nb) + 3 : 0, w = vw(tr(FR_TABS[t])) + 2 + bw;
+        if (x + 4 + w + 2 > cx + cw) { tabs = FR_TABS_S; w = vw(tr(FR_TABS_S[t])) + 2 + bw; }
+        if (x + 4 + w + 2 > cx + cw) {           /* совсем узко: без «oo Друзья |» — только «< Вкладка >» */
+            g_rect(cx + 1, 0, x - cx - 1, 1, bg_at(cx + 1, 0));
+            x = cx + 1;
+        }
+        if (x + 4 + w + 2 > cx + cw) w = cx + cw - x - 6;   /* и подпись — с «...» */
         g_text(x, 0, "<", 1, C_TEXT, AT_B);
         hit_add(x, 0, 1, 1, A_FRTAB, 0, (t + 3) % 4, HV_UL);
         x += 2;
         g_pill(x, 0, w, C_SEL);
-        g_text(x + 1, 0, tabs[t], w - 2 - bw, C_WHITE, AT_B | (foc ? AT_U : 0));
+        g_texte(x + 1, 0, tr(tabs[t]), w - 2 - bw, C_WHITE, AT_B | (foc ? AT_U : 0));
         if (bw) { g_pill(x + w - bw, 0, bw, C_RED); g_text(x + w - bw + 1, 0, nb, bw - 2, C_WHITE, AT_B); }
         x += w + 1;
         g_text(x, 0, ">", 1, C_TEXT, AT_B);
@@ -4901,18 +5128,18 @@ static void draw_friends(int cx, int cw, int H) {
         tabs = NULL;
     }
     for (int i = 0; i < 4 && tabs; i++) {
-        int bw = i == 2 && nin ? vw(nb) + 3 : 0, w = vw(tabs[i]) + 2 + bw;
+        int bw = i == 2 && nin ? vw(nb) + 3 : 0, w = vw(tr(tabs[i])) + 2 + bw;
         if (x + w > cx + cw - 1) break;
         bool on = i == U.fr_tab;
         if (on) g_pill(x, 0, w, C_SEL);
-        g_text(x + 1, 0, tabs[i], w - 2 - bw, on ? C_WHITE : C_MUTED, AT_B | (on && foc ? AT_U : 0));
+        g_text(x + 1, 0, tr(tabs[i]), w - 2 - bw, on ? C_WHITE : C_MUTED, AT_B | (on && foc ? AT_U : 0));
         if (bw) { g_pill(x + w - bw, 0, bw, C_RED); g_text(x + w - bw + 1, 0, nb, bw - 2, C_WHITE, AT_B); }
         hit_add(x, 0, w, 1, A_FRTAB, 0, i, HV_PILL);
         x += w + 1;
     }
     if (x + 20 <= cx + cw) {
         g_pill(x, 0, 19, C_GREEN);
-        g_text(x + 1, 0, "Добавить в друзья", 17, C_WHITE, AT_B);
+        g_text(x + 1, 0, TR("Добавить в друзья"), 17, C_WHITE, AT_B);
         hit_add(x, 0, 19, 1, A_BTN, B_ADDFRIEND, 0, HV_PILL);
         U.hit[U.nhit - 1].tip = T_FRTAB;
         x += 20;
@@ -4923,10 +5150,10 @@ static void draw_friends(int cx, int cw, int H) {
     if (acw) {
         int ax = cx + cw - acw;
         for (int y = 1; y < H; y++) g_ch(ax - 1, y, '|', C_LINE, 0);
-        g_text(ax + 1, 2, "Активные контакты", acw - 2, C_WHITE, AT_B);
-        g_ctext(ax, 4, acw, "Пока что тут тихо...", C_WHITE, AT_B);
+        g_text(ax + 1, 2, TR("Активные контакты"), acw - 2, C_WHITE, AT_B);
+        g_ctext(ax, 4, acw, TR("Пока что тут тихо..."), C_WHITE, AT_B);
         char **ls;
-        int m = help_wrap("Когда друг начнёт общаться в голосовом чате, мы покажем это здесь.", acw - 4, &ls);
+        int m = help_wrap(TR("Когда друг начнёт общаться в голосовом чате, мы покажем это здесь."), acw - 4, &ls);
         for (int i = 0; i < m; i++) { if (5 + i < H - 1) g_ctext(ax, 5 + i, acw, ls[i], C_MUTED, 0); free(ls[i]); }
         free(ls);
     }
@@ -4941,7 +5168,7 @@ static void draw_friends(int cx, int cw, int H) {
     }
     static const char *const cap[] = { "В СЕТИ", "ВСЕ ДРУЗЬЯ", "ОЖИДАНИЕ", "ЗАБЛОКИРОВАНО" };
     char t[96];
-    snprintf(t, sizeof t, "%s - %d", cap[U.fr_tab & 3], n);
+    snprintf(t, sizeof t, "%s - %d", tr(cap[U.fr_tab & 3]), n);
     g_text(lx + 1, 2, t, lw - 2, C_MUTED, AT_B);
     int top = 3, bot = H - 2, per = (bot - top + 1) / 3;
     if (per < 1) per = 1;
@@ -4961,12 +5188,12 @@ static void draw_friends(int cx, int cw, int H) {
         if (ay < top) ay = top;
         if (bot - top >= 10) for (int i = 0; i < 5; i++) g_ctext(lx, ay + i, lw, art[i], C_MUTED, 0);
         else ay = top - 6;
-        g_ctext(lx, ay + 6, lw, empty[U.fr_tab & 3], C_MUTED, 0);
+        g_ctext(lx, ay + 6, lw, tr(empty[U.fr_tab & 3]), C_MUTED, 0);
         if (U.fr_tab == 0 && nfr) {
             char tt[96];
-            snprintf(tt, sizeof tt, "Всего друзей: %d - вкладка 'Все'", nfr);
+            snprintf(tt, sizeof tt, TR("Всего друзей: %d - вкладка 'Все'"), nfr);
             g_ctext(lx, ay + 7, lw, tt, C_MUTED, 0);
-            snprintf(tt, sizeof tt, "Все друзья (%d)", nfr);
+            snprintf(tt, sizeof tt, TR("Все друзья (%d)"), nfr);
             int bw = vw(tt) + 4, bx = lx + (lw - bw) / 2;
             if (ay + 9 <= bot) { g_button(bx, ay + 9, tt, lw, 1, B_NOP); if (U.nhit) { U.hit[U.nhit - 1].act = A_FRTAB; U.hit[U.nhit - 1].arg = 1; } }
         }
@@ -4987,14 +5214,14 @@ static void draw_friends(int cx, int cw, int H) {
         switch (r->type) {
         case REL_FRIEND:
             bx = fr_btn(bx, by, "...", C_TEXT, FA_MORE, i, T_MORE) - 1;
-            if (bx - lx >= 30) bx = fr_btn(bx, by, "Написать", C_TEXT, FA_MSG, i, T_WRITE) - 1;
+            if (bx - lx >= 30) bx = fr_btn(bx, by, TR("Написать"), C_TEXT, FA_MSG, i, T_WRITE) - 1;
             break;
         case REL_IN:
-            bx = fr_btn(bx, by, nar ? "x" : "Отклонить", C_RED, FA_DECLINE, i, 0) - 1;
-            if (nar || bx - lx >= 28) bx = fr_btn(bx, by, nar ? "+" : "Принять", C_GREEN, FA_ACCEPT, i, 0) - 1;
+            bx = fr_btn(bx, by, nar ? "x" : TR("Отклонить"), C_RED, FA_DECLINE, i, 0) - 1;
+            if (nar || bx - lx >= 28) bx = fr_btn(bx, by, nar ? "+" : TR("Принять"), C_GREEN, FA_ACCEPT, i, 0) - 1;
             break;
-        case REL_OUT: bx = fr_btn(bx, by, nar ? "x" : "Отменить", C_TEXT, FA_DECLINE, i, 0) - 1; break;
-        default: bx = fr_btn(bx, by, nar ? "Разбл." : "Разблокировать", C_TEXT, FA_UNBLOCK, i, 0) - 1; break;
+        case REL_OUT: bx = fr_btn(bx, by, nar ? "x" : TR("Отменить"), C_TEXT, FA_DECLINE, i, 0) - 1; break;
+        default: bx = fr_btn(bx, by, nar ? TR("Разбл.") : TR("Разблокировать"), C_TEXT, FA_UNBLOCK, i, 0) - 1; break;
         }
         g_texte(lx + 7, y + 1, un(r->id), (nar ? lx + lw - 1 : bx) - lx - 8, C_WHITE, AT_B);
         g_texte(lx + 7, y + 2, status_text(r), (nar ? bx : lx + lw - 1) - lx - 8, C_MUTED, 0);
@@ -5008,14 +5235,14 @@ static void draw_friends(int cx, int cw, int H) {
         CBtn cb[3];
         char why[200] = "", fld[96], cnt[80];
         bool down = vless_state() == VL_DOWN;
-        cl[cn++] = down ? "VLESS: нет связи" : U.mode == M_VLOFF ? "Отключить VLESS" : "Ссылка VLESS";
+        cl[cn++] = down ? TR("VLESS: нет связи") : U.mode == M_VLOFF ? TR("Отключить VLESS") : TR("Ссылка VLESS");
         if (down) {
-            char *r = san(streamer_on() ? "подробности скрыты (режим стримера)" : U.vl_note[0] ? U.vl_note : vless_error(), false);
-            deco_ascii(*r ? r : "туннель не отвечает", why, sizeof why);
+            char *r = san(streamer_on() ? TR("подробности скрыты (режим стримера)") : U.vl_note[0] ? U.vl_note : vless_error(), false);
+            deco_ascii(*r ? r : TR("туннель не отвечает"), why, sizeof why);
             free(r);
             cl[cn++] = why;
         }
-        if (U.busy[0]) { cl[cn++] = U.busy; cl[cn++] = "ждите до 10 с"; }
+        if (U.busy[0]) { cl[cn++] = U.busy; cl[cn++] = TR("ждите до 10 с"); }
         else if (U.mode == M_VLINK) {
             int nch = in_chars(), shown = 0;
             size_t o = 0;
@@ -5025,29 +5252,29 @@ static void draw_friends(int cx, int cw, int H) {
             if (shown < nch) { memcpy(fld + o, "...", 3); o += 3; }
             fld[o++] = '_';
             fld[o] = 0;
-            snprintf(cnt, sizeof cnt, "%d симв., на экране не видна", nch);
-            cl[cn++] = "вставьте ссылку (Ctrl+V) или наберите:";
+            snprintf(cnt, sizeof cnt, TR("%d симв., на экране не видна"), nch);
+            cl[cn++] = TR("вставьте ссылку (Ctrl+V) или наберите:");
             cl[cn++] = fld;
             cl[cn++] = cnt;
-            cb[nbt++] = (CBtn){ "Назад (Esc)", B_VL_BACK, 0 };
-            cb[nbt++] = (CBtn){ "Проверить (Enter)", B_VL_CHECK, 1 };
+            cb[nbt++] = (CBtn){ TR("Назад (Esc)"), B_VL_BACK, 0 };
+            cb[nbt++] = (CBtn){ TR("Проверить (Enter)"), B_VL_CHECK, 1 };
         } else if (U.mode == M_VLOFF) {
-            cl[cn++] = "трафик пойдёт напрямую, Discord увидит ваш IP";
-            cb[nbt++] = (CBtn){ "Отмена", B_NO, 0 };
-            cb[nbt++] = (CBtn){ "Отключить (y)", B_YES, 2 };
+            cl[cn++] = TR("трафик пойдёт напрямую, Discord увидит ваш IP");
+            cb[nbt++] = (CBtn){ TR("Отмена"), B_NO, 0 };
+            cb[nbt++] = (CBtn){ TR("Отключить (y)"), B_YES, 2 };
         } else {
-            cl[cn++] = "напрямую клиент не ходит - выберите:";
-            cb[nbt++] = (CBtn){ "Отключить (D)", B_VL_D, 2 };
-            cb[nbt++] = (CBtn){ "Сменить ссылку (C)", B_VL_C, 0 };
-            cb[nbt++] = (CBtn){ "Переподключиться (R)", B_VL_R, 1 };
+            cl[cn++] = TR("напрямую клиент не ходит - выберите:");
+            cb[nbt++] = (CBtn){ TR("Отключить (D)"), B_VL_D, 2 };
+            cb[nbt++] = (CBtn){ TR("Сменить ссылку (C)"), B_VL_C, 0 };
+            cb[nbt++] = (CBtn){ TR("Переподключиться (R)"), B_VL_R, 1 };
         }
         g_card(cx, 1, cw, H - 2, -1, cl, cn, cb, nbt, down ? C_RED : C_WHITE, true);
     }
     if (U.mode == M_UNFRIEND) {
         char l1[160];
-        snprintf(l1, sizeof l1, "Вы уверены, что хотите удалить %s из друзей?", un(U.target));
-        const char *l2[2] = { "Удалить из друзей", l1 };
-        CBtn b2[2] = { { "Отмена", B_NO, 0 }, { "Удалить друга (y)", B_YES, 2 } };
+        snprintf(l1, sizeof l1, TR("Вы уверены, что хотите удалить %s из друзей?"), un(U.target));
+        const char *l2[2] = { TR("Удалить из друзей"), l1 };
+        CBtn b2[2] = { { TR("Отмена"), B_NO, 0 }, { TR("Удалить друга (y)"), B_YES, 2 } };
         g_card(cx, 1, cw, H - 2, -1, l2, 2, b2, 2, C_WHITE, true);
     }
     draw_status(cx, cx + cw, H - 1);
@@ -5073,10 +5300,10 @@ static void draw_picker(int W, int H, int px, int py) {
     g_round_corners(px, py, bw, bh, 0, ut);
     g_round_corners(px, py + bh - 1, bw, bh, bh - 1, ub);
     hit_add(px, py, bw, bh, A_BLOCK, 0, 0, 0);
-    g_text(px + 3, py + 1, "Выберите друзей", bw - 8, C_WHITE, AT_B);
+    g_text(px + 3, py + 1, TR("Выберите друзей"), bw - 8, C_WHITE, AT_B);
     g_text(px + bw - 4, py + 1, "x", 1, C_TEXT, AT_B);
     hit_add(px + bw - 5, py + 1, 3, 1, A_BTN, B_PICK_X, 0, HV_RED);
-    g_text(px + 3, py + 2, "Личная беседа с одним другом", bw - 6, C_MUTED, 0);
+    g_text(px + 3, py + 2, TR("Личная беседа с одним другом"), bw - 6, C_MUTED, 0);
     /* поле фильтра: курсор всегда в конце */
     g_pill(px + 2, py + 4, bw - 4, C_RAIL);
     int fw = bw - 8, qw = vw(U.pick_q), skip = qw > fw - 1 ? qw - (fw - 1) : 0, acc = 0, used = 0;
@@ -5088,11 +5315,11 @@ static void draw_picker(int W, int H, int px, int py) {
         acc += cw2;
     }
     g_ch(px + 4 + used, py + 4, ' ', C_TEXT, AT_I);
-    if (!U.pick_q[0]) g_texte_w(px + 5, py + 4, "Введите имя пользователя друга", fw - 1, C_MUTED, 0, false);
+    if (!U.pick_q[0]) g_texte_w(px + 5, py + 4, TR("Введите имя пользователя друга"), fw - 1, C_MUTED, 0, false);
     if (U.pick_sel >= n) U.pick_sel = n - 1;
     if (U.pick_sel < 0) U.pick_sel = 0;
     int ps = U.pick_sel >= rows ? U.pick_sel - rows + 1 : 0;
-    if (!n) g_ctext(px, py + 6, bw, U.pick_q[0] ? "Друзей с таким именем нет" : "У вас пока нет друзей", C_MUTED, 0);
+    if (!n) g_ctext(px, py + 6, bw, U.pick_q[0] ? TR("Друзей с таким именем нет") : TR("У вас пока нет друзей"), C_MUTED, 0);
     for (int k = 0; k < rows && ps + k < n; k++) {
         int idx = ps + k, y = py + 6 + k;
         const Relation *r = &fr_rels[ix[idx]];
@@ -5105,7 +5332,7 @@ static void draw_picker(int W, int H, int px, int py) {
     }
     int by = py + bh - 2;
     g_pill(px + 2, by, bw - 4, n ? C_ACC : C_BTN2);
-    g_ctext(px + 2, by, bw - 4, "Создать ЛС", n ? C_WHITE : C_MUTED, AT_B);
+    g_ctext(px + 2, by, bw - 4, TR("Создать ЛС"), n ? C_WHITE : C_MUTED, AT_B);
     if (n) hit_add(px + 2, by, bw - 4, 1, A_BTN, B_PICK_GO, 0, HV_PILL);
     free(ix);
 }
@@ -5117,7 +5344,7 @@ static void date_short(i64 unix_s, char *out, size_t n) {
     static const char *const mon[] = { "янв.", "февр.", "мар.", "апр.", "мая", "июн.", "июл.", "авг.", "сент.", "окт.", "нояб.", "дек." };
     struct tm t;
     plat_localtime(unix_s, &t);
-    snprintf(out, n, "%d %s %d г.", t.tm_mday, mon[(t.tm_mon % 12 + 12) % 12], t.tm_year + 1900);
+    snprintf(out, n, TR("%d %s %d г."), t.tm_mday, tr(mon[(t.tm_mon % 12 + 12) % 12]), t.tm_year + 1900);
 }
 static void draw_card(int W, int H) {
     u64 uid = U.card_uid;
@@ -5140,6 +5367,13 @@ static void draw_card(int W, int H) {
     u64 mgid = mc0 ? mc0->guild_id : 0;
     bool modrow = mgid && uid != S.me_id && (mod_can(mgid, MOD_TIMEOUT) || mod_can(mgid, MOD_KICK) || mod_can(mgid, MOD_BAN) || mod_can(mgid, MOD_ROLES));
     if (modrow) extra += 2;
+    const NoteState *ns = note_state();           /* №100 личная заметка: по кнопке, живёт, пока открыта карточка */
+    bool noteon = uid != S.me_id && ns && ns->uid == uid;
+    int nnote = 0;
+    char **nl = NULL;
+    if (noteon && !ns->busy && !ns->err[0] && ns->text[0]) { char *nt = san(ns->text, false); nnote = help_wrap(nt, bw - 4, &nl); free(nt); if (nnote > 3) { for (int i = 3; i < nnote; i++) free(nl[i]); nnote = 3; } }
+    int note_rows = uid != S.me_id ? (noteon ? 1 + (nnote ? nnote : 1) : 1) : 0;
+    extra += note_rows;
     int bh = 13 + extra + (nbio ? nbio + 2 : 0) + (have && pf->nroles ? 1 : 0) + (have && pf->member_since_unix > 0 ? 1 : 0);
     if (bh > H - 2) bh = H - 2;
     if (bh < 10) { for (int i = 0; i < nbio; i++) free(bio[i]); free(bio); return; }
@@ -5170,17 +5404,17 @@ static void draw_card(int W, int H) {
         g_texte(px + 2, y++, t, bw - 4, C_TEXT, 0);
     }
     const Relation *r = rel_find(uid);
-    const char *rel = uid == S.me_id ? "это вы" : !r ? "" : r->type == REL_FRIEND ? "друг" : r->type == REL_IN ? "входящая заявка в друзья" :
-                      r->type == REL_OUT ? "исходящая заявка в друзья" : "заблокирован";
+    const char *rel = uid == S.me_id ? TR("это вы") : !r ? "" : r->type == REL_FRIEND ? TR("друг") : r->type == REL_IN ? TR("входящая заявка в друзья") :
+                      r->type == REL_OUT ? TR("исходящая заявка в друзья") : TR("заблокирован");
     snprintf(t, sizeof t, "%s%s%s", rel, *rel && r && r->type == REL_FRIEND ? " - " : "", r && r->type == REL_FRIEND ? status_text(r) : "");
     if (r && r->type == REL_FRIEND) g_ch(px + 2, y, 'o', status_col(r->status), AT_B);
     g_texte(px + (r && r->type == REL_FRIEND ? 4 : 2), y++, t, bw - 6, C_MUTED, 0);
     for (int i = px + 2; i < px + bw - 2; i++) g_ch(i, y, '-', 0x3f4147u, 0);
     y++;
-    if (pf && pf->id == uid && pf->busy) g_text(px + 2, y++, "загрузка профиля...", bw - 4, C_MUTED, 0);
+    if (pf && pf->id == uid && pf->busy) g_text(px + 2, y++, TR("загрузка профиля..."), bw - 4, C_MUTED, 0);
     else if (pf && pf->id == uid && pf->error[0]) { char *e = san(pf->error, false); g_texte(px + 2, y++, e, bw - 4, C_RED, 0); free(e); }
     if (nbio) {
-        g_text(px + 2, y++, "О СЕБЕ", bw - 4, C_WHITE, AT_B);
+        g_text(px + 2, y++, TR("О СЕБЕ"), bw - 4, C_WHITE, AT_B);
         for (int i = 0; i < nbio; i++) { g_text(px + 2, y++, bio[i], bw - 4, C_TEXT, 0); free(bio[i]); }
         y++;
     }
@@ -5190,14 +5424,14 @@ static void draw_card(int W, int H) {
         char d1[40], d2[40] = "";
         date_short((i64)((uid >> 22) + (u64)DISCORD_EPOCH_MS) / 1000, d1, sizeof d1);
         if (have && pf->member_since_unix > 0) date_short(pf->member_since_unix, d2, sizeof d2);
-        snprintf(t, sizeof t, "В DISCORD С  %s", d1);
+        snprintf(t, sizeof t, TR("В DISCORD С  %s"), d1);
         g_texte(px + 2, y++, t, bw - 4, C_MUTED, AT_B);
-        if (d2[0]) { snprintf(t, sizeof t, "НА СЕРВЕРЕ С  %s", d2); g_texte(px + 2, y++, t, bw - 4, C_MUTED, AT_B); }
+        if (d2[0]) { snprintf(t, sizeof t, TR("НА СЕРВЕРЕ С  %s"), d2); g_texte(px + 2, y++, t, bw - 4, C_MUTED, AT_B); }
     }
     if (have && pf->nroles) {
         Guild *g = guild_find(pf->guild_id);
         /* имён ролей в store нет (память): число ролей и кружки их цветов, как точки ролей в Discord */
-        snprintf(t, sizeof t, "РОЛИ: %d", pf->nroles);
+        snprintf(t, sizeof t, TR("РОЛИ: %d"), pf->nroles);
         int x = px + 2 + g_text(px + 2, y, t, bw - 4, C_WHITE, AT_B) + 2;
         for (int i = 0; i < pf->nroles && g; i++) {
             u32 col = 0;
@@ -5209,6 +5443,24 @@ static void draw_card(int W, int H) {
         y++;
     }
     int by = py + bh - 2, x = px + 2;
+    if (uid != S.me_id) {                        /* №100: заметка (только мне видна) */
+        int ny0 = by - (modrow ? 2 : 0) - note_rows;
+        if (!noteon) {
+            int w0 = g_text(px + 2, ny0, TR("> Личная заметка"), bw - 4, C_URL, 0);
+            hit_add(px + 2, ny0, w0, 1, A_BTN, B_CARD_NOTE, 0, HV_UL);
+        } else {
+            int u2 = g_text(px + 2, ny0, TR("ЗАМЕТКА (видна только вам) "), bw - 4, C_MUTED, AT_B);
+            g_text(px + 2 + u2, ny0, TR("[изменить]"), bw - 4 - u2, C_URL, 0);
+            hit_add(px + 2 + u2, ny0, 10, 1, A_BTN, B_NOTE_EDIT, 0, HV_UL);
+            if (ns->busy) g_text(px + 2, ny0 + 1, TR("загрузка..."), bw - 4, C_MUTED, 0);
+            else if (ns->err[0]) { char *e = san(ns->err, false); g_texte(px + 2, ny0 + 1, e, bw - 4, C_RED, 0); free(e); }
+            else if (!nnote) g_text(px + 2, ny0 + 1, TR("пусто"), bw - 4, C_MUTED, 0);
+            for (int i = 0; i < nnote; i++) { g_text(px + 2, ny0 + 1 + i, nl[i], bw - 4, C_TEXT, 0); free(nl[i]); }
+        }
+        free(nl); nl = NULL;
+        extra -= note_rows;
+    }
+    free(nl);
     if (modrow) {                                /* №133/117/147: модерация — каждое действие с подтверждением и причиной */
         int my = by - 2, mx = px + 2;
         static const char *const ml[] = { "Тайм-аут", "Выгнать", "Бан", "Роли", "Перенести", "Заглушить" };
@@ -5222,7 +5474,7 @@ static void draw_card(int W, int H) {
         }
         for (int a2 = 0; a2 < 6; a2++) {
             if (!mod_can(mgid, a2) || (a2 >= MOD_MOVE && !invoice)) continue;
-            int bw2 = g_button(mx, my, ml[a2], px + bw - 2 - mx, a2 == MOD_BAN || a2 == MOD_KICK ? 2 : 0, B_MOD);
+            int bw2 = g_button(mx, my, tr(ml[a2]), px + bw - 2 - mx, a2 == MOD_BAN || a2 == MOD_KICK ? 2 : 0, B_MOD);
             if (!bw2) break;
             U.hit[U.nhit - 1].arg = a2;
             mx += bw2 + 1;
@@ -5230,36 +5482,37 @@ static void draw_card(int W, int H) {
         extra -= 2;
     }
     if (extra) {
-        int ey = by - extra - (modrow ? 2 : 0);
+        int ey = by - extra - (modrow ? 2 : 0) - note_rows;
         if (!(have && pf->full)) {
-            int w = g_text(px + 2, ey, "> Полный профиль (общие серверы)", bw - 4, C_URL, 0);
+            int w = g_text(px + 2, ey, TR("> Полный профиль (общие серверы)"), bw - 4, C_URL, 0);
             hit_add(px + 2, ey, w, 1, A_BTN, B_CARD_FULL, 0, HV_UL);
         } else if (streamer_on()) {
-            g_text(px + 2, ey, "общие и связи скрыты (режим стримера)", bw - 4, C_MUTED, 0);
+            g_text(px + 2, ey, TR("общие и связи скрыты (режим стримера)"), bw - 4, C_MUTED, 0);
         } else {
             Buf b = {0};
-            buf_printf(&b, "ОБЩИЕ СЕРВЕРЫ (%d): ", pf->nmutual);
+            buf_printf(&b, TR("ОБЩИЕ СЕРВЕРЫ (%d): "), pf->nmutual);
             for (int i = 0; i < pf->nmutual && i < 6; i++) { Guild *gg = guild_find(pf->mutual[i]); buf_printf(&b, "%s%s", i ? ", " : "", gg && gg->name ? gg->name : "?"); }
             char *sb = san(b.p ? b.p : "", false);
             g_texte(px + 2, ey++, sb, bw - 4, C_TEXT, 0);
             free(sb); buf_free(&b);
-            buf_printf(&b, "ОБЩИЕ ДРУЗЬЯ (%d): ", pf->nfriends);
+            buf_printf(&b, TR("ОБЩИЕ ДРУЗЬЯ (%d): "), pf->nfriends);
             for (int i = 0; i < pf->nfriends && i < 6; i++) buf_printf(&b, "%s%s", i ? ", " : "", user_name(pf->friends[i]));
             sb = san(b.p ? b.p : "", false);
             g_texte(px + 2, ey++, sb, bw - 4, C_TEXT, 0);
             free(sb); buf_free(&b);
             if (ncn) {
-                g_text(px + 2, ey++, "СВЯЗИ", bw - 4, C_MUTED, AT_B);
+                g_text(px + 2, ey++, TR("СВЯЗИ"), bw - 4, C_MUTED, AT_B);
                 for (int i = 0; i < ncn; i++) { char *c2 = san(pf->conn[i] ? pf->conn[i] : "", false); g_texte(px + 2, ey++, c2, bw - 4, C_TEXT, 0); free(c2); }
             }
         }
     }
     if (uid != S.me_id) {
-        x += g_button(x, by, "Написать", bw - 4, 1, B_CARD_MSG) + 1;
-        if (!r) x += g_button(x, by, "В друзья", px + bw - 2 - x, 0, B_CARD_ADD) + 1;
-        if (!r || r->type != REL_BLOCKED) x += g_button(x, by, "Блок", px + bw - 2 - x, 2, B_CARD_BLOCK) + 1;
+        x += g_button(x, by, TR("Написать"), bw - 4, 1, B_CARD_MSG) + 1;
+        if (!r) x += g_button(x, by, TR("В друзья"), px + bw - 2 - x, 0, B_CARD_ADD) + 1;
+        if (!r || r->type != REL_BLOCKED) x += g_button(x, by, TR("Блок"), px + bw - 2 - x, 2, B_CARD_BLOCK) + 1;
+        x += g_button(x, by, ignored(uid) ? TR("Не игнор.") : TR("Игнор"), px + bw - 2 - x, 0, B_CARD_IGN) + 1;   /* №108 */
         const Channel *gc = chan_find(S.open_ch);
-        if (gc && gc->type == CH_GROUP && gdm_owner(gc->id) == S.me_id) x += g_button(x, by, "Исключить", px + bw - 2 - x, 2, B_CARD_KICK) + 1;
+        if (gc && gc->type == CH_GROUP && gdm_owner(gc->id) == S.me_id) x += g_button(x, by, TR("Исключить"), px + bw - 2 - x, 2, B_CARD_KICK) + 1;
     }
     if (!streamer_on()) g_button(x, by, "ID", px + bw - 2 - x, 0, B_CARD_ID);
 }
@@ -5308,7 +5561,7 @@ static void draw_qs(int W, int H) {
     g_round_corners(px, py, bw, bh, 0, ut);
     g_round_corners(px, py + bh - 1, bw, bh, bh - 1, ub);
     hit_add(0, 0, W, H, A_BLOCK, 0, 0, 0);
-    g_text(px + 3, py + 1, U.fwd_msg ? "Переслать в..." : "Куда отправимся?", bw - 6, C_WHITE, AT_B);
+    g_text(px + 3, py + 1, U.fwd_msg ? TR("Переслать в...") : TR("Куда отправимся?"), bw - 6, C_WHITE, AT_B);
     g_pill(px + 2, py + 2, bw - 4, C_RAIL);
     int fw = bw - 8, qw = vw(U.qs_q), skip = qw > fw - 1 ? qw - (fw - 1) : 0, acc = 0, used = 0;
     for (const char *p = U.qs_q; *p; ) {
@@ -5319,10 +5572,10 @@ static void draw_qs(int W, int H) {
         acc += cw2;
     }
     g_ch(px + 4 + used, py + 2, ' ', C_TEXT, AT_I);
-    if (!U.qs_q[0]) g_texte_w(px + 5, py + 2, "имя канала, беседы или сервера", fw - 1, C_MUTED, 0, false);
+    if (!U.qs_q[0]) g_texte_w(px + 5, py + 2, TR("имя канала, беседы или сервера"), fw - 1, C_MUTED, 0, false);
     if (U.qs_sel >= n) U.qs_sel = n - 1;
     if (U.qs_sel < 0) U.qs_sel = 0;
-    if (!n) g_ctext(px, py + 4, bw, "Ничего не нашлось", C_MUTED, 0);
+    if (!n) g_ctext(px, py + 4, bw, TR("Ничего не нашлось"), C_MUTED, 0);
     for (int k = 0; k < rows && k < n; k++) {
         int y = py + 4 + k;
         bool s = k == U.qs_sel;
@@ -5333,13 +5586,13 @@ static void draw_qs(int W, int H) {
             const Guild *g = &S.guilds[it[k].idx];
             abbr(g->name, lab, sizeof lab);
             snprintf(t, sizeof t, "[%s] %s", lab, g->name ? g->name : "?");
-            right = "сервер";
+            right = TR("сервер");
         } else {
             const Channel *c = &S.chans[it[k].idx];
             chan_label(c, lab, sizeof lab);
             snprintf(t, sizeof t, "%s %s", chan_mark(c), lab);
             const Guild *g = c->guild_id ? guild_find(c->guild_id) : NULL;
-            right = g ? g->name : "личные сообщения";
+            right = g ? g->name : TR("личные сообщения");
             if (chan_unread(c) || c->mentions) g_ch(px + 3, y, '*', C_WHITE, AT_B);
         }
         int rw = vw(right) < (bw - 10) / 2 ? vw(right) : (bw - 10) / 2;
@@ -5347,7 +5600,7 @@ static void draw_qs(int W, int H) {
         g_rtext(px + bw - 4, y, right, rw, C_MUTED, 0);
         hit_add(px + 2, y, bw - 4, 1, A_QS, 0, k, HV_PILL);
     }
-    g_text(px + 3, py + bh - 2, U.fwd_msg ? "Up/Down выбор  Enter переслать  Esc отмена" : "Up/Down выбор  Enter открыть  Esc закрыть", bw - 6, C_MUTED, 0);
+    g_text(px + 3, py + bh - 2, U.fwd_msg ? TR("Up/Down выбор  Enter переслать  Esc отмена") : TR("Up/Down выбор  Enter открыть  Esc закрыть"), bw - 6, C_MUTED, 0);
 }
 static void forward_to(u64 target);
 static void qs_go(int k) {
@@ -5356,7 +5609,7 @@ static void qs_go(int k) {
     if (k < 0 || k >= n) return;
     U.qs = false;
     if (U.fwd_msg) {                             /* «Переслать»: выбран канал или беседа */
-        if (it[k].kind == 1) { ui_notice("выберите канал или беседу, а не сервер"); U.qs = true; return; }
+        if (it[k].kind == 1) { ui_notice(TR("выберите канал или беседу, а не сервер")); U.qs = true; return; }
         forward_to(S.chans[it[k].idx].id);
         return;
     }
@@ -5438,17 +5691,17 @@ static void draw_ep(int W, int H) {
     g_round_corners(px, py, bw, bh, 0, ut);
     g_round_corners(px, py + bh - 1, bw, bh, bh - 1, ub);
     hit_add(px, py, bw, bh, A_BLOCK, 0, 0, 0);
-    g_text(px + 2, py + 1, U.ep_msg ? "Реакция" : "Эмодзи", bw - 8, C_WHITE, AT_B);
+    g_text(px + 2, py + 1, U.ep_msg ? TR("Реакция") : TR("Эмодзи"), bw - 8, C_WHITE, AT_B);
     g_text(px + bw - 3, py + 1, "x", 1, C_TEXT, AT_B);
     hit_add(px + bw - 4, py + 1, 3, 1, A_BTN, B_EP_X, 0, HV_RED);
     g_pill(px + 1, py + 2, bw - 2, C_RAIL);
     int used = g_text(px + 3, py + 2, U.ep_q, bw - 7, C_WHITE, 0);
     g_ch(px + 3 + used, py + 2, ' ', C_TEXT, AT_I);
-    if (!U.ep_q[0]) g_text(px + 4, py + 2, "найти: smile, сердце, огонь...", bw - 8, C_MUTED, 0);
+    if (!U.ep_q[0]) g_text(px + 4, py + 2, TR("найти: smile, сердце, огонь..."), bw - 8, C_MUTED, 0);
     if (U.ep_sel >= n) U.ep_sel = n - 1;
     if (U.ep_sel < 0) U.ep_sel = 0;
     int first = U.ep_sel / cols >= gr ? (U.ep_sel / cols - gr + 1) * cols : 0;
-    if (!n) g_ctext(px, py + 4, bw, "Не найдено", C_MUTED, 0);
+    if (!n) g_ctext(px, py + 4, bw, TR("Не найдено"), C_MUTED, 0);
     for (int k = first; k < n && (k - first) / cols < gr; k++) {
         int r = (k - first) / cols, c = (k - first) % cols;
         int x = px + 2 + c * 4, y = py + 4 + r;
@@ -5479,7 +5732,7 @@ static void draw_ep(int W, int H) {
         char t[120];
         const GuildEmoji *ge = ep_guild(ix[U.ep_sel]);
         if (ge) {
-            const char *why = !ge->available ? " - недоступна" : emoji_need_nitro(ge, es->gid, S.open_ch) ? " - нужен Nitro" : " - сервер";
+            const char *why = !ge->available ? TR(" - недоступна") : emoji_need_nitro(ge, es->gid, S.open_ch) ? TR(" - нужен Nitro") : TR(" - сервер");
             snprintf(t, sizeof t, ":%s:%s", ge->name, why);
         } else {
             const char *nm = EMO[ix[U.ep_sel]].n;
@@ -5489,14 +5742,14 @@ static void draw_ep(int W, int H) {
         }
         g_texte(px + 2, py + bh - 2, t, bw - 4, C_MUTED, AT_B);
     }
-    if (es && es->busy) g_rtext(px + bw - 2, py + bh - 2, "эмодзи сервера...", 18, C_MUTED, 0);
+    if (es && es->busy) g_rtext(px + bw - 2, py + bh - 2, TR("эмодзи сервера..."), 18, C_MUTED, 0);
 }
 static void ep_apply(int ei) {
     const GuildEmoji *ge = ep_guild(ei);
     if (ge) {
         const EmojiState *es = emoji_state();
-        if (!ge->available) { ui_notice("эта эмодзи сейчас недоступна"); return; }
-        if (emoji_need_nitro(ge, es->gid, S.open_ch)) { ui_notice("эмодзи другого сервера или анимированная - нужен Nitro"); return; }
+        if (!ge->available) { ui_notice(TR("эта эмодзи сейчас недоступна")); return; }
+        if (emoji_need_nitro(ge, es->gid, S.open_ch)) { ui_notice(TR("эмодзи другого сервера или анимированная - нужен Nitro")); return; }
         u64 mid = U.ep_msg;
         U.ep = false;
         U.ep_msg = 0;
@@ -5632,7 +5885,7 @@ static void sl_run(void) {
 static void sl_pick(int i) {                     /* команда выбрана: дальше опции */
     const SlashIndex *si = cmds_state();
     if (!si || i < 0 || i >= si->n) return;
-    if (!si->c[i].usable) { ui_notice("эту команду Astra DS выполнить не может (нужна роль или вложение)"); return; }
+    if (!si->c[i].usable) { ui_notice(TR("эту команду Astra DS выполнить не может (нужна роль или вложение)")); return; }
     sl_reset();
     SL.cmd = i;
     in_clear();
@@ -5641,7 +5894,7 @@ static void sl_pick(int i) {                     /* команда выбран�
 static void sl_next(const char *v) {             /* значение текущей опции принято */
     const SlashOpt *o = sl_opt();
     if (!o) { sl_run(); return; }
-    if (o->required && (!v || !*v)) { ui_notice("опция %s обязательна", cs_show(o->name_show)); return; }
+    if (o->required && (!v || !*v)) { ui_notice(TR("опция %s обязательна"), cs_show(o->name_show)); return; }
     SL.val[SL.opt] = xstrdup(v ? v : "");
     SL.opt++;
     SL.sel = 0;
@@ -5660,7 +5913,7 @@ static bool sl_key(const Key *k) {
         return false;
     }
     const SlashOpt *o = sl_opt();
-    if (k->code == K_ESC) { sl_reset(); in_clear(); ui_notice("команда отменена"); return true; }
+    if (k->code == K_ESC) { sl_reset(); in_clear(); ui_notice(TR("команда отменена")); return true; }
     if (o && o->nchoice) {
         if (k->code == K_UP) { if (SL.sel > 0) SL.sel--; return true; }
         if (k->code == K_DOWN) { if (SL.sel < o->nchoice - 1) SL.sel++; return true; }
@@ -5697,17 +5950,17 @@ static void draw_sl(int x, int w, int ybot) {
         g_rect(x, py, bw, bh, C_MENU);
         g_round_corners(x, py, bw, bh, 0, bg_at(x, py - 1));
         hit_add(x, py, bw, bh, A_BLOCK, 0, 0, 0);
-        g_text(x + 2, py, "КОМАНДЫ ПРИЛОЖЕНИЙ", bw - 4, C_MUTED, AT_B);
-        if (si->busy) { g_text(x + 2, py + 1, "загрузка команд...", bw - 4, C_MUTED, 0); return; }
+        g_text(x + 2, py, TR("КОМАНДЫ ПРИЛОЖЕНИЙ"), bw - 4, C_MUTED, AT_B);
+        if (si->busy) { g_text(x + 2, py + 1, TR("загрузка команд..."), bw - 4, C_MUTED, 0); return; }
         if (si->err[0]) { char *e = san(si->err, false); g_texte(x + 2, py + 1, e, bw - 4, C_RED, 0); free(e); return; }
-        if (!n) { g_text(x + 2, py + 1, "нет подходящих команд", bw - 4, C_MUTED, 0); return; }
+        if (!n) { g_text(x + 2, py + 1, TR("нет подходящих команд"), bw - 4, C_MUTED, 0); return; }
         for (int k = 0; k < n; k++) {
             const SlashCmd *c = &si->c[ix[k]];
             int y = py + 1 + k;
             if (k == SL.sel) g_pill(x + 1, y, bw - 2, C_SEL);
             snprintf(t, sizeof t, "/%s", cs_show(c->name));
             int u = g_texte(x + 2, y, t, bw / 2, c->usable ? C_WHITE : 0x5c6066u, AT_B);
-            const char *d = c->usable ? cs_show(c->desc) : "не поддерживается";
+            const char *d = c->usable ? cs_show(c->desc) : TR("не поддерживается");
             snprintf(t, sizeof t, "%s - %s", d, cs_show(c->app));
             g_texte(x + 4 + u, y, t, bw - 6 - u, C_MUTED, 0);
             hit_add(x + 1, y, bw - 2, 1, A_SLASH, 0, ix[k], HV_PILL);
@@ -5721,7 +5974,7 @@ static void draw_sl(int x, int w, int ybot) {
     ovl_cut(x, py, bw, bh);
     g_rect(x, py, bw, bh, C_MENU);
     hit_add(x, py, bw, bh, A_BLOCK, 0, 0, 0);
-    g_text(x + 2, py, "ВАРИАНТЫ", bw - 4, C_MUTED, AT_B);
+    g_text(x + 2, py, TR("ВАРИАНТЫ"), bw - 4, C_MUTED, AT_B);
     int opt = cmds_state()->c[SL.cmd].opt0 + SL.opt;
     for (int k = 0; k < n; k++) {
         const char *nm, *val;
@@ -5748,7 +6001,7 @@ static void draw_ac(int x, int w, int ybot) {
     g_round_corners(x, py, bw, bh, 0, ut);
     hit_add(x, py, bw, bh, A_BLOCK, 0, 0, 0);
     char t[160];
-    snprintf(t, sizeof t, "%s, СОВПАДАЮЩИЕ С %c%s", a.kind == '@' ? "УЧАСТНИКИ" : a.kind == '#' ? "КАНАЛЫ" : "ЭМОДЗИ", a.kind, a.q);
+    snprintf(t, sizeof t, TR("%s, СОВПАДАЮЩИЕ С %c%s"), a.kind == '@' ? TR("УЧАСТНИКИ") : a.kind == '#' ? TR("КАНАЛЫ") : TR("ЭМОДЗИ"), a.kind, a.q);
     g_texte(x + 2, py, t, bw - 4, C_MUTED, AT_B);
     for (int k = 0; k < a.n; k++) {
         int y = py + 1 + k;
@@ -5757,7 +6010,7 @@ static void draw_ac(int x, int w, int ybot) {
         if (a.kind == '@' && a.idx[k] < 0) {
             g_text(x + 3, y, "@", 1, C_MENTFG, AT_B);
             g_text(x + 5, y, a.idx[k] == -1 ? "everyone" : "here", 10, s ? C_WHITE : C_TEXT, AT_B);
-            g_texte(x + 17, y, a.idx[k] == -1 ? "уведомить всех на канале" : "уведомить всех в сети", bw - 19, C_MUTED, 0);
+            g_texte(x + 17, y, a.idx[k] == -1 ? TR("уведомить всех на канале") : TR("уведомить всех в сети"), bw - 19, C_MUTED, 0);
         } else if (a.kind == '@') {
             const User *u = &S.users[a.idx[k]];
             g_listav(x + 2, y, u->id, NULL, G_POP);
@@ -5797,16 +6050,16 @@ static bool can_manage_guild(u64 gid) { return w2_own(gid); }
 static bool can_manage_channels(u64 gid) { return w2_own(gid); }
 static bool can_manage_roles(u64 gid) { return w2_own(gid); }
 static bool guild_is_owner(u64 gid) { return w2_own(gid); }
-static bool w2_nyi(char *err, size_t n) { snprintf(err, n, "ещё не подключено (ждём store.c)"); return false; }
+static bool w2_nyi(char *err, size_t n) { snprintf(err, n, TR("ещё не подключено (ждём store.c)")); return false; }
 static bool guild_create(const char *name, const char *icon, char *err, size_t n) { (void)name; (void)icon; return w2_nyi(err, n); }
 static bool guild_edit(u64 g, const char *a, const char *b, const char *c, const char *d, char *err, size_t n) { (void)g; (void)a; (void)b; (void)c; (void)d; return w2_nyi(err, n); }
-static void guild_leave(u64 g) { (void)g; ui_notice("покинуть сервер: ещё не подключено"); }
+static void guild_leave(u64 g) { (void)g; ui_notice(TR("покинуть сервер: ещё не подключено")); }
 static bool guild_delete(u64 g, const char *t, char *err, size_t n) { (void)g; (void)t; return w2_nyi(err, n); }
 static bool chan_create(u64 g, int k, const char *nm, u64 par, char *err, size_t n) { (void)g; (void)k; (void)nm; (void)par; return w2_nyi(err, n); }
 static bool chan_edit(u64 c, const ChanEdit *e, char *err, size_t n) { (void)c; (void)e; return w2_nyi(err, n); }
-static void chan_delete(u64 c) { (void)c; ui_notice("удаление канала: ещё не подключено"); }
-static void chan_move(u64 c, u64 par, int pos) { (void)c; (void)par; (void)pos; ui_notice("перестановка: ещё не подключено"); }
-static void chan_perm_set(u64 c, u64 t, int ty, u64 a, u64 d) { (void)c; (void)t; (void)ty; (void)a; (void)d; ui_notice("права: ещё не подключено"); }
+static void chan_delete(u64 c) { (void)c; ui_notice(TR("удаление канала: ещё не подключено")); }
+static void chan_move(u64 c, u64 par, int pos) { (void)c; (void)par; (void)pos; ui_notice(TR("перестановка: ещё не подключено")); }
+static void chan_perm_set(u64 c, u64 t, int ty, u64 a, u64 d) { (void)c; (void)t; (void)ty; (void)a; (void)d; ui_notice(TR("права: ещё не подключено")); }
 static void chan_perm_clear(u64 c, u64 t) { (void)c; (void)t; }
 static bool invite_parse(const char *t, char *code, size_t n) {
     const char *p = strrchr(t, '/');
@@ -5816,11 +6069,11 @@ static bool invite_parse(const char *t, char *code, size_t n) {
 static void invite_open(const char *code) {
     memset(&w2_inv, 0, sizeof w2_inv);
     snprintf(w2_inv.code, sizeof w2_inv.code, "%s", code);
-    if (!strcmp(code, "abc") || !strcmp(code, "Astra DS")) { w2_inv.guild_name = "Котики 2"; w2_inv.channel_name = "general"; w2_inv.inviter = "Алиса"; w2_inv.members = 1234; w2_inv.online = 321; w2_inv.guild_id = 777; }
-    else snprintf(w2_inv.error, sizeof w2_inv.error, "%s", !strcmp(code, "429") ? "слишком часто: попробуйте через минуту" : "приглашение недействительно или истекло");
+    if (!strcmp(code, "abc") || !strcmp(code, "Astra DS")) { w2_inv.guild_name = TR("Котики 2"); w2_inv.channel_name = "general"; w2_inv.inviter = TR("Алиса"); w2_inv.members = 1234; w2_inv.online = 321; w2_inv.guild_id = 777; }
+    else snprintf(w2_inv.error, sizeof w2_inv.error, "%s", !strcmp(code, "429") ? TR("слишком часто: попробуйте через минуту") : TR("приглашение недействительно или истекло"));
 }
 static const InviteState *invite_state(void) { return &w2_inv; }
-static void invite_join(void) { ui_notice("вступление: ещё не подключено"); }
+static void invite_join(void) { ui_notice(TR("вступление: ещё не подключено")); }
 static void invite_close(void) { memset(&w2_inv, 0, sizeof w2_inv); }
 static char w2_link[64];
 static void invite_create(u64 c, int age, int uses) { (void)c; (void)age; (void)uses; snprintf(w2_link, sizeof w2_link, "%s", O.demo ? "https://discord.gg/Astra DS" : ""); }
@@ -5832,7 +6085,7 @@ static const char *guild_description(u64 g) { (void)g; return ""; }
 
 enum { FF_TEXT, FF_CHOICE, FF_TOGGLE, FF_TRI, FF_INFO };
 enum { FM_NONE, FM_ADDSRV, FM_GCREATE, FM_JOIN, FM_JOINCARD, FM_INVITE, FM_GSET, FM_GDELETE, FM_LEAVE, FM_CHCREATE,
-       FM_CATCREATE, FM_CHEDIT, FM_CHDELETE, FM_PERMS, FM_ADDFRIEND, FM_THREAD, FM_ALERTS, FM_FILTER, FM_VSTATUS, FM_TRENAME, FM_FPOST, FM_GRENAME, FM_MEPROF, FM_FALT, FM_MOD };
+       FM_CATCREATE, FM_CHEDIT, FM_CHDELETE, FM_PERMS, FM_ADDFRIEND, FM_THREAD, FM_ALERTS, FM_FILTER, FM_VSTATUS, FM_TRENAME, FM_FPOST, FM_GRENAME, FM_MEPROF, FM_FALT, FM_MOD, FM_STATUS, FM_NOTE, FM_SHARE };
 enum { FB_OK = 1, FB_CANCEL, FB_X1, FB_X2, FB_RETRY };     /* кнопки формы (sub у A_FORMB) */
 /* буфер поля — в куче на время окна: лимит поля в символах x 4 байта (тема 1024 символа целиком), иначе 256 */
 static void utf8_cpy(char *d, size_t n, const char *s);
@@ -5920,6 +6173,10 @@ static void perms_load(void) {
     }
 }
 static u64 fm_mid;                               /* «Создать ветку»: из какого сообщения */
+static u64 fm_note_uid;                          /* №100: чья заметка в форме */
+static const char *const ST_CH[] = { "В сети", "Не активен", "Не беспокоить", "Невидимый" };
+static const char *const ST_DUR[] = { "бессрочно", "15 минут", "1 час", "8 часов", "24 часа", "3 дня" };
+static const int ST_DUR_MIN[] = { 0, 15, 60, 480, 1440, 4320 };
 static u64 fm_mod_uid;                           /* №133: кого модерируем и что делаем (MOD_*) */
 static int fm_mod_kind;
 static const char *const MOD_TO[] = { "60 секунд", "5 минут", "10 минут", "1 час", "1 день", "1 неделя", "снять тайм-аут" };
@@ -5940,80 +6197,80 @@ static void fm_open(int id, u64 gid, u64 cid) {
     if (c) chan_label(c, lab, sizeof lab);
     switch (id) {
     case FM_ADDSRV:
-        snprintf(FM.title, sizeof FM.title, "Добавить сервер");
-        snprintf(FM.sub, sizeof FM.sub, "Создайте свой сервер или присоединитесь по приглашению.");
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Присоединиться", FB_X1, 0); fm_btn("Создать свой", FB_OK, 1);
+        snprintf(FM.title, sizeof FM.title, TR("Добавить сервер"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Создайте свой сервер или присоединитесь по приглашению."));
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Присоединиться"), FB_X1, 0); fm_btn(TR("Создать свой"), FB_OK, 1);
         break;
     case FM_GCREATE:
-        snprintf(FM.title, sizeof FM.title, "Создайте свой сервер");
-        snprintf(FM.sub, sizeof FM.sub, "Значок - путь к файлу PNG/JPG до 256 КБ, можно пусто.");
-        { char nm[96]; snprintf(nm, sizeof nm, "Сервер %s", S.me_name ? S.me_name : ""); fm_add(FF_TEXT, "НАЗВАНИЕ СЕРВЕРА", nm); }
+        snprintf(FM.title, sizeof FM.title, TR("Создайте свой сервер"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Значок - путь к файлу PNG/JPG до 256 КБ, можно пусто."));
+        { char nm[96]; snprintf(nm, sizeof nm, TR("Сервер %s"), S.me_name ? S.me_name : ""); fm_add(FF_TEXT, "НАЗВАНИЕ СЕРВЕРА", nm); }
         fm_add(FF_TEXT, "ЗНАЧОК (ПУТЬ К ФАЙЛУ)", "");
-        fm_btn("Назад", FB_CANCEL, 0); fm_btn("Создать", FB_OK, 1);
+        fm_btn(TR("Назад"), FB_CANCEL, 0); fm_btn(TR("Создать"), FB_OK, 1);
         break;
     case FM_JOIN:
-        snprintf(FM.title, sizeof FM.title, "Присоединиться к серверу");
-        snprintf(FM.sub, sizeof FM.sub, "Введите приглашение: https://discord.gg/hTKzmak, hTKzmak или ссылку discord.com/invite/...");
+        snprintf(FM.title, sizeof FM.title, TR("Присоединиться к серверу"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Введите приглашение: https://discord.gg/hTKzmak, hTKzmak или ссылку discord.com/invite/..."));
         fm_add(FF_TEXT, "ССЫЛКА-ПРИГЛАШЕНИЕ", "");
-        fm_btn("Назад", FB_CANCEL, 0); fm_btn("Найти сервер", FB_OK, 1);
+        fm_btn(TR("Назад"), FB_CANCEL, 0); fm_btn(TR("Найти сервер"), FB_OK, 1);
         break;
     case FM_JOINCARD:
-        snprintf(FM.title, sizeof FM.title, "Вас пригласили на сервер");
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Вступить на сервер", FB_OK, 1);
+        snprintf(FM.title, sizeof FM.title, TR("Вас пригласили на сервер"));
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Вступить на сервер"), FB_OK, 1);
         break;
     case FM_INVITE:
-        snprintf(FM.title, sizeof FM.title, "Пригласить друзей на %s", g && g->name ? g->name : "сервер");
-        snprintf(FM.sub, sizeof FM.sub, "Ссылка ведёт в канал %s%s.", c && c->guild_id ? "#" : "", lab);
+        snprintf(FM.title, sizeof FM.title, TR("Пригласить друзей на %s"), g && g->name ? g->name : TR("сервер"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Ссылка ведёт в канал %s%s."), c && c->guild_id ? "#" : "", lab);
         fm_choice(fm_add(FF_CHOICE, "ИСТЕКАЕТ ЧЕРЕЗ", NULL), AGE_N, 7, 4);
         fm_choice(fm_add(FF_CHOICE, "МАКС. ЧИСЛО ИСПОЛЬЗОВАНИЙ", NULL), USES_N, 7, 0);
-        fm_add(FF_INFO, "ССЫЛКА", "нажмите 'Создать ссылку'");
-        fm_btn("Закрыть", FB_CANCEL, 0); fm_btn("Копировать", FB_X1, 0); fm_btn("Создать ссылку", FB_OK, 1);
+        fm_add(FF_INFO, "ССЫЛКА", TR("нажмите 'Создать ссылку'"));
+        fm_btn(TR("Закрыть"), FB_CANCEL, 0); fm_btn(TR("Копировать"), FB_X1, 0); fm_btn(TR("Создать ссылку"), FB_OK, 1);
         break;
     case FM_GSET: {
-        snprintf(FM.title, sizeof FM.title, "Настройки сервера");
-        snprintf(FM.sub, sizeof FM.sub, "Обзор. Пути к файлам - PNG/JPG до 256 КБ; пусто - не менять, '-' - убрать.");
+        snprintf(FM.title, sizeof FM.title, TR("Настройки сервера"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Обзор. Пути к файлам - PNG/JPG до 256 КБ; пусто - не менять, '-' - убрать."));
         fm_add(FF_TEXT, "НАЗВАНИЕ СЕРВЕРА", g && g->name ? g->name : "");
         const char *d = guild_description(gid);
         fm_add(FF_TEXT, "ОПИСАНИЕ", d ? d : "");
         FM.loading = !d;                         /* описание ещё грузится — draw_form дозаполнит */
         fm_add(FF_TEXT, "ЗНАЧОК (ПУТЬ К ФАЙЛУ)", "");
         fm_add(FF_TEXT, "БАННЕР (ПУТЬ К ФАЙЛУ)", "");
-        fm_btn("Отмена", FB_CANCEL, 0);
-        if (guild_is_owner(gid)) fm_btn("Удалить сервер", FB_X1, 2);
-        fm_btn("Сохранить", FB_OK, 1);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0);
+        if (guild_is_owner(gid)) fm_btn(TR("Удалить сервер"), FB_X1, 2);
+        fm_btn(TR("Сохранить"), FB_OK, 1);
         break;
     }
     case FM_GDELETE:
-        snprintf(FM.title, sizeof FM.title, "Удалить '%s'", g && g->name ? g->name : "сервер");
-        snprintf(FM.sub, sizeof FM.sub, "Вы точно хотите удалить %s? Это действие нельзя отменить. Введите название сервера.", g && g->name ? g->name : "сервер");
+        snprintf(FM.title, sizeof FM.title, TR("Удалить '%s'"), g && g->name ? g->name : TR("сервер"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Вы точно хотите удалить %s? Это действие нельзя отменить. Введите название сервера."), g && g->name ? g->name : TR("сервер"));
         fm_add(FF_TEXT, "НАЗВАНИЕ СЕРВЕРА", "");
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Удалить сервер", FB_OK, 2);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Удалить сервер"), FB_OK, 2);
         break;
     case FM_LEAVE:
-        snprintf(FM.title, sizeof FM.title, "Покинуть '%s'", g && g->name ? g->name : "сервер");
-        snprintf(FM.sub, sizeof FM.sub, "Вы уверены, что хотите покинуть %s? Вернуться можно только по новому приглашению.", g && g->name ? g->name : "сервер");
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Покинуть сервер", FB_OK, 2);
+        snprintf(FM.title, sizeof FM.title, TR("Покинуть '%s'"), g && g->name ? g->name : TR("сервер"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Вы уверены, что хотите покинуть %s? Вернуться можно только по новому приглашению."), g && g->name ? g->name : TR("сервер"));
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Покинуть сервер"), FB_OK, 2);
         break;
     case FM_CHCREATE:
-        snprintf(FM.title, sizeof FM.title, "Создать канал");
-        if (c && c->type == CH_CATEGORY) snprintf(FM.sub, sizeof FM.sub, "в категории %s", c->name ? c->name : "");
+        snprintf(FM.title, sizeof FM.title, TR("Создать канал"));
+        if (c && c->type == CH_CATEGORY) snprintf(FM.sub, sizeof FM.sub, TR("в категории %s"), c->name ? c->name : "");
         fm_choice(fm_add(FF_CHOICE, "ТИП КАНАЛА", NULL), CHK_N, 2, 0);
-        fm_add(FF_TEXT, "НАЗВАНИЕ КАНАЛА", "новый-канал");
+        fm_add(FF_TEXT, "НАЗВАНИЕ КАНАЛА", TR("новый-канал"));
         fm_add(FF_TOGGLE, "Приватный канал (виден только выбранным ролям)", NULL);
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Создать канал", FB_OK, 1);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Создать канал"), FB_OK, 1);
         break;
     case FM_MOD: {
         const char *who = user_name(fm_mod_uid);
         static const char *const tt[] = { "Тайм-аут", "Выгнать с сервера", "Забанить", "Роли", "Перенести в голосовой канал", "Заглушить на сервере" };
-        snprintf(FM.title, sizeof FM.title, "%s: %s", tt[fm_mod_kind < 6 ? fm_mod_kind : 0], who && *who ? who : "?");
+        snprintf(FM.title, sizeof FM.title, "%s: %s", tr(tt[fm_mod_kind < 6 ? fm_mod_kind : 0]), who && *who ? who : "?");
         mod_nr = 0;
         if (fm_mod_kind == MOD_TIMEOUT) {
-            snprintf(FM.sub, sizeof FM.sub, "Не сможет писать, отвечать и говорить в голосовых каналах.");
+            snprintf(FM.sub, sizeof FM.sub, TR("Не сможет писать, отвечать и говорить в голосовых каналах."));
             fm_choice(fm_add(FF_CHOICE, "НА СКОЛЬКО", NULL), MOD_TO, 7, 1);
         } else if (fm_mod_kind == MOD_KICK) {
-            snprintf(FM.sub, sizeof FM.sub, "Вернуться сможет по новому приглашению.");
+            snprintf(FM.sub, sizeof FM.sub, TR("Вернуться сможет по новому приглашению."));
         } else if (fm_mod_kind == MOD_BAN) {
-            snprintf(FM.sub, sizeof FM.sub, "Не сможет вернуться, пока бан не снимут.");
+            snprintf(FM.sub, sizeof FM.sub, TR("Не сможет вернуться, пока бан не снимут."));
             fm_choice(fm_add(FF_CHOICE, "УДАЛИТЬ ЕГО СООБЩЕНИЯ", NULL), MOD_DEL, 4, 0);
         } else if (fm_mod_kind == MOD_ROLES) {
             const RoleName *rl = NULL;
@@ -6025,10 +6282,10 @@ static void fm_open(int id, u64 gid, u64 cid) {
                 snprintf(mod_rn[mod_nr], sizeof mod_rn[0], "%s", rl[q].name ? rl[q].name : "?");
                 mod_rp[mod_nr] = mod_rn[mod_nr]; mod_rid[mod_nr] = rl[q].id; mod_nr++;
             }
-            snprintf(FM.sub, sizeof FM.sub, mod_nr ? "Роли ниже вашей." : "Нет ролей ниже вашей.");
+            snprintf(FM.sub, sizeof FM.sub, mod_nr ? TR("Роли ниже вашей.") : TR("Нет ролей ниже вашей."));
             if (mod_nr) { fm_choice(fm_add(FF_CHOICE, "РОЛЬ", NULL), mod_rp, mod_nr, 0); fm_choice(fm_add(FF_CHOICE, "ДЕЙСТВИЕ", NULL), MOD_RA, 2, 0); }
         } else if (fm_mod_kind == MOD_MOVE) {
-            snprintf(mod_rn[0], sizeof mod_rn[0], "отключить от голоса");
+            snprintf(mod_rn[0], sizeof mod_rn[0], TR("отключить от голоса"));
             mod_rp[0] = mod_rn[0]; mod_rid[0] = 0; mod_nr = 1;
             for (int i = 0; i < S.nchans && mod_nr < 32; i++) if (S.chans[i].guild_id == gid && is_voice(&S.chans[i])) {
                 chan_label(&S.chans[i], mod_rn[mod_nr], sizeof mod_rn[0]);
@@ -6040,54 +6297,92 @@ static void fm_open(int id, u64 gid, u64 cid) {
             fm_add(FF_TOGGLE, "Заглушить звук", NULL);
         }
         if (fm_mod_kind <= MOD_BAN) fm_add(FF_TEXT, "ПРИЧИНА (в журнал аудита, можно пусто)", "");
-        fm_btn("Отмена", FB_CANCEL, 0);
-        fm_btn(fm_mod_kind == MOD_BAN ? "Забанить" : fm_mod_kind == MOD_KICK ? "Выгнать" : "Применить", FB_OK, fm_mod_kind == MOD_BAN || fm_mod_kind == MOD_KICK ? 2 : 1);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0);
+        fm_btn(fm_mod_kind == MOD_BAN ? TR("Забанить") : fm_mod_kind == MOD_KICK ? TR("Выгнать") : TR("Применить"), FB_OK, fm_mod_kind == MOD_BAN || fm_mod_kind == MOD_KICK ? 2 : 1);
         break;
     }
+    case FM_NOTE: {
+        const NoteState *ns = note_state();
+        snprintf(FM.title, sizeof FM.title, TR("Заметка: %s"), user_name(fm_note_uid));
+        snprintf(FM.sub, sizeof FM.sub, TR("Видна только вам. До 256 символов, пусто - убрать."));
+        fm_add(FF_TEXT, "ЗАМЕТКА", ns && ns->uid == fm_note_uid ? ns->text : "");
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Сохранить"), FB_OK, 1);
+        break;
+    }
+    case FM_STATUS: {                            /* №103/104 */
+        static const u8 ps[4] = { PS_ONLINE, PS_IDLE, PS_DND, PS_INVISIBLE };
+        int cur = 0;
+        for (int i = 0; i < 4; i++) if (presence_me() == ps[i]) cur = i;
+        snprintf(FM.title, sizeof FM.title, TR("Статус"));
+        snprintf(FM.sub, sizeof FM.sub, TR("По истечении срока - снова 'В сети'; текст - видят все."));
+        fm_choice(fm_add(FF_CHOICE, "СТАТУС", NULL), ST_CH, 4, cur);
+        fm_choice(fm_add(FF_CHOICE, "НА СКОЛЬКО", NULL), ST_DUR, 6, 0);
+        fm_add(FF_TEXT, "ТЕКСТОВЫЙ СТАТУС (до 128)", custom_status());
+        fm_choice(fm_add(FF_CHOICE, "ТЕКСТ УБРАТЬ ЧЕРЕЗ", NULL), ST_DUR, 6, 0);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Сохранить"), FB_OK, 1);
+        break;
+    }
+#ifdef ASTRA_VIDEO
+    case FM_SHARE: {                             /* источник (по умолчанию — окно) и режим */
+        sh_n = share_windows(sh_t, sh_ids, 24);
+        for (int i = 0; i < sh_n; i++) { char *t2 = san(sh_t[i], false); snprintf(sh_t[i], sizeof sh_t[i], "%s", t2); free(t2); sh_names[i] = sh_t[i]; }
+        sh_names[sh_n] = "Весь экран";
+        snprintf(FM.title, sizeof FM.title, "%s", TR("Демонстрация экрана"));
+#ifdef _WIN32
+        snprintf(FM.sub, sizeof FM.sub, "%s", TR("Все увидят выбранное окно. Окно Astra DS в трансляцию не попадает; на время эфира включится режим стримера."));
+#else
+        snprintf(FM.sub, sizeof FM.sub, "%s", TR("Внимание: в X11 при показе всего экрана видны все окна, в том числе это."));
+#endif
+        fm_choice(fm_add(FF_CHOICE, "ИСТОЧНИК", NULL), sh_names, sh_n + 1, 0);
+        fm_choice(fm_add(FF_CHOICE, "КАЧЕСТВО", NULL), SH_MODES, 2, 0);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Начать трансляцию"), FB_OK, 1);
+        break;
+    }
+#endif
     case FM_FALT:
-        snprintf(FM.title, sizeof FM.title, "Описание картинки (alt)");
-        snprintf(FM.sub, sizeof FM.sub, "Для тех, кто не видит картинку. Пусто - без описания.");
+        snprintf(FM.title, sizeof FM.title, TR("Описание картинки (alt)"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Для тех, кто не видит картинку. Пусто - без описания."));
         fm_add(FF_TEXT, "ОПИСАНИЕ", file_alt);
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Готово", FB_OK, 1);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Готово"), FB_OK, 1);
         break;
     case FM_TRENAME: case FM_GRENAME:
-        snprintf(FM.title, sizeof FM.title, id == FM_TRENAME ? "Переименовать ветку" : "Переименовать группу");
-        fm_add(FF_TEXT, id == FM_TRENAME ? "НАЗВАНИЕ ВЕТКИ" : "НАЗВАНИЕ ГРУППЫ", c && c->name ? c->name : "");
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Сохранить", FB_OK, 1);
+        snprintf(FM.title, sizeof FM.title, id == FM_TRENAME ? TR("Переименовать ветку") : TR("Переименовать группу"));
+        fm_add(FF_TEXT, id == FM_TRENAME ? TR("НАЗВАНИЕ ВЕТКИ") : TR("НАЗВАНИЕ ГРУППЫ"), c && c->name ? c->name : "");
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Сохранить"), FB_OK, 1);
         break;
     case FM_FPOST:
-        snprintf(FM.title, sizeof FM.title, "Новый пост в %s", lab);
+        snprintf(FM.title, sizeof FM.title, TR("Новый пост в %s"), lab);
         fm_add(FF_TEXT, "НАЗВАНИЕ ПОСТА", "");
         fm_add(FF_TEXT, "ТЕКСТ", "");
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Опубликовать", FB_OK, 1);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Опубликовать"), FB_OK, 1);
         break;
     case FM_MEPROF: {
-        snprintf(FM.title, sizeof FM.title, "Изменить профиль");
-        snprintf(FM.sub, sizeof FM.sub, "Отображаемое имя и «О себе» видят все. Пусто - не менять.");
+        snprintf(FM.title, sizeof FM.title, TR("Изменить профиль"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Отображаемое имя и 'О себе' видят все. Пусто - не менять."));
         fm_add(FF_TEXT, "ОТОБРАЖАЕМОЕ ИМЯ", S.me_name ? S.me_name : "");
         fm_add(FF_TEXT, "ОПИСАНИЕ: О СЕБЕ", "");
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Сохранить", FB_OK, 1);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Сохранить"), FB_OK, 1);
         break;
     }
     case FM_FILTER:
-        snprintf(FM.title, sizeof FM.title, "Фильтр слов");
-        snprintf(FM.sub, sizeof FM.sub, "Через запятую, до 16 слов. Такие сообщения сворачиваются. Пусто - выключить.");
+        snprintf(FM.title, sizeof FM.title, TR("Фильтр слов"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Через запятую, до 16 слов. Такие сообщения сворачиваются. Пусто - выключить."));
         fm_add(FF_TEXT, "СЛОВА", filter_words());
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Сохранить", FB_OK, 1);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Сохранить"), FB_OK, 1);
         break;
     case FM_VSTATUS: {
         const char *vsx = voice_channel_status(cid);
-        snprintf(FM.title, sizeof FM.title, "Статус голосового канала");
-        snprintf(FM.sub, sizeof FM.sub, "Видят все на сервере. Пусто - убрать статус.");
+        snprintf(FM.title, sizeof FM.title, TR("Статус голосового канала"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Видят все на сервере. Пусто - убрать статус."));
         fm_add(FF_TEXT, "СТАТУС", vsx ? vsx : "");
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Сохранить", FB_OK, 1);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Сохранить"), FB_OK, 1);
         break;
     }
     case FM_ALERTS:
-        snprintf(FM.title, sizeof FM.title, "Слова-тревоги");
-        snprintf(FM.sub, sizeof FM.sub, "Через запятую, до 16 слов. Регистр не важен, ищется целое слово. Пусто - выключить.");
+        snprintf(FM.title, sizeof FM.title, TR("Слова-тревоги"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Через запятую, до 16 слов. Регистр не важен, ищется целое слово. Пусто - выключить."));
         fm_add(FF_TEXT, "СЛОВА", alert_words());
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Сохранить", FB_OK, 1);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Сохранить"), FB_OK, 1);
         break;
     case FM_THREAD: {
         Message *m = msg_find(fm_mid, NULL);
@@ -6099,24 +6394,24 @@ static void fm_open(int id, u64 gid, u64 cid) {
         }
         nm[o] = 0;
         char *sn = san(nm, false);
-        snprintf(FM.title, sizeof FM.title, "Создать ветку");
-        snprintf(FM.sub, sizeof FM.sub, "Ветка - отдельное обсуждение под каналом #%s.", lab);
-        fm_add(FF_TEXT, "НАЗВАНИЕ ВЕТКИ", sn[0] ? sn : "новая ветка");
+        snprintf(FM.title, sizeof FM.title, TR("Создать ветку"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Ветка - отдельное обсуждение под каналом #%s."), lab);
+        fm_add(FF_TEXT, "НАЗВАНИЕ ВЕТКИ", sn[0] ? sn : TR("новая ветка"));
         free(sn);
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Создать ветку", FB_OK, 1);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Создать ветку"), FB_OK, 1);
         break;
     }
     case FM_CATCREATE:
-        snprintf(FM.title, sizeof FM.title, "Создать категорию");
-        fm_add(FF_TEXT, "НАЗВАНИЕ КАТЕГОРИИ", "новая категория");
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Создать категорию", FB_OK, 1);
+        snprintf(FM.title, sizeof FM.title, TR("Создать категорию"));
+        fm_add(FF_TEXT, "НАЗВАНИЕ КАТЕГОРИИ", TR("новая категория"));
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Создать категорию"), FB_OK, 1);
         break;
     case FM_CHEDIT: {
         ChanEdit ce;
         bool have = chan_info(cid, &ce);
         FM.loading = !have;                      /* настройки ещё грузятся — draw_form дозаполнит */
-        snprintf(FM.title, sizeof FM.title, "Изменить канал %s%s", c && !is_voice(c) ? "#" : "", lab);
-        snprintf(FM.sub, sizeof FM.sub, "%s", have ? "Обзор канала. Сохраняются только изменённые поля." : "загрузка настроек канала...");
+        snprintf(FM.title, sizeof FM.title, TR("Изменить канал %s%s"), c && !is_voice(c) ? "#" : "", lab);
+        snprintf(FM.sub, sizeof FM.sub, "%s", have ? TR("Обзор канала. Сохраняются только изменённые поля.") : TR("загрузка настроек канала..."));
         fm_add(FF_TEXT, "НАЗВАНИЕ КАНАЛА", have && ce.name ? ce.name : lab);
         if (c && is_voice(c)) {
             fm_choice(fm_add(FF_CHOICE, "БИТРЕЙТ", NULL), BIT_N, 4, pick_idx(BIT_V, 4, have ? ce.bitrate : 64000));
@@ -6126,20 +6421,20 @@ static void fm_open(int id, u64 gid, u64 cid) {
             fm_choice(fm_add(FF_CHOICE, "МЕДЛЕННЫЙ РЕЖИМ", NULL), SLOW_N, 9, pick_idx(SLOW_S, 9, have ? ce.slowmode : 0));
             fm_add(FF_TOGGLE, "Канал 18+ (NSFW)", NULL)->ch = have && ce.nsfw > 0;
         }
-        fm_btn("Отмена", FB_CANCEL, 0);
-        if (can_manage_roles(gid)) fm_btn("Права", FB_X2, 0);
-        fm_btn("Удалить", FB_X1, 2);
-        fm_btn("Сохранить", FB_OK, 1);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0);
+        if (can_manage_roles(gid)) fm_btn(TR("Права"), FB_X2, 0);
+        fm_btn(TR("Удалить"), FB_X1, 2);
+        fm_btn(TR("Сохранить"), FB_OK, 1);
         break;
     }
     case FM_CHDELETE:
-        snprintf(FM.title, sizeof FM.title, "Удалить канал");
-        snprintf(FM.sub, sizeof FM.sub, "Вы точно хотите удалить %s%s? Это действие нельзя отменить.", c && !is_voice(c) ? "#" : "", lab);
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Удалить канал", FB_OK, 2);
+        snprintf(FM.title, sizeof FM.title, TR("Удалить канал"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Вы точно хотите удалить %s%s? Это действие нельзя отменить."), c && !is_voice(c) ? "#" : "", lab);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Удалить канал"), FB_OK, 2);
         break;
     case FM_PERMS: {
-        snprintf(FM.title, sizeof FM.title, "Права канала %s%s", c && !is_voice(c) ? "#" : "", lab);
-        snprintf(FM.sub, sizeof FM.sub, "Для кого и что: запретить / как в сервере / разрешить.");
+        snprintf(FM.title, sizeof FM.title, TR("Права канала %s%s"), c && !is_voice(c) ? "#" : "", lab);
+        snprintf(FM.sub, sizeof FM.sub, TR("Для кого и что: запретить / как в сервере / разрешить."));
         /* цели: @everyone, роли сервера, участники с уже заданными правами */
         FM.ntg = 0;
         FM.tg[FM.ntg] = gid; FM.tgty[FM.ntg] = OW_ROLE; snprintf(FM.tgn[FM.ntg], 64, "@everyone"); FM.ntg++;
@@ -6156,7 +6451,7 @@ static void fm_open(int id, u64 gid, u64 cid) {
         for (int i = 0; g && i < g->nroles && FM.ntg < 24; i++) {
             if (g->roles[i].id == gid) continue;
             FM.tg[FM.ntg] = g->roles[i].id; FM.tgty[FM.ntg] = OW_ROLE;
-            snprintf(FM.tgn[FM.ntg], 64, "роль %llu", (unsigned long long)g->roles[i].id);
+            snprintf(FM.tgn[FM.ntg], 64, TR("роль %llu"), (unsigned long long)g->roles[i].id);
             FM.ntg++;
         }
 #endif
@@ -6172,14 +6467,14 @@ static void fm_open(int id, u64 gid, u64 cid) {
         }
         FM.tgt = gid; FM.tgt_type = OW_ROLE;
         perms_load();
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Сбросить", FB_X1, 0); fm_btn("Сохранить", FB_OK, 1);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Сбросить"), FB_X1, 0); fm_btn(TR("Сохранить"), FB_OK, 1);
         break;
     }
     case FM_ADDFRIEND:
-        snprintf(FM.title, sizeof FM.title, "Добавить в друзья");
-        snprintf(FM.sub, sizeof FM.sub, "Добавьте друга по имени пользователя (латиница, цифры, _ и .).");
+        snprintf(FM.title, sizeof FM.title, TR("Добавить в друзья"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Добавьте друга по имени пользователя (латиница, цифры, _ и .)."));
         fm_add(FF_TEXT, "ИМЯ ПОЛЬЗОВАТЕЛЯ", "");
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Отправить запрос дружбы", FB_OK, 1);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Отправить запрос дружбы"), FB_OK, 1);
         break;
     default: break;
     }
@@ -6213,7 +6508,7 @@ static void draw_form(int W, int H) {
                 FM.f[2].ch = FM.f[2].och = pick_idx(SLOW_S, 9, ce.slowmode);
                 FM.f[3].ch = FM.f[3].och = ce.nsfw > 0;
             }
-            snprintf(FM.sub, sizeof FM.sub, "Обзор канала. Сохраняются только изменённые поля.");
+            snprintf(FM.sub, sizeof FM.sub, TR("Обзор канала. Сохраняются только изменённые поля."));
             FM.loading = false;
         }
     }
@@ -6229,7 +6524,7 @@ static void draw_form(int W, int H) {
     if (is && is->risk_warning && invite_risk_text()) nrisk = help_wrap(invite_risk_text(), iw, &risk);
     if (nrisk > 6) { for (int i = 6; i < nrisk; i++) free(risk[i]); nrisk = 6; }
     if (is && FM.nb >= 2) {                      /* главная кнопка — по состоянию приглашения */
-        FM.b[1].t = is->need_browser ? (vless_state() != VL_OFF ? "Открыть в браузере (мимо VLESS)" : "Открыть в браузере") : is->risk_warning ? "Понятно, вступить" : is->joined ? "Готово" : "Вступить на сервер";
+        FM.b[1].t = is->need_browser ? (vless_state() != VL_OFF ? TR("Открыть в браузере (мимо VLESS)") : TR("Открыть в браузере")) : is->risk_warning ? TR("Понятно, вступить") : is->joined ? TR("Готово") : TR("Вступить на сервер");
         FM.b[1].id = is->need_browser ? FB_X1 : FB_OK;
     }
 #endif
@@ -6255,7 +6550,7 @@ static void draw_form(int W, int H) {
     y++;
     if (is) {
         /* карточка сервера из приглашения: значок-сокращение, имя, в сети / участники, канал, кто пригласил */
-        if (is->busy) g_text(x, y, "загрузка приглашения...", iw, C_MUTED, 0);
+        if (is->busy) g_text(x, y, TR("загрузка приглашения..."), iw, C_MUTED, 0);
         else if (is->error[0]) { char *e = san(is->error, false); g_texte(x, y, e, iw, C_RED, 0); free(e); }
         else {
             char ab[16], t[160];
@@ -6263,16 +6558,16 @@ static void draw_form(int W, int H) {
             for (int r = 0; r < 3; r++) g_circle_row(x, y + r, 6, 3, r, C_BTN2, r == 1 ? ab : NULL, C_WHITE);
             g_texte(x + 8, y, is->guild_name ? is->guild_name : "?", iw - 8, C_WHITE, AT_B);
             g_ch(x + 8, y + 1, 'o', C_GREEN, AT_B);
-            snprintf(t, sizeof t, "%d в сети   ", is->online);
+            snprintf(t, sizeof t, TR("%d в сети   "), is->online);
             int u = g_text(x + 10, y + 1, t, iw - 10, C_MUTED, 0);
             g_ch(x + 10 + u, y + 1, 'o', C_MUTED, AT_B);
-            snprintf(t, sizeof t, "%d %s", is->members, plural(is->members, "участник", "участника", "участников"));
+            snprintf(t, sizeof t, "%d %s", is->members, plural(is->members, TR("участник"), TR("участника"), TR("участников")));
             g_text(x + 12 + u, y + 1, t, iw - 12 - u, C_MUTED, 0);
-            snprintf(t, sizeof t, "канал #%s%s%s", is->channel_name ? is->channel_name : "?", is->inviter ? ", пригласил(а) " : "", is->inviter ? is->inviter : "");
+            snprintf(t, sizeof t, TR("канал #%s%s%s"), is->channel_name ? is->channel_name : "?", is->inviter ? TR(", пригласил(а) ") : "", is->inviter ? is->inviter : "");
             g_texte(x + 8, y + 2, t, iw - 8, C_MUTED, 0);
-            const char *st = is->joined ? "Вы на этом сервере." : "Вступление - только щелчком по кнопке ниже (или Tab и пробел).";
+            const char *st = is->joined ? TR("Вы на этом сервере.") : TR("Вступление - только щелчком по кнопке ниже (или Tab и пробел).");
 #ifdef MC_WAVE2
-            if (is->need_browser) st = "Discord требует вступить через браузер.";
+            if (is->need_browser) st = TR("Discord требует вступить через браузер.");
 #endif
             g_text(x, y + 4, st, iw, is->joined ? C_GREEN : C_TEXT, 0);
         }
@@ -6286,13 +6581,13 @@ static void draw_form(int W, int H) {
         bool foc = FM.foc == i;
         if (f->kind == FF_TOGGLE) {
             g_text(x, y, f->ch ? "[x]" : "[ ]", 3, foc ? C_WHITE : C_TEXT, AT_B);
-            g_texte(x + 4, y, f->label, iw - 4, foc ? C_WHITE : C_TEXT, foc ? AT_U : 0);
+            g_texte(x + 4, y, tr(f->label), iw - 4, foc ? C_WHITE : C_TEXT, foc ? AT_U : 0);
             hit_add(x, y, iw, 1, A_FORMF, 0, i, HV_UL);
             y++;
             continue;
         }
         if (f->kind == FF_TRI) {
-            g_texte(x, y, f->label, iw - 20, foc ? C_WHITE : C_TEXT, foc ? AT_U : 0);
+            g_texte(x, y, tr(f->label), iw - 20, foc ? C_WHITE : C_TEXT, foc ? AT_U : 0);
             static const u32 tc[3] = { C_RED, C_MUTED, C_GREEN };
             static const char *const ts[3] = { " x ", " / ", " v " };
             for (int k = 0; k < 3; k++) {
@@ -6305,11 +6600,11 @@ static void draw_form(int W, int H) {
             y++;
             continue;
         }
-        g_text(x, y++, f->label, iw, C_MUTED, AT_B);
+        g_text(x, y++, tr(f->label), iw, C_MUTED, AT_B);
         g_pill(x - 1, y, iw + 2, C_RAIL);
         if (f->kind == FF_CHOICE) {
             g_text(x, y, "<", 1, C_TEXT, AT_B);
-            g_ctext(x + 2, y, iw - 4, f->nch ? f->chs[f->ch] : "", foc ? C_WHITE : C_TEXT, AT_B);
+            g_ctext(x + 2, y, iw - 4, f->nch ? tr(f->chs[f->ch]) : "", foc ? C_WHITE : C_TEXT, AT_B);
             g_text(x + iw - 1, y, ">", 1, C_TEXT, AT_B);
             hit_add(x - 1, y, 3, 1, A_FORMF, 4, i, HV_UL);
             hit_add(x + iw - 2, y, 3, 1, A_FORMF, 5, i, HV_UL);
@@ -6321,7 +6616,7 @@ static void draw_form(int W, int H) {
                 u32 c;
                 p += utf8_dec(p, &c);
                 int cw2 = shown_w(c);
-                if (f->kind == FF_INFO && FM.id == FM_INVITE && streamer_on() && strstr(f->val, "discord")) { g_text(x, y, "скрыто (режим стримера) - Копировать работает", iw - 2, C_MUTED, 0); break; }
+                if (f->kind == FF_INFO && FM.id == FM_INVITE && streamer_on() && strstr(f->val, "discord")) { g_text(x, y, TR("скрыто (режим стримера) - Копировать работает"), iw - 2, C_MUTED, 0); break; }
                 if (acc >= skip && used + cw2 <= iw - 2) { g_put(x + used, y, c, cw2, f->kind == FF_INFO ? C_URL : C_WHITE, 0); used += cw2; }
                 acc += cw2;
             }
@@ -6334,12 +6629,12 @@ static void draw_form(int W, int H) {
 #ifdef MC_WAVE2
     else if (FM.loading && FM.id == FM_CHEDIT && chan_info_failed(FM.cid)) {
         char t[120];
-        snprintf(t, sizeof t, "настройки канала не загрузились (код %ld): 'Повторить' - r", chan_info_failed(FM.cid));
+        snprintf(t, sizeof t, TR("настройки канала не загрузились (код %ld): 'Повторить' - r"), chan_info_failed(FM.cid));
         g_texte(x, py + bh - 3, t, iw, C_RED, 0);
         hit_add(x, py + bh - 3, iw, 1, A_FORMB, FB_RETRY, 0, HV_UL);
     }
 #endif
-    else if (FM.loading) g_texte(x, py + bh - 3, "загрузка текущих значений... 'Сохранить' - после загрузки", iw, C_MUTED, 0);
+    else if (FM.loading) g_texte(x, py + bh - 3, TR("загрузка текущих значений... 'Сохранить' - после загрузки"), iw, C_MUTED, 0);
     /* кнопки справа */
     int tot = 0;
     for (int i = 0; i < FM.nb; i++) tot += vw(FM.b[i].t) + 5;
@@ -6357,7 +6652,7 @@ static void draw_form(int W, int H) {
  * (reactors_open/reactors_state/reactors_close, msg_forward); здесь только окно и вызовы. ---- */
 static void rv_close(void) { reactors_close(); U.dirty = true; }
 static void rv_open(Message *m) {
-    if (!m || !m->nreacts) { ui_notice("у сообщения нет реакций"); return; }
+    if (!m || !m->nreacts) { ui_notice(TR("у сообщения нет реакций")); return; }
     U.menu = false;
     reactors_open(S.open_ch, m->id, 0);
 }
@@ -6376,7 +6671,7 @@ static void draw_rv(int W, int H) {
     g_rect(px, py, bw, bh, C_FEED);
     g_round_corners(px, py, bw, bh, 0, ut);
     g_round_corners(px, py + bh - 1, bw, bh, bh - 1, ub);
-    g_text(px + 3, py + 1, "Реакции", bw - 8, C_WHITE, AT_B);
+    g_text(px + 3, py + 1, TR("Реакции"), bw - 8, C_WHITE, AT_B);
     g_text(px + bw - 3, py + 1, "x", 1, C_TEXT, AT_B);
     hit_add(px + bw - 4, py + 1, 3, 1, A_BTN, B_RV_X, 0, HV_RED);
     int lw = 16, rows = bh - 4;
@@ -6390,11 +6685,11 @@ static void draw_rv(int W, int H) {
         hit_add(px + 1, y, lw, 1, A_RVSEL, 0, i, HV_PILL);
     }
     int rx = px + lw + 3, rw = bw - lw - 6;
-    if (rs->busy) g_text(rx, py + 3, "загрузка...", rw, C_MUTED, 0);
+    if (rs->busy) g_text(rx, py + 3, TR("загрузка..."), rw, C_MUTED, 0);
     else if (rs->err[0]) { char *e = san(rs->err, false); g_texte(rx, py + 3, e, rw, C_RED, 0); free(e); }
     else for (int i = 0; i < rs->n && i < rows; i++) g_texte(rx, py + 3 + i, rs->names[i], rw, C_TEXT, 0);
     if (!rs->busy && !rs->err[0] && rs->sel < m->nreacts && m->reacts[rs->sel].count > rs->n && rs->n == 25 && rows > 0)
-        g_text(rx, py + bh - 2, "показаны первые 25", rw, C_MUTED, 0);
+        g_text(rx, py + bh - 2, TR("показаны первые 25"), rw, C_MUTED, 0);
 }
 /* «Переслать»: Ctrl+K в режиме выбора беседы/канала; пересылку делает store (msg_forward), итог — уведомлением. */
 static void forward_to(u64 target) {
@@ -6402,7 +6697,7 @@ static void forward_to(u64 target) {
     Channel *dst = chan_find(target);
     u64 src = U.fwd_ch;
     U.fwd_msg = 0;
-    if (!m || !dst || is_voice(dst)) { ui_notice("переслать можно в текстовый канал или беседу"); return; }
+    if (!m || !dst || is_voice(dst)) { ui_notice(TR("переслать можно в текстовый канал или беседу")); return; }
     msg_forward(target, src, m->id);
 }
 /* Полная дата для подсказки при наведении на время сообщения: «понедельник, 9 ноября 2026 г. в 16:01». */
@@ -6412,7 +6707,7 @@ static void date_full(i64 ts, char *out, size_t n) {
                                        "сентября", "октября", "ноября", "декабря" };
     struct tm t;
     plat_localtime(ts, &t);
-    snprintf(out, n, "%s, %d %s %d г. в %02d:%02d", wd[(t.tm_wday % 7 + 7) % 7], t.tm_mday, mon[(t.tm_mon % 12 + 12) % 12], t.tm_year + 1900, t.tm_hour, t.tm_min);
+    snprintf(out, n, TR("%s, %d %s %d г. в %02d:%02d"), tr(wd[(t.tm_wday % 7 + 7) % 7]), t.tm_mday, tr(mon[(t.tm_mon % 12 + 12) % 12]), t.tm_year + 1900, t.tm_hour, t.tm_min);
 }
 
 /* Текст результата поиска: до 3 строк переноса (more — не всё влезло). */
@@ -6443,7 +6738,7 @@ static const Message *mp_msg(int kind, int i, u64 *ch) {
 /* №125: в «Входящих» и списках упоминаний текст ЛС в режиме стримера не показывается */
 static const char *mp_text(const Message *m, u64 ch) {
     const Channel *c = chan_find(ch);
-    if (streamer_on() && c && !c->guild_id) return "сообщение в ЛС скрыто (режим стримера)";
+    if (streamer_on() && c && !c->guild_id) return TR("сообщение в ЛС скрыто (режим стримера)");
     return m->content ? m->content : "";
 }
 static void draw_mpanel(int x, int w, int H, int kind, int top) {
@@ -6454,15 +6749,15 @@ static void draw_mpanel(int x, int w, int H, int kind, int top) {
     if (kind == MP_SEARCH) {
         const SearchState *st = search_state();
         busy = st->busy; idx = st->indexing; err = st->error; n = st->nhits < SEARCH_PAGE ? st->nhits : SEARCH_PAGE; total = st->total;
-        ttl0 = "Ничего не найдено"; msg0 = "Попробуйте другие слова.";
+        ttl0 = TR("Ничего не найдено"); msg0 = TR("Попробуйте другие слова.");
     } else if (kind == MP_PINS) {
         const PinsState *ps = pins_state();
         busy = ps->busy; err = ps->error; n = ps->n; total = n;
-        ttl0 = "Здесь пока нет закреплённых сообщений"; msg0 = "Закрепить: меню сообщения (правый щелчок или ...).";
+        ttl0 = TR("Здесь пока нет закреплённых сообщений"); msg0 = TR("Закрепить: меню сообщения (правый щелчок или ...).");
     } else {
         const MentionsState *ms = mentions_state();
         busy = ms->busy; err = ms->error; n = ms->n; total = n;
-        ttl0 = "Упоминаний нет"; msg0 = "Здесь появятся сообщения, где вас упомянули.";
+        ttl0 = TR("Упоминаний нет"); msg0 = TR("Здесь появятся сообщения, где вас упомянули.");
     }
     int bot = H - 2;
 #ifdef MC_PACKA
@@ -6474,13 +6769,13 @@ static void draw_mpanel(int x, int w, int H, int kind, int top) {
         const char *ttl, *msg;
         u32 tc = C_WHITE;
         char ed[200];
-        if (busy) { ttl = kind == MP_SEARCH ? "Ищем сообщения..." : "Загрузка..."; msg = ""; }
-        else if (idx) { ttl = "Идёт индексация"; msg = "Discord ещё готовит поиск по этому серверу. Повторим сами через несколько секунд."; tc = C_GOLD; }
+        if (busy) { ttl = kind == MP_SEARCH ? TR("Ищем сообщения...") : TR("Загрузка..."); msg = ""; }
+        else if (idx) { ttl = TR("Идёт индексация"); msg = TR("Discord ещё готовит поиск по этому серверу. Повторим сами через несколько секунд."); tc = C_GOLD; }
         else if (err[0]) {
             char *e = san(err, false);
             deco_ascii(e, ed, sizeof ed);
             free(e);
-            ttl = kind == MP_SEARCH ? "Поиск не удался" : "Не загрузилось"; msg = ed; tc = C_RED;
+            ttl = kind == MP_SEARCH ? TR("Поиск не удался") : TR("Не загрузилось"); msg = ed; tc = C_RED;
         } else { ttl = ttl0; msg = msg0; }
         int y = top + 2;
         char **ls;
@@ -6545,7 +6840,7 @@ static void draw_mpanel(int x, int w, int H, int kind, int top) {
         u32 nc = m->color ? m->color : C_WHITE;
         int u = g_texte(x + 8, y, m->author ? m->author : "?", tw - vw(tm) - 1 > 4 ? tw - vw(tm) - 1 : 4, nc, AT_B);
         g_text(x + 9 + u, y, tm, tw - u - 1, C_MUTED, 0);
-        if (!nl) g_text(x + 8, y + 1, "(вложение)", tw, C_MUTED, 0);
+        if (!nl) g_text(x + 8, y + 1, TR("(вложение)"), tw, C_MUTED, 0);
         for (int k = 0; k < nl; k++) {
             int uu = g_textn(x + 8, y + 1 + k, body + s0[k], e0[k] - s0[k], more && k == nl - 1 ? tw - 3 : tw, C_TEXT, 0);
             if (more && k == nl - 1) g_text(x + 8 + uu, y + 1 + k, "...", 3, C_MUTED, 0);
@@ -6555,7 +6850,7 @@ static void draw_mpanel(int x, int w, int H, int kind, int top) {
 #ifdef MC_PACKA
     if (kind == MP_SEARCH && search_state()->page_count > 1) {
         const SearchState *ss = search_state();
-        if (w >= 24) snprintf(t, sizeof t, "<  стр. %d из %d  >", ss->page + 1, ss->page_count);
+        if (w >= 24) snprintf(t, sizeof t, TR("<  стр. %d из %d  >"), ss->page + 1, ss->page_count);
         else snprintf(t, sizeof t, "< %d/%d >", ss->page + 1, ss->page_count);
         int bx = g_ctext(x, H - 2, w, t, C_TEXT, AT_B);
         if (ss->page > 0) hit_add(bx, H - 2, 2, 1, A_BTN, B_SP_PREV, 0, HV_UL);
@@ -6563,11 +6858,11 @@ static void draw_mpanel(int x, int w, int H, int kind, int top) {
     } else
 #endif
     if (kind == MP_SEARCH && total > n) {
-        snprintf(t, sizeof t, "показаны первые %d из %d", n, total);
+        snprintf(t, sizeof t, TR("показаны первые %d из %d"), n, total);
         g_ctext(x, H - 1, w, t, C_MUTED, 0);
     }
     if (kind == MP_PINS && pins_state()->more) {
-        g_ctext(x, H - 1, w, "Загрузить ещё (End)", C_URL, AT_U);
+        g_ctext(x, H - 1, w, TR("Загрузить ещё (End)"), C_URL, AT_U);
         hit_add(x + 1, H - 1, w - 2, 1, A_BTN, B_PINS_MORE, 0, HV_UL);
     }
 }
@@ -6585,10 +6880,10 @@ static void draw_inbox(int x, int w, int H) {
     int tx = x + 2;
     static const char *const tabs[2] = { "Непрочитанное", "Упоминания" };
     for (int i = 0; i < 2; i++) {
-        int tw0 = vw(tabs[i]) + 2;
+        int tw0 = vw(tr(tabs[i])) + 2;
         if (tx + tw0 > x + w - 2) break;
         if (i == U.inbox_tab) g_pill(tx, 3, tw0, C_SEL);
-        g_text(tx + 1, 3, tabs[i], tw0 - 2, i == U.inbox_tab ? C_WHITE : C_MUTED, AT_B);
+        g_text(tx + 1, 3, tr(tabs[i]), tw0 - 2, i == U.inbox_tab ? C_WHITE : C_MUTED, AT_B);
         hit_add(tx, 3, tw0, 1, A_BTN, i ? B_INBOX_T1 : B_INBOX_T0, 0, HV_PILL);
         tx += tw0 + 1;
     }
@@ -6619,16 +6914,16 @@ static void draw_inbox(int x, int w, int H) {
                 right -= mw + 1;
             }
             g_texte(x + 3, y, t, right - x - 3, C_WHITE, AT_B);
-            g_texte(x + 3, y + 1, g ? g->name : "личные сообщения", w - 6, C_MUTED, 0);
+            g_texte(x + 3, y + 1, g ? g->name : TR("личные сообщения"), w - 6, C_MUTED, 0);
             hit_add(x + 1, y, w - 2, 2, A_SRES, 3, i, HV_MSG);
             y += 3;
             n++;
         }
     if (!n) {
-        g_ctext(x, 8, w, "Всё прочитано", C_WHITE, AT_B);
-        g_ctext(x, 9, w, "Новые сообщения появятся здесь.", C_MUTED, 0);
+        g_ctext(x, 8, w, TR("Всё прочитано"), C_WHITE, AT_B);
+        g_ctext(x, 9, w, TR("Новые сообщения появятся здесь."), C_MUTED, 0);
     } else {
-        g_button(x + 2, H - 1, "Прочитать всё", w - 4, 0, B_ACK_ALL);
+        g_button(x + 2, H - 1, TR("Прочитать всё"), w - 4, 0, B_ACK_ALL);
     }
     U.inbox_n = n;
 }
@@ -6637,14 +6932,14 @@ static void draw_inbox(int x, int w, int H) {
 static void draw_search(int x, int w, int H) {
     g_rect(x, 1, w, H - 1, C_SIDE);
     char t[220];
-    if (U.rp == RP_PINS) snprintf(t, sizeof t, "Закреплённые сообщения");
-    else if (U.rp == RP_INBOX) snprintf(t, sizeof t, "Входящие");
+    if (U.rp == RP_PINS) snprintf(t, sizeof t, TR("Закреплённые сообщения"));
+    else if (U.rp == RP_INBOX) snprintf(t, sizeof t, TR("Входящие"));
     else {
         const SearchState *st = search_state();
-        if (st->busy) snprintf(t, sizeof t, "Поиск...");
-        else if (st->indexing) snprintf(t, sizeof t, "Индексация...");
-        else if (st->error[0]) snprintf(t, sizeof t, "Ошибка поиска");
-        else snprintf(t, sizeof t, "%d %s", st->total, plural(st->total, "результат", "результата", "результатов"));
+        if (st->busy) snprintf(t, sizeof t, TR("Поиск..."));
+        else if (st->indexing) snprintf(t, sizeof t, TR("Индексация..."));
+        else if (st->error[0]) snprintf(t, sizeof t, TR("Ошибка поиска"));
+        else snprintf(t, sizeof t, "%d %s", st->total, plural(st->total, TR("результат"), TR("результата"), TR("результатов")));
     }
     g_texte(x + 2, 1, t, w - 7, C_WHITE, AT_B);
     g_text(x + w - 3, 1, "x", 1, C_TEXT, AT_B);
@@ -6829,27 +7124,27 @@ static int draw_sidebar(int sx, int sw0, int H, const VoiceStatus *vs) {
         if (H >= 20) {
             /* плашка «Нужно бустов   Бусты 0/33 >» */
             g_pill(sx + 1, 1, sw - 2, C_BTN2);
-            g_text(sx + 2, 1, "Нужно бустов", sw - 4, C_WHITE, AT_B);
-            if (sw >= 30) g_rtext(sx + sw - 2, 1, "Бусты 0/33 >", 12, C_MUTED, 0);
+            g_text(sx + 2, 1, TR("Нужно бустов"), sw - 4, C_WHITE, AT_B);
+            if (sw >= 30) g_rtext(sx + sw - 2, 1, TR("Бусты 0/33 >"), 12, C_MUTED, 0);
             else if (sw >= 22) g_rtext(sx + sw - 2, 1, "0/33 >", 6, C_MUTED, 0);
             hit_add(sx + 1, 1, sw - 2, 1, A_BTN, B_NOP, 0, HV_PILL); U.hit[U.nhit - 1].tip = T_BOOST;
             g_text(sx + 2, 2, "[=]", 3, C_MUTED, 0);
-            g_text(sx + 6, 2, "Мероприятия", sw - 7, C_MUTED, 0);
+            g_text(sx + 6, 2, TR("Мероприятия"), sw - 7, C_MUTED, 0);
             hit_add(sx + 1, 2, sw - 2, 1, A_BTN, B_NOP, 0, HV_PILL); U.hit[U.nhit - 1].tip = T_EVENTS;
             g_text(sx + 2, 3, "<>", 2, C_MUTED, 0);
-            g_text(sx + 6, 3, "Бусты сервера", sw - 7, C_MUTED, 0);
+            g_text(sx + 6, 3, TR("Бусты сервера"), sw - 7, C_MUTED, 0);
             hit_add(sx + 1, 3, sw - 2, 1, A_BTN, B_NOP, 0, HV_PILL); U.hit[U.nhit - 1].tip = T_BOOST;
             list_top = 4;
         }
     } else {
         g_pill(sx + 1, 0, sw - 2, C_RAIL);
-        g_text(sx + 3, 0, "Найти или начать беседу", sw - 5, C_MUTED, U.focus == F_CHANNELS ? AT_U : 0);
+        g_texte(sx + 3, 0, TR("Найти или начать беседу"), sw - 5, C_MUTED, U.focus == F_CHANNELS ? AT_U : 0);
         hit_add(sx + 1, 0, sw - 2, 1, A_BTN, B_ADDDM, 0, HV_UL); U.hit[U.nhit - 1].tip = T_FIND;
         if (H >= 16) {
             bool home = !S.open_ch;
             if (home) g_pill(sx + 1, 1, sw - 2, C_SEL);
             g_text(sx + 2, 1, "oo", 2, home ? C_WHITE : C_MUTED, AT_B);
-            g_text(sx + 6, 1, "Друзья", sw - 7, home ? C_WHITE : C_MUTED, AT_B);
+            g_text(sx + 6, 1, TR("Друзья"), sw - 7, home ? C_WHITE : C_MUTED, AT_B);
             hit_add(sx + 1, 1, sw - 2, 1, A_BTN, B_FRIENDS, 0, HV_PILL);
             g_text(sx + 2, 2, "<>", 2, C_MUTED, AT_B);
             g_text(sx + 6, 2, "Nitro", sw - 7, C_MUTED, 0);
@@ -6864,13 +7159,13 @@ static int draw_sidebar(int sx, int sw0, int H, const VoiceStatus *vs) {
                     char rb[12];
                     snprintf(rb, sizeof rb, "%d", nrq);
                     int mw = vw(rb) + 2;
-                    g_texte(sx + 6, 3, "Запросы", sw - 9 - mw, rh ? C_WHITE : C_MUTED, AT_B);
+                    g_texte(sx + 6, 3, TR("Запросы"), sw - 9 - mw, rh ? C_WHITE : C_MUTED, AT_B);
                     g_pill(sx + sw - 2 - mw, 3, mw, C_RED);
                     g_text(sx + sw - 1 - mw, 3, rb, mw - 2, C_WHITE, AT_B);
                     hit_add(sx + 1, 3, sw - 2, 1, A_BTN, B_REQS, 0, HV_PILL);
                 }
             }
-            g_text(sx + 2, 4, "Личные сообщения", sw - 6, C_MUTED, 0);
+            g_text(sx + 2, 4, TR("Личные сообщения"), sw - 6, C_MUTED, 0);
             g_icon_btn(sx + sw - 3, 4, "+", U.pick ? C_WHITE : C_MUTED, B_ADDDM, T_ADDDM);
             list_top = 5;
         }
@@ -6887,7 +7182,7 @@ static int draw_sidebar(int sx, int sw0, int H, const VoiceStatus *vs) {
     if (U.row_scroll > U.nrows - ch_h) U.row_scroll = U.nrows - ch_h;
     if (U.row_scroll < 0) U.row_scroll = 0;
     hit_add(sx, list_top, sw, ch_h > 0 ? ch_h : 0, A_AR_CHANS, 0, 0, 0);
-    if (!U.nrows && ch_h > 0) g_text(sx + 2, list_top + 1, cg ? "нет видимых каналов" : "бесед пока нет", sw - 3, C_MUTED, 0);
+    if (!U.nrows && ch_h > 0) g_text(sx + 2, list_top + 1, cg ? TR("нет видимых каналов") : TR("бесед пока нет"), sw - 3, C_MUTED, 0);
     for (int cy = 0; cy < ch_h; cy++) {
         int ri = U.row_scroll + cy, y = list_top + cy;
         if (ri >= U.nrows) break;
@@ -6902,7 +7197,7 @@ static int draw_sidebar(int sx, int sw0, int H, const VoiceStatus *vs) {
             const char *cs = voice_channel_status(r->id);
             bool mine = vs->phase != VS_IDLE && vs->channel_id == r->id;
             if (cs && cs[0]) { char *sc = san(cs, false); g_texte(sx + 6, y, sc, sw - 7, C_MUTED, AT_IT); free(sc); }
-            else g_texte(sx + 6, y, "Выбрать статус канала /", sw - 7, C_MUTED, 0);   /* сокращается по словам */
+            else g_texte(sx + 6, y, TR("Выбрать статус канала /"), sw - 7, C_MUTED, 0);   /* сокращается по словам */
             if (mine) hit_add(sx + 5, y, sw - 6, 1, A_BTN, B_VSTATUS, 0, HV_UL);
             continue;
         }
@@ -6978,8 +7273,8 @@ static int draw_sidebar(int sx, int sw0, int H, const VoiceStatus *vs) {
         int tx_end = bx - 1;
         if (sw >= 32) { g_icon_btn(bx - 4, y, "((o", C_GOLD, B_NOP, T_NOISE); tx_end = bx - 5; }
         int room = tx_end - sx - 5;
-        const char *ph = vs->phase == VS_CONNECTED ? (room >= 26 ? "Голосовая связь подключена" : room >= 22 ? "Голосовая связь подкл." : "Голос подключён") :
-                         vs->phase == VS_FAILED ? "Ошибка голоса" : vs->phase == VS_DAVE ? "Шифрование..." : "Подключение...";
+        const char *ph = vs->phase == VS_CONNECTED ? (room >= 26 ? TR("Голосовая связь подключена") : room >= 22 ? TR("Голосовая связь подкл.") : TR("Голос подключён")) :
+                         vs->phase == VS_FAILED ? TR("Ошибка голоса") : vs->phase == VS_DAVE ? TR("Шифрование...") : TR("Подключение...");
         g_texte(sx + 5, y, ph, tx_end - sx - 5, pfg, 0);
         Channel *vc = chan_find(vs->channel_id);
         Guild *vg2 = vc && vc->guild_id ? guild_find(vc->guild_id) : NULL;
@@ -6987,18 +7282,25 @@ static int draw_sidebar(int sx, int sw0, int H, const VoiceStatus *vs) {
         if (vc) chan_label(vc, lab, sizeof lab);
         if (vs->error[0]) deco_ascii(vs->error, t, sizeof t);
         else snprintf(t, sizeof t, "%s%s%s", lab, vg2 ? " / " : "", vg2 ? vg2->name : "");
-        if (vs->phase == VS_CONNECTED) snprintf(enc, sizeof enc, "%s %d мс", O.demo ? "петля" : vs->dave ? "E2EE" : "без E2EE", vs->ping);
+        if (vs->phase == VS_CONNECTED) snprintf(enc, sizeof enc, TR("%s %d мс"), O.demo ? TR("петля") : vs->dave ? "E2EE" : TR("без E2EE"), vs->ping);
         int ex = sw >= 30 ? g_rtext(sx + sw - 1, y + 1, enc, 14, vs->dave || O.demo ? C_GREEN : C_GOLD, 0) : sx + sw;
         int tw2 = g_texte_w(sx + 1, y + 1, t, ex - sx - 2, vs->error[0] ? C_RED : C_MUTED, 0, false);   /* по символам: «Канал / Серв...» */
         if (vc) hit_add(sx + 1, y + 1, tw2, 1, A_BTN, B_VOPEN, 0, HV_UL);
         /* ряд из 4 кнопок в рамках: камера, экран, смена голоса, звуковая панель */
         static const char *const ic[4] = { "[]/", "[^]", "~v~", "<))" };
+#ifdef ASTRA_VIDEO
+        static const int ids[4] = { B_NOP, B_SHARE, B_FX, B_NOP }, tips[4] = { T_CAM, T_SCREEN, T_FX, T_SOUNDB };
+#else
         static const int ids[4] = { B_NOP, B_NOP, B_FX, B_NOP }, tips[4] = { T_CAM, T_SCREEN, T_FX, T_SOUNDB };
+#endif
         int bw = (sw - 2 - 3) / 4;
         VoiceFx fx = voicefx_get();
         for (int i = 0; i < 4; i++) {
             int x = sx + 1 + i * (bw + 1);
             bool on = ids[i] == B_FX && fx != VFX_OFF;
+#ifdef ASTRA_VIDEO
+            if (ids[i] == B_SHARE && sh_running) on = true;
+#endif
             g_pill(x, y + 2, bw, on ? C_ACC : C_BTN2);
             g_ctext(x, y + 2, bw, ic[i], C_TEXT, AT_B);
             hit_add(x, y + 2, bw, 1, A_BTN, ids[i], 0, HV_PILL);
@@ -7007,7 +7309,7 @@ static int draw_sidebar(int sx, int sw0, int H, const VoiceStatus *vs) {
     }
     g_uline(sx, user_top - 1, sw);
     /* ---- панель пользователя: аватар 4x2 со статусом, имя, статус, мик / наушники / шестерёнка ---- */
-    const char *me = S.me_name && *S.me_name ? S.me_name : "вы";
+    const char *me = S.me_name && *S.me_name ? S.me_name : TR("вы");
     for (int r = 0; r < 2; r++) { g_avatar(sx + 1, user_top + r, 4, 2, r, S.me_id, me); strip_part(G_PANEL, sx + 1, user_top + r, 4, 2, r, PK_AVR, S.me_id); }
     char gst[128];
     deco_ascii(gw_status_text(), gst, sizeof gst);
@@ -7020,11 +7322,20 @@ static int draw_sidebar(int sx, int sw0, int H, const VoiceStatus *vs) {
     g_cap(fine_on ? sx + 5 : sx + 4, user_top + 1, 'o', stc, C_PANEL);   /* в окне аватар под слоем: точка рядом */
     if (vs->mic_live) g_cap(sx, user_top, '~', C_GREEN, C_PANEL);
     char st[140];
-    snprintf(st, sizeof st, "(%s)", online ? stn[me_st <= PS_INVISIBLE ? me_st : 1] : gst);
+    snprintf(st, sizeof st, "(%s)", online ? tr(stn[me_st <= PS_INVISIBLE ? me_st : 1]) : gst);
+    if (custom_status()[0]) {                    /* №104: свой текстовый статус */
+        char *cs2 = san(custom_status(), false);
+        snprintf(st, sizeof st, "%s", cs2);
+        free(cs2);
+    } else if (presence_until() > wall_ms() / 1000) {   /* №103: статус до времени */
+        struct tm pt;
+        plat_localtime(presence_until(), &pt);
+        snprintf(st + strlen(st), sizeof st - strlen(st), TR(" до %02d:%02d"), pt.tm_hour, pt.tm_min);
+    }
     if (focus_until() > wall_ms() / 1000) {      /* №121: значок фокуса и до какого времени */
         struct tm ft;
         plat_localtime(focus_until(), &ft);
-        snprintf(st + strlen(st), sizeof st - strlen(st), " (z)фокус до %02d:%02d", ft.tm_hour, ft.tm_min);
+        snprintf(st + strlen(st), sizeof st - strlen(st), TR(" (z)фокус до %02d:%02d"), ft.tm_hour, ft.tm_min);
     }
     hit_add(sx + 1, user_top, 5, 2, A_BTN, B_STATUS, 0, HV_UL);
     U.hit[U.nhit - 1].tip = T_STATUS;
@@ -7139,10 +7450,10 @@ static void draw_main(int W, int H) {
                 }
                 if (U.sq_edit) g_ch(right + 2 + used, 0, ' ', C_TEXT, AT_I);
                 if (!U.sq[0]) {                  /* пустая строка — подсказка фильтров, целыми словами */
-                    const char *hs = tw2 - 1 >= 22 ? "from: in: has: before:" : tw2 - 1 >= 14 ? "from: in: has:" : "Поиск";
+                    const char *hs = tw2 - 1 >= 22 ? "from: in: has: before:" : tw2 - 1 >= 14 ? "from: in: has:" : TR("Поиск");
                     g_text(right + 3, 0, hs, tw2 - 1, C_MUTED, 0);
                 }
-            } else g_text(right + 2, 0, "Поиск", tw2, C_MUTED, 0);
+            } else g_text(right + 2, 0, TR("Поиск"), tw2, C_MUTED, 0);
             hit_add(right, 0, pw - 3, 1, A_BTN, B_SEARCH, 0, HV_UL); U.hit[U.nhit - 1].tip = T_SEARCH;
             if (U.sq[0]) { g_text(right + pw - 3, 0, "x", 1, C_TEXT, AT_B); hit_add(right + pw - 3, 0, 1, 1, A_BTN, B_SRCH_CLR, 0, HV_RED); }
         }
@@ -7170,7 +7481,7 @@ static void draw_main(int W, int H) {
                 g_ch(nx0 + nu + 1, 0, '|', C_LINE, 0);
                 g_texte(nx0 + nu + 3, 0, oc->topic, rx - (nx0 + nu + 3) - 2, C_MUTED, 0);
             }
-        } else g_text(cx + 2, 0, "Astra DS", cw - 3, C_WHITE, AT_B);
+        } else g_text(cx + 2, 0, APP_NAME, cw - 3, C_WHITE, AT_B);
         g_uline(cx, 0, cw);
     }
     if (fw > 0) draw_chat(cx, fw, H, oc, false);
@@ -7428,9 +7739,12 @@ static int g_qr(int x, int y, int maxw, int maxh, const char *text) {
 static void busy(const char *what);
 enum { LS_VLESS, LS_FORM, LS_CAPTCHA, LS_MFA, LS_EMAIL, LS_QRSCAN, LS_QR, LS_PHONE, LS_UNDEL };
 enum { LFI_NONE, LFI_LINK, LFI_USER, LFI_PASS, LFI_CODE };
-enum { B_LG_VCHECK = 100, B_LG_VSKIP, B_LG_LOGIN, B_LG_FORGOT, B_LG_REGISTER, B_LG_QRSHOW, B_LG_BACK, B_LG_QRGO,
+enum { B_LG_VCHECK = 200, B_LG_VSKIP, B_LG_LOGIN, B_LG_FORGOT, B_LG_REGISTER, B_LG_QRSHOW, B_LG_BACK, B_LG_QRGO,
        B_LG_CODE, B_LG_SMS, B_LG_BACKUP, B_LG_TOTP, B_LG_RETRY, B_LG_RESTART, B_LG_QRDEMO, B_LG_QRNEW, B_LG_UNDEL,
        B_LG_SMSAGAIN, B_LG_CAPOPEN, B_LG_CAPCANCEL, B_LG_NOASK, B_LG_VRETRY, B_LG_VQUIT };
+/* кнопки входа и общие B_* — одна таблица щелчков (Hit.sub — u8): номера не должны пересекаться */
+_Static_assert((int)B_SP_NEXT < (int)B_LG_VCHECK, "B_* дошли до B_LG_*: поднимите B_LG_VCHECK");
+_Static_assert(B_LG_VQUIT < 256, "B_LG_* не влезают в Hit.sub (u8)");
 #define C_LINK 0x4ea8deu
 static struct {
     bool on, vless, qr_full, qr_req;
@@ -7450,6 +7764,23 @@ static struct {
  * удаляют запись; пропажа флага — лишь лишний вопрос. */
 #define STARTUP_DIRECT "direct-confirmed"
 static int startup_direct_mem = -1;               /* демо и кэш на время работы: -1 — не читали */
+/* Язык: forced 0/1 — флаг --lang=ru|en (main.c); -1 — сохранённый выбор (хранилище «lang»: «en»/«ru»),
+ * без него — язык системы (LANG/LC_ALL; Windows без них — русский; разработчик может дать plat_ui_lang). */
+static int lang_inited;
+void ui_lang_init(int forced) {
+    lang_inited = 1;
+    if (forced == 0 || forced == 1) { g_lang_en = forced == 1; return; }
+    char b[8] = "";
+    int n = O.demo || O.no_save ? -1 : keyring_load("lang", b, sizeof b);
+    if (n == 2 && !memcmp(b, "en", 2)) { g_lang_en = true; return; }
+    if (n == 2 && !memcmp(b, "ru", 2)) { g_lang_en = false; return; }
+    g_lang_en = plat_ui_lang() == 1;            /* язык системы (plat_win/plat_posix) */
+}
+static void lang_set(bool en) {
+    g_lang_en = en;
+    if (!O.demo && !O.no_save) keyring_save("lang", en ? "en" : "ru", 2);
+    U.full = U.dirty = true;
+}
 static bool startup_direct(void) {
     if (startup_direct_mem < 0) {
         char b[32] = "";
@@ -7486,8 +7817,8 @@ static const LoginView *lv(void) { if (O.demo) { dv_fix(); return &dv; } return 
 static void lgx_password(const char *u, const char *p) {
     if (!O.demo) { login_start_password(u, p); return; }
     dv_reset_errs();
-    if (!*u) snprintf(dv_e1, sizeof dv_e1, "Обязательное поле");
-    if (!*p) snprintf(dv_e2, sizeof dv_e2, "Обязательное поле");
+    if (!*u) snprintf(dv_e1, sizeof dv_e1, TR("Обязательное поле"));
+    if (!*p) snprintf(dv_e2, sizeof dv_e2, TR("Обязательное поле"));
     if (!*u || !*p) return;
     if (strstr(u, "captcha")) {
         dv.stage = LG_CAPTCHA; dv.captcha_service = "hcaptcha";
@@ -7497,14 +7828,14 @@ static void lgx_password(const char *u, const char *p) {
     }
     else if (strstr(u, "mail")) dv.stage = LG_EMAIL;
     else if (strstr(u, "phone")) dv.stage = LG_PHONE;
-    else if (strstr(u, "undel")) { dv.stage = LG_UNDELETE; dv.notice = "Аккаунт отключён. Его можно восстановить и войти."; }
-    else if (strstr(u, "bad")) { snprintf(dv_e1, sizeof dv_e1, "Неверный логин или пароль."); snprintf(dv_e2, sizeof dv_e2, "Неверный логин или пароль."); }
+    else if (strstr(u, "undel")) { dv.stage = LG_UNDELETE; dv.notice = TR("Аккаунт отключён. Его можно восстановить и войти."); }
+    else if (strstr(u, "bad")) { snprintf(dv_e1, sizeof dv_e1, TR("Неверный логин или пароль.")); snprintf(dv_e2, sizeof dv_e2, TR("Неверный логин или пароль.")); }
     else { dv.stage = LG_MFA; dv.mfa_methods = LM_TOTP | LM_SMS | LM_BACKUP; dv.mfa_method = LM_TOTP; dv.sms_sent = false; }
 }
 static void lgx_code(const char *c, int kind) {
     if (!O.demo) { login_submit_code(c, kind); return; }
     dv_reset_errs();
-    if (strcmp(c, "123456")) snprintf(dv_e3, sizeof dv_e3, "Неверный код. Попробуйте ещё раз.");
+    if (strcmp(c, "123456")) snprintf(dv_e3, sizeof dv_e3, TR("Неверный код. Попробуйте ещё раз."));
     else dv.stage = LG_DONE;
 }
 static void lgx_mfa_method(unsigned m) {
@@ -7530,7 +7861,7 @@ static void lg_done(void) {
     buf_wipe(&LG.user); buf_wipe(&LG.pass); buf_wipe(&LG.code); buf_wipe(&LG.link);
     LG.on = false;
     U.full = U.dirty = true;
-    ui_notice("вход выполнен%s", O.demo ? " (демо)" : "");   /* main.c сам вызовет login_finish() */
+    ui_notice(TR("вход выполнен%s"), O.demo ? TR(" (демо)") : "");   /* main.c сам вызовет login_finish() */
 }
 
 /* ---- решение капчи в окне WebView2 (login.c; поля LoginView появятся с макросом LOGIN_CAPTCHA_UI) ---- */
@@ -7542,12 +7873,12 @@ static int lg_captcha_ui(const LoginView *v, int x, int y, int w, bool qr) {
 #ifdef LOGIN_CAPTCHA_UI
     if (!v->captcha || !v->captcha_supported || v->captcha_qr != qr) return 0;
     if (v->captcha_open) {
-        int n = lg_para(x, y, w, "Решите проверку в открывшемся окне.", C_WHITE, true);
-        int bw = vw("Отмена") + 4;
-        lg_btn(x + (w - bw) / 2, y + n + 1, 0, "Отмена", 0, B_LG_CAPCANCEL);
+        int n = lg_para(x, y, w, TR("Решите проверку в открывшемся окне."), C_WHITE, true);
+        int bw = vw(TR("Отмена")) + 4;
+        lg_btn(x + (w - bw) / 2, y + n + 1, 0, TR("Отмена"), 0, B_LG_CAPCANCEL);
         return n + 2;
     }
-    lg_btn(x, y, w, "Пройти проверку", 1, B_LG_CAPOPEN);
+    lg_btn(x, y, w, TR("Пройти проверку"), 1, B_LG_CAPOPEN);
     return 2;
 #else
     (void)v; (void)x; (void)y; (void)w; (void)qr;
@@ -7634,21 +7965,21 @@ static bool lg_qr_col(const LoginView *v, int x, int y, int w, int h) {
     else LG.qr_req = false;
     if (v->qr == QR_EXPIRED || v->qr == QR_ERROR) {
         int yy = y + h / 2 - 2;
-        g_ctext(x, yy, w, v->qr == QR_EXPIRED ? "QR-код устарел" : "QR-код недоступен", C_WHITE, AT_B);
-        yy += 1 + lg_para(x, yy + 1, w, v->qr_text && *v->qr_text ? v->qr_text : "нажмите \"Обновить\"", C_MUTED, true);
-        int bw = vw("Обновить") + 4;
-        lg_btn(x + (w - bw) / 2, yy + 1, 0, "Обновить", 0, B_LG_QRNEW);
+        g_ctext(x, yy, w, v->qr == QR_EXPIRED ? TR("QR-код устарел") : TR("QR-код недоступен"), C_WHITE, AT_B);
+        yy += 1 + lg_para(x, yy + 1, w, v->qr_text && *v->qr_text ? v->qr_text : TR("нажмите \"Обновить\""), C_MUTED, true);
+        int bw = vw(TR("Обновить")) + 4;
+        lg_btn(x + (w - bw) / 2, yy + 1, 0, TR("Обновить"), 0, B_LG_QRNEW);
         return true;
     }
     if (v->qr != QR_SHOW || !v->qr_url || !*v->qr_url) {
-        g_ctext(x, y + h / 2, w, "QR-код загружается...", C_MUTED, 0);
+        g_ctext(x, y + h / 2, w, TR("QR-код загружается..."), C_MUTED, 0);
         return true;
     }
     int qh = g_qr(x, y, w, h - 4, v->qr_url);
     if (!qh) return false;
     int yy = y + qh + 1;
-    g_ctext(x, yy, w, "Войти с помощью QR-кода", C_WHITE, AT_B);
-    lg_para(x, yy + 1, w, "Отсканируйте его камерой в мобильном приложении Discord, чтобы войти сразу.", C_MUTED, true);
+    g_ctext(x, yy, w, TR("Войти с помощью QR-кода"), C_WHITE, AT_B);
+    lg_para(x, yy + 1, w, TR("Отсканируйте его камерой в мобильном приложении Discord, чтобы войти сразу."), C_MUTED, true);
     if (O.demo) hit_add(x, y, w, qh, A_BTN, B_LG_QRDEMO, 0, HV_BG);   /* демо: щелчок по коду — «телефон отсканировал» */
     return true;
 }
@@ -7661,7 +7992,7 @@ static const char *lg_link_err(void) {
     while (a < n && LG.link.p[a] == ' ') a++;
     if (a >= n) return NULL;
     size_t k = n - a < 8 ? n - a : 8;
-    if (strncmp(LG.link.p + a, "vless://", k)) return "ссылка должна начинаться с vless://";
+    if (strncmp(LG.link.p + a, "vless://", k)) return TR("ссылка должна начинаться с vless://");
     return NULL;
 }
 static void draw_login(int W, int H) {
@@ -7701,6 +8032,12 @@ static void draw_login(int W, int H) {
     g_hbox(cx, cy + ch - 1, cw);
     for (int y = cy + 1; y < cy + ch - 1; y++) { g_ch(cx, y, '|', C_LINE, 0); g_ch(cx + cw - 1, y, '|', C_LINE, 0); }
     hit_add(cx, cy, cw, ch, A_BLOCK, 0, 0, 0);
+    if (cw >= 30) {                              /* язык — до входа (англоязычному пользователю) */
+        int lxx = cx + cw - 10;
+        g_text(lxx, cy, " RU|EN ", 7, C_MUTED, 0);
+        g_fgset(lxx + (g_lang_en ? 4 : 1), cy, 2, C_WHITE, AT_B | AT_U);
+        hit_add(lxx, cy, 7, 1, A_BTN, B_LANG, 0, HV_UL);
+    }
     int lx = cx + 4, lw = qr_side ? cw * 58 / 100 - 6 : cw - 8, y = cy + 2;
     const char *gerr = v->error && *v->error && v->error_field == LF_NONE ? v->error : NULL;
     bool waiting = v->wait_until && now_ms() < v->wait_until;
@@ -7710,143 +8047,146 @@ static void draw_login(int W, int H) {
          * поле, галочка и кнопки видны всегда (av — строк внутри карточки) */
         int av = cy + ch - 1 - y;
         bool roomy = av >= 13, tall = av >= 16;
-        g_ctext(cx, y++, cw, "Astra DS", C_WHITE, AT_B);
+        g_ctext(cx, y++, cw, APP_NAME, C_WHITE, AT_B);
+#ifdef ASTRA_VIDEO
+        g_ctext(cx, y++, cw, TR("с демонстрацией экрана и камерой"), C_MUTED, 0);
+#endif
         if (LG.verr[0]) {
             /* сохранённая ссылка не работает: причина и выбор — повторить, другая ссылка, напрямую, выход */
-            g_ctext(cx, y++, cw, "VLESS не работает", C_RED, AT_B);
+            g_ctext(cx, y++, cw, TR("VLESS не работает"), C_RED, AT_B);
             if (tall) y += lg_para(lx, y, lw, LG.verr, C_TEXT, true) + 1;
             else g_texte(lx, y++, LG.verr, lw, C_TEXT, 0);
             int bw = (lw - 1) / 2;
-            lg_btn(lx, y, bw, "Повторить", 1, B_LG_VRETRY);
-            lg_btn(lx + bw + 1, y, lw - bw - 1, "Выход", 0, B_LG_VQUIT);
+            lg_btn(lx, y, bw, TR("Повторить"), 1, B_LG_VRETRY);
+            lg_btn(lx + bw + 1, y, lw - bw - 1, TR("Выход"), 0, B_LG_VQUIT);
             y += roomy ? 2 : 1;
-            lg_label(lx, y++, lw, "Другая ссылка vless://", LG.err_link);
+            lg_label(lx, y++, lw, TR("Другая ссылка vless://"), LG.err_link);
             lg_field(lx, y++, lw, &LG.link, LFI_LINK, 2, "vless://...");
             if (roomy) {
                 y++;
-                lg_btn(lx, y, lw, "Подключить", 0, B_LG_VCHECK);
+                lg_btn(lx, y, lw, TR("Подключить"), 0, B_LG_VCHECK);
                 y += 2;
-                lg_btn(lx, y, lw, "Без VLESS: напрямую (Discord увидит ваш IP)", 0, B_LG_VSKIP);
+                lg_btn(lx, y, lw, TR("Без VLESS: напрямую (Discord увидит ваш IP)"), 0, B_LG_VSKIP);
             } else {
-                lg_btn(lx, y, bw, "Подключить", 0, B_LG_VCHECK);
-                lg_btn(lx + bw + 1, y, lw - bw - 1, "Без VLESS", 0, B_LG_VSKIP);
+                lg_btn(lx, y, bw, TR("Подключить"), 0, B_LG_VCHECK);
+                lg_btn(lx + bw + 1, y, lw - bw - 1, TR("Без VLESS"), 0, B_LG_VSKIP);
             }
             break;
         }
-        if (av >= 9) g_ctext(cx, y++, cw, "Подключение", C_MUTED, AT_B);
-        if (tall) y += lg_para(lx, y, lw, "Весь трафик Astra DS (сообщения, голос) может идти через ваш сервер VLESS (Reality). Ссылка проверяется сразу: пробный запрос к Discord через туннель.", C_MUTED, true) + 1;
-        lg_label(lx, y++, lw, "Ссылка vless://", lg_link_err());
+        if (av >= 9) g_ctext(cx, y++, cw, TR("Подключение"), C_MUTED, AT_B);
+        if (tall) y += lg_para(lx, y, lw, TR("Весь трафик Astra DS (сообщения, голос) может идти через ваш сервер VLESS (Reality). Ссылка проверяется сразу: пробный запрос к Discord через туннель."), C_MUTED, true) + 1;
+        lg_label(lx, y++, lw, TR("Ссылка vless://"), lg_link_err());
         lg_field(lx, y++, lw, &LG.link, LFI_LINK, 2, "vless://...");
-        if (roomy) { g_text(lx, y++, "на экране ссылка не показывается: только звёздочки", lw, C_MUTED, 0); y++; }
+        if (roomy) { g_text(lx, y++, TR("на экране ссылка не показывается: только звёздочки"), lw, C_MUTED, 0); y++; }
         {
             /* галочка «Больше не спрашивать при запуске» — пункт Tab, пробел/Enter/щелчок переключают */
             bool f = lg_focused();
             g_text(lx, y, LG.noask ? "[x]" : "[ ]", 3, f ? C_WHITE : C_TEXT, AT_B);
-            g_texte(lx + 4, y, "Больше не спрашивать при запуске", lw - 4, f ? C_WHITE : C_TEXT, f ? AT_U : 0);
+            g_texte(lx + 4, y, TR("Больше не спрашивать при запуске"), lw - 4, f ? C_WHITE : C_TEXT, f ? AT_U : 0);
             hit_add(lx, y, lw, 1, A_BTN, B_LG_NOASK, 0, HV_UL);
             lg_item(1000 + B_LG_NOASK);
             y += roomy ? 2 : 1;
         }
         {
             int bw = (lw - 1) / 2;
-            lg_btn(lx, y, bw, "Подключить", 1, B_LG_VCHECK);
-            lg_btn(lx + bw + 1, y, lw - bw - 1, "Без VLESS", 0, B_LG_VSKIP);
+            lg_btn(lx, y, bw, TR("Подключить"), 1, B_LG_VCHECK);
+            lg_btn(lx + bw + 1, y, lw - bw - 1, TR("Без VLESS"), 0, B_LG_VSKIP);
             y++;
-            if (tall) g_ctext(lx, ++y, lw, "без VLESS Discord увидит ваш IP; вернуть вопрос: --vless или Настройки", C_MUTED, 0);
+            if (tall) y += lg_para(lx, y + 1, lw, TR("без VLESS Discord увидит ваш IP; вернуть вопрос: --vless или Настройки"), C_MUTED, true);
         }
         break;
     }
     case LS_FORM: case LS_CAPTCHA:
         if (scr == LS_FORM) {
-            g_ctext(lx, y++, lw, "С возвращением!", C_WHITE, AT_B);
-            g_ctext(lx, y++, lw, "Мы так рады видеть вас снова!", C_MUTED, 0);
+            g_ctext(lx, y++, lw, TR("С возвращением!"), C_WHITE, AT_B);
+            g_ctext(lx, y++, lw, TR("Мы так рады видеть вас снова!"), C_MUTED, 0);
             if (gerr) g_texte(lx, y, gerr, lw, C_RED, 0);
             y++;
-            lg_label(lx, y++, lw, "Адрес электронной почты или номер телефона", v->err_login);
+            lg_label(lx, y++, lw, TR("Адрес электронной почты или номер телефона"), v->err_login);
             lg_field(lx, y++, lw, &LG.user, LFI_USER, 0, NULL);
             y++;
-            lg_label(lx, y++, lw, "Пароль", v->err_pass);
+            lg_label(lx, y++, lw, TR("Пароль"), v->err_pass);
             lg_field(lx, y++, lw, &LG.pass, LFI_PASS, 1, NULL);
-            lg_btn(lx, y++, lw, "Забыли пароль?", 4, B_LG_FORGOT);
+            lg_btn(lx, y++, lw, TR("Забыли пароль?"), 4, B_LG_FORGOT);
             y++;
-            lg_btn(lx, y, lw, busyst ? (v->busy_text && *v->busy_text ? v->busy_text : "Вход...") : "Вход", busyst || waiting ? 5 : 1, B_LG_LOGIN);
+            lg_btn(lx, y, lw, busyst ? (v->busy_text && *v->busy_text ? v->busy_text : TR("Вход...")) : TR("Вход"), busyst || waiting ? 5 : 1, B_LG_LOGIN);
             y += 2;
-            int u = g_text(lx, y, "Нужна учётная запись? ", lw, C_MUTED, 0);
-            lg_btn(lx + u, y, lw - u, "Зарегистрироваться", 4, B_LG_REGISTER);
-            if (!qr_side) { y += 2; lg_btn(lx, y, lw, "Войти с помощью QR-кода", 0, B_LG_QRSHOW); }
+            int u = g_text(lx, y, TR("Нужна учётная запись? "), lw, C_MUTED, 0);
+            lg_btn(lx + u, y, lw - u, TR("Зарегистрироваться"), 4, B_LG_REGISTER);
+            if (!qr_side) { y += 2; lg_btn(lx, y, lw, TR("Войти с помощью QR-кода"), 0, B_LG_QRSHOW); }
         } else {
-            g_ctext(lx, y++, lw, "Подтвердите, что вы человек", C_WHITE, AT_B);
+            g_ctext(lx, y++, lw, TR("Подтвердите, что вы человек"), C_WHITE, AT_B);
             y++;
             bool cap_ok = false;
 #ifdef LOGIN_CAPTCHA_UI
             cap_ok = v->captcha_supported;
 #endif
-            const char *ct = cap_ok ? "Discord просит пройти проверку (hCaptcha). Она откроется в отдельном окне только на время проверки."
-                                    : "Discord просит пройти капчу (hCaptcha). Здесь её не показать: нужен компонент WebView2 (Windows).";
+            const char *ct = cap_ok ? TR("Discord просит пройти проверку (hCaptcha). Она откроется в отдельном окне только на время проверки.")
+                                    : TR("Discord просит пройти капчу (hCaptcha). Здесь её не показать: нужен компонент WebView2 (Windows).");
             y += lg_para(lx, y, lw, v->notice && *v->notice ? v->notice : ct, C_TEXT, false) + 1;
             if (gerr) y += lg_para(lx, y, lw, gerr, C_RED, false) + 1;   /* «Discord не принял проверку...» */
-            y += lg_para(lx, y, lw, cap_ok ? "Или войдите по QR-коду: откройте Discord на телефоне, Настройки -> Сканировать QR-код."
-                                           : "Войдите по QR-коду: откройте Discord на телефоне, Настройки -> Сканировать QR-код.", C_MUTED, false) + 1;
+            y += lg_para(lx, y, lw, cap_ok ? TR("Или войдите по QR-коду: откройте Discord на телефоне, Настройки -> Сканировать QR-код.")
+                                           : TR("Войдите по QR-коду: откройте Discord на телефоне, Настройки -> Сканировать QR-код."), C_MUTED, false) + 1;
             y += lg_captcha_ui(v, lx, y, lw, false);
-            if (!qr_side) { lg_btn(lx, y, lw, "Войти с помощью QR-кода", 1, B_LG_QRSHOW); y += 2; }
-            lg_btn(lx, y, lw, "Назад", 0, B_LG_BACK);
+            if (!qr_side) { lg_btn(lx, y, lw, TR("Войти с помощью QR-кода"), 1, B_LG_QRSHOW); y += 2; }
+            lg_btn(lx, y, lw, TR("Назад"), 0, B_LG_BACK);
         }
         if (qr_side) {
             int qx = cx + cw * 58 / 100, qw = cw - (qx - cx) - 3;
             for (int yy = cy + 2; yy < cy + ch - 2; yy++) g_ch(qx - 2, yy, '|', C_LINE, 0);
-            if (!lg_qr_col(v, qx, cy + 2, qw, ch - 4)) g_ctext(qx, cy + ch / 2, qw, "QR-код не влезает: растяните окно", C_MUTED, 0);
+            if (!lg_qr_col(v, qx, cy + 2, qw, ch - 4)) g_ctext(qx, cy + ch / 2, qw, TR("QR-код не влезает: растяните окно"), C_MUTED, 0);
         }
         break;
     case LS_QR:
-        if (!lg_qr_col(v, lx, cy + 1, lw, ch - 4)) lg_para(lx, y + 2, lw, "QR-код не влезает: растяните окно (в терминале нужно от 86x45 клеток) или уменьшите шрифт.", C_MUTED, true);
-        lg_btn(lx, cy + ch - 2, 0, "Назад (Esc)", 0, B_LG_BACK);
+        if (!lg_qr_col(v, lx, cy + 1, lw, ch - 4)) lg_para(lx, y + 2, lw, TR("QR-код не влезает: растяните окно (в терминале нужно от 86x45 клеток) или уменьшите шрифт."), C_MUTED, true);
+        lg_btn(lx, cy + ch - 2, 0, TR("Назад (Esc)"), 0, B_LG_BACK);
         break;
     case LS_MFA: case LS_PHONE: {
         int kind = scr == LS_PHONE ? 1 : v->mfa_method == LM_SMS ? 1 : v->mfa_method == LM_BACKUP ? 2 : 0;
         static const char *const ttl[3] = { "Введите код из приложения аутентификации.", "Введите код из SMS.", "Введите один из резервных кодов (8 символов)." };
         char sm[120];
-        g_ctext(cx, y++, cw, scr == LS_PHONE ? "Подтвердите новое место входа" : "Многофакторная аутентификация", C_WHITE, AT_B);
-        if (kind == 1 && v->sms_sent) { snprintf(sm, sizeof sm, "Код отправлен на %s.", v->phone && *v->phone ? v->phone : "ваш телефон"); y += lg_para(lx, y, lw, sm, C_MUTED, true); }
-        else y += lg_para(lx, y, lw, ttl[kind], C_MUTED, true);
+        g_ctext(cx, y++, cw, scr == LS_PHONE ? TR("Подтвердите новое место входа") : TR("Многофакторная аутентификация"), C_WHITE, AT_B);
+        if (kind == 1 && v->sms_sent) { snprintf(sm, sizeof sm, TR("Код отправлен на %s."), v->phone && *v->phone ? v->phone : TR("ваш телефон")); y += lg_para(lx, y, lw, sm, C_MUTED, true); }
+        else y += lg_para(lx, y, lw, tr(ttl[kind]), C_MUTED, true);
         if (gerr) g_texte(lx, y, gerr, lw, C_RED, 0);
         y++;
-        lg_label(lx, y++, lw, kind == 2 ? "Резервный код" : "Код (6 цифр)", v->err_code);
+        lg_label(lx, y++, lw, kind == 2 ? TR("Резервный код") : TR("Код (6 цифр)"), v->err_code);
         lg_field(lx, y++, lw, &LG.code, LFI_CODE, 0, kind == 2 ? "xxxx-xxxx" : "123456");
         y++;
-        lg_btn(lx, y, lw, busyst ? (v->busy_text && *v->busy_text ? v->busy_text : "Проверка кода...") : "Подтвердить", busyst ? 5 : 1, B_LG_CODE);
+        lg_btn(lx, y, lw, busyst ? (v->busy_text && *v->busy_text ? v->busy_text : TR("Проверка кода...")) : TR("Подтвердить"), busyst ? 5 : 1, B_LG_CODE);
         y += 2;
         if (scr == LS_MFA) {
-            if ((v->mfa_methods & LM_SMS) && kind != 1) lg_btn(lx, y++, lw, "Отправить код по SMS", 4, B_LG_SMS);
-            if (kind == 1 && v->sms_sent) lg_btn(lx, y++, lw, "Отправить SMS ещё раз", 4, B_LG_SMSAGAIN);
-            if ((v->mfa_methods & LM_BACKUP) && kind != 2) lg_btn(lx, y++, lw, "Использовать резервный код", 4, B_LG_BACKUP);
-            if ((v->mfa_methods & LM_TOTP) && kind != 0) lg_btn(lx, y++, lw, "Код из приложения аутентификации", 4, B_LG_TOTP);
+            if ((v->mfa_methods & LM_SMS) && kind != 1) lg_btn(lx, y++, lw, TR("Отправить код по SMS"), 4, B_LG_SMS);
+            if (kind == 1 && v->sms_sent) lg_btn(lx, y++, lw, TR("Отправить SMS ещё раз"), 4, B_LG_SMSAGAIN);
+            if ((v->mfa_methods & LM_BACKUP) && kind != 2) lg_btn(lx, y++, lw, TR("Использовать резервный код"), 4, B_LG_BACKUP);
+            if ((v->mfa_methods & LM_TOTP) && kind != 0) lg_btn(lx, y++, lw, TR("Код из приложения аутентификации"), 4, B_LG_TOTP);
         }
-        lg_btn(lx, y++, lw, "Назад к входу", 4, B_LG_BACK);
+        lg_btn(lx, y++, lw, TR("Назад к входу"), 4, B_LG_BACK);
         break;
     }
     case LS_EMAIL:
-        g_ctext(cx, y++, cw, "Проверьте почту", C_WHITE, AT_B);
-        g_ctext(cx, y++, cw, "Подтвердите новое место входа", C_TEXT, AT_B);
+        g_ctext(cx, y++, cw, TR("Проверьте почту"), C_WHITE, AT_B);
+        g_ctext(cx, y++, cw, TR("Подтвердите новое место входа"), C_TEXT, AT_B);
         y++;
-        y += lg_para(lx, y, lw, v->notice && *v->notice ? v->notice : "Discord заметил вход из нового места и отправил письмо на вашу почту. Откройте его, нажмите \"Подтвердить вход\", затем вернитесь сюда и нажмите \"Повторить\".", C_MUTED, true) + 1;
-        if (v->err_code && *v->err_code) lg_label(lx, y++, lw, "Ссылка из письма", v->err_code);
-        else g_text(lx, y++, "Или вставьте ссылку из письма", lw, C_TEXT, AT_B);   /* необязательное: без «*» */
+        y += lg_para(lx, y, lw, v->notice && *v->notice ? v->notice : TR("Discord заметил вход из нового места и отправил письмо на вашу почту. Откройте его, нажмите \"Подтвердить вход\", затем вернитесь сюда и нажмите \"Повторить\"."), C_MUTED, true) + 1;
+        if (v->err_code && *v->err_code) lg_label(lx, y++, lw, TR("Ссылка из письма"), v->err_code);
+        else g_text(lx, y++, TR("Или вставьте ссылку из письма"), lw, C_TEXT, AT_B);   /* необязательное: без «*» */
         lg_field(lx, y++, lw, &LG.code, LFI_CODE, 0, "https://discord.com/...");
         y++;
-        lg_btn(lx, y, lw, busyst ? "Вход..." : "Повторить", busyst ? 5 : 1, B_LG_RETRY);
+        lg_btn(lx, y, lw, busyst ? TR("Вход...") : TR("Повторить"), busyst ? 5 : 1, B_LG_RETRY);
         y += 2;
-        lg_btn(lx, y, lw, "Назад к входу", 4, B_LG_BACK);
+        lg_btn(lx, y, lw, TR("Назад к входу"), 4, B_LG_BACK);
         break;
     case LS_UNDEL:
-        g_ctext(cx, y++, cw, "Аккаунт отключён", C_WHITE, AT_B);
+        g_ctext(cx, y++, cw, TR("Аккаунт отключён"), C_WHITE, AT_B);
         y++;
-        y += lg_para(lx, y, lw, v->notice && *v->notice ? v->notice : "Аккаунт отключён или помечен к удалению.", C_TEXT, true) + 1;
-        lg_btn(lx, y, lw, "Восстановить и войти", busyst ? 5 : 1, B_LG_UNDEL);
+        y += lg_para(lx, y, lw, v->notice && *v->notice ? v->notice : TR("Аккаунт отключён или помечен к удалению."), C_TEXT, true) + 1;
+        lg_btn(lx, y, lw, TR("Восстановить и войти"), busyst ? 5 : 1, B_LG_UNDEL);
         y += 2;
-        lg_btn(lx, y, lw, "Назад к входу", 4, B_LG_BACK);
+        lg_btn(lx, y, lw, TR("Назад к входу"), 4, B_LG_BACK);
         break;
     case LS_QRSCAN: {
-        g_ctext(cx, y++, cw, "Проверьте телефон", C_WHITE, AT_B);
+        g_ctext(cx, y++, cw, TR("Проверьте телефон"), C_WHITE, AT_B);
         y++;
         int ax = cx + (cw - 6) / 2;
         u64 uid = v->qr_user_id;
@@ -7858,9 +8198,9 @@ static void draw_login(int W, int H) {
         int cn = lg_captcha_ui(v, lx, y, lw, true);
         if (cn) y += cn + 1;
         else if (v->qr_text && *v->qr_text) y += lg_para(lx, y, lw, v->qr_text, C_GOLD, true) + 1;
-        else y += lg_para(lx, y, lw, "Подтвердите вход в мобильном приложении Discord.", C_MUTED, true) + 1;
-        int u = g_text(lx + (lw - 26) / 2, y, "Не вы? ", lw, C_MUTED, 0);
-        lg_btn(lx + (lw - 26) / 2 + u, y, lw - u, "Начать заново", 4, B_LG_RESTART);
+        else y += lg_para(lx, y, lw, TR("Подтвердите вход в мобильном приложении Discord."), C_MUTED, true) + 1;
+        int u = g_text(lx + (lw - 26) / 2, y, TR("Не вы? "), lw, C_MUTED, 0);
+        lg_btn(lx + (lw - 26) / 2 + u, y, lw - u, TR("Начать заново"), 4, B_LG_RESTART);
         break;
     }
     default: break;
@@ -7874,9 +8214,9 @@ static void draw_login(int W, int H) {
     if (LG.foc >= LG.nitems) LG.foc = LG.nitems ? LG.nitems - 1 : 0;
     /* под карточкой: проверка/ожидание, уведомление или подсказка клавиш */
     const char *hint = U.busy[0] ? U.busy : busyst && v->busy_text && *v->busy_text ? v->busy_text :
-                       v->route_wait ? "ожидание VLESS: туннель не отвечает" : LG.note[0] ? LG.note :
-                       scr == LS_VLESS ? (W < 64 ? "Tab - выбор  Enter - нажать  Ctrl+Q - выход" : "Tab - поле или кнопка  Enter/пробел - нажать  Ctrl+Q - выход") :
-                       "Tab - следующее поле  Enter - далее  Esc - назад  Ctrl+Q - выход";
+                       v->route_wait ? TR("ожидание VLESS: туннель не отвечает") : LG.note[0] ? LG.note :
+                       scr == LS_VLESS ? (W < 64 ? TR("Tab - выбор  Enter - нажать  Ctrl+Q - выход") : TR("Tab - поле или кнопка  Enter/пробел - нажать  Ctrl+Q - выход")) :
+                       TR("Tab - следующее поле  Enter - далее  Esc - назад  Ctrl+Q - выход");
     bool loud = hint != NULL && strncmp(hint, "Tab", 3);
     char hd[220];
     deco_ascii(hint, hd, sizeof hd);
@@ -7897,20 +8237,20 @@ static void lg_go(int id) {
         while (a < b && LG.link.p[a] == ' ') a++;
         while (b > a && LG.link.p[b - 1] == ' ') b--;
         LG.err_link[0] = 0;
-        if (b - a < 9 || strncmp(LG.link.p + a, "vless://", 8)) { snprintf(LG.err_link, sizeof LG.err_link, "ссылка должна начинаться с vless://"); return; }
-        if (O.demo) snprintf(LG.note, sizeof LG.note, "VLESS работает, 85 мс (демо)");
+        if (b - a < 9 || strncmp(LG.link.p + a, "vless://", 8)) { snprintf(LG.err_link, sizeof LG.err_link, TR("ссылка должна начинаться с vless://")); return; }
+        if (O.demo) snprintf(LG.note, sizeof LG.note, TR("VLESS работает, 85 мс (демо)"));
         else {
             char *lk = xmalloc(b - a + 1), err[200] = "";
             memcpy(lk, LG.link.p + a, b - a);
             lk[b - a] = 0;
             int ms = -1;
-            busy("проверка ссылки...");
+            busy(TR("проверка ссылки..."));
             bool ok = vless_set_link(lk, err, sizeof err, &ms);
             busy(NULL);
             wipe(lk, b - a);
             free(lk);
-            if (!ok) { char *e = san(err[0] ? err : "туннель не отвечает", false); snprintf(LG.err_link, sizeof LG.err_link, "не подошла: %s", e); free(e); return; }
-            snprintf(LG.note, sizeof LG.note, "VLESS работает, %d мс", ms);
+            if (!ok) { char *e = san(err[0] ? err : TR("туннель не отвечает"), false); snprintf(LG.err_link, sizeof LG.err_link, TR("не подошла: %s"), e); free(e); return; }
+            snprintf(LG.note, sizeof LG.note, TR("VLESS работает, %d мс"), ms);
         }
         buf_wipe(&LG.link);
         startup_direct_set(false);               /* ссылка есть — «напрямую» больше не действует (пропадёт ссылка — вопрос) */
@@ -7928,12 +8268,12 @@ static void lg_go(int id) {
     case B_LG_NOASK: LG.noask = !LG.noask; break;
     case B_LG_VQUIT: g_quit = true; break;
     case B_LG_VRETRY: {
-        if (O.demo) { snprintf(LG.verr, sizeof LG.verr, "демо: повтор не помог (туннель не отвечает)"); break; }
-        busy("переподключение...");
+        if (O.demo) { snprintf(LG.verr, sizeof LG.verr, TR("демо: повтор не помог (туннель не отвечает)")); break; }
+        busy(TR("переподключение..."));
         bool ok = vless_restart();
         busy(NULL);
         if (ok) { LG.verr[0] = 0; LG.vless = false; if (LG.vonly) { LG.on = false; U.full = U.dirty = true; } }
-        else { char *e = san(streamer_on() ? "" : vless_error(), false); snprintf(LG.verr, sizeof LG.verr, "%s", *e ? e : "туннель не отвечает"); free(e); }
+        else { char *e = san(streamer_on() ? "" : vless_error(), false); snprintf(LG.verr, sizeof LG.verr, "%s", *e ? e : TR("туннель не отвечает")); free(e); }
         break;
     }
     case B_LG_LOGIN: {
@@ -7948,8 +8288,8 @@ static void lg_go(int id) {
         LG.want_err_focus = true;                /* ошибка сразу (пустое поле) или после ответа */
         break;
     }
-    case B_LG_FORGOT: snprintf(LG.note, sizeof LG.note, "восстановление пароля - на discord.com (в Astra DS нет)"); break;
-    case B_LG_REGISTER: snprintf(LG.note, sizeof LG.note, "регистрация - на discord.com (в Astra DS нет)"); break;
+    case B_LG_FORGOT: snprintf(LG.note, sizeof LG.note, TR("восстановление пароля - на discord.com (в Astra DS нет)")); break;
+    case B_LG_REGISTER: snprintf(LG.note, sizeof LG.note, TR("регистрация - на discord.com (в Astra DS нет)")); break;
     case B_LG_QRSHOW: case B_LG_QRGO: LG.qr_full = true; LG.foc = 0; break;
     case B_LG_BACK:
         if (LG.qr_full) LG.qr_full = false;
@@ -8031,6 +8371,8 @@ static void login_mouse(const Key *k) {
     if (!h || k->button != 1) return;
     if (h->act == A_INPUT && h->arg >= 1000) {
         for (int i = 0; i < LG.nitems; i++) if (LG.items[i] == h->arg - 1000) LG.foc = i;
+    } else if (h->act == A_BTN && h->sub == B_LANG) {
+        lang_set(!g_lang_en);
     } else if (h->act == A_BTN) {
         for (int i = 0; i < LG.nitems; i++) if (LG.items[i] == 1000 + h->sub) LG.foc = i;
         lg_go(h->sub);
@@ -8041,6 +8383,7 @@ static void login_mouse(const Key *k) {
 void ui_login_begin(bool vless_step) {
     LG.on = true;
     LG.vless = vless_step;
+    LG.vonly = false;                            /* «только VLESS» ставит ui_vless_begin; обычный вход его не наследует */
     LG.qr_full = LG.qr_req = false;
     LG.scr = vless_step ? LS_VLESS : LS_FORM;
     LG.foc = 0;
@@ -8301,15 +8644,15 @@ static void draw_captcha(int W, int H) {
     const char *ln[5];
     int n = 0, nb = 0;
     CBtn b[2];
-    snprintf(l1, sizeof l1, "Discord просит проверку: %s", cs->what[0] ? cs->what : "запрос к Discord");
-    ln[n++] = "Подтвердите, что вы человек";
+    snprintf(l1, sizeof l1, TR("Discord просит проверку: %s"), cs->what[0] ? cs->what : TR("запрос к Discord"));
+    ln[n++] = TR("Подтвердите, что вы человек");
     ln[n++] = l1;
     if (cs->error[0]) { char *e = san(cs->error, false); deco_ascii(e, er, sizeof er); free(e); ln[n++] = er; }
-    if (cs->open) ln[n++] = "Окно проверки открыто - пройдите её там";
+    if (cs->open) ln[n++] = TR("Окно проверки открыто - пройдите её там");
     else {
-        ln[n++] = "запрос подождёт: после проверки он уйдёт сам";
-        b[nb++] = (CBtn){ "Отмена (Esc)", B_CAP_NO, 0 };
-        if (cs->supported) b[nb++] = (CBtn){ "Пройти проверку (Enter)", B_CAP_GO, 1 };
+        ln[n++] = TR("запрос подождёт: после проверки он уйдёт сам");
+        b[nb++] = (CBtn){ TR("Отмена (Esc)"), B_CAP_NO, 0 };
+        if (cs->supported) b[nb++] = (CBtn){ TR("Пройти проверку (Enter)"), B_CAP_GO, 1 };
     }
     ovl_cut(0, 0, W, H);
     hit_add(0, 0, W, H, A_BLOCK, 0, 0, 0);
@@ -8349,7 +8692,7 @@ static void render(void) {
         else if (U.help) { draw_help(W, H); draw_status(0, W, H - 1); }
         else if (U.settings) draw_settings(W, H);
         else draw_main(W, H);
-        if (!LG.on) { if (tm_on) draw_tmembers(W, H); if (AVB.uid) draw_avbig(W, H); else if (IV.on && !U.help && !U.settings) draw_iv(W, H); if (CSEL.on && !U.help && !U.settings) draw_comp_sel(W, H); if (reactors_state() && reactors_state()->on) draw_rv(W, H); draw_form(W, H); draw_captcha(W, H); }
+        if (!LG.on) { if (tm_on) draw_tmembers(W, H); if (rules_on) draw_rules(W, H); if (upd_on) draw_update(W, H); if (AVB.uid) draw_avbig(W, H); else if (IV.on && !U.help && !U.settings) draw_iv(W, H); if (CSEL.on && !U.help && !U.settings) draw_comp_sel(W, H); if (reactors_state() && reactors_state()->on) draw_rv(W, H); draw_form(W, H); draw_captcha(W, H); }
         hover_paint();
     }
     Buf *f = &U.frame;
@@ -8479,8 +8822,8 @@ static void move_row(int d) {
 static void join_voice(const Channel *c) {
     VoiceStatus vs;
     voice_status(&vs);
-    if (vs.phase != VS_IDLE && vs.channel_id == c->id) { ui_notice("вы уже в этом канале; F7 - отключиться"); return; }
-    if (!c->can_connect) { ui_notice("нет права подключаться к этому каналу"); return; }
+    if (vs.phase != VS_IDLE && vs.channel_id == c->id) { ui_notice(TR("вы уже в этом канале; F7 - отключиться")); return; }
+    if (!c->can_connect) { ui_notice(TR("нет права подключаться к этому каналу")); return; }
     voice_join(c->guild_id, c->id);
 }
 static void activate_row(void) {
@@ -8515,7 +8858,7 @@ static void chan_step(int d, bool unread) {
         open_channel(c->id);
         return;
     }
-    if (unread) ui_notice("непрочитанных каналов %s нет", d > 0 ? "ниже" : "выше");
+    if (unread) ui_notice(TR("непрочитанных каналов %s нет"), d > 0 ? TR("ниже") : TR("выше"));
 }
 static void submit(void) {
     if (U.mode == M_REACT) {
@@ -8535,7 +8878,8 @@ static void submit(void) {
     }
     {
         const Channel *dc = chan_find(S.open_ch);
-        if (dc && is_thread(dc) && (dc->tflags & TF_DELETED)) { ui_notice("эту ветку удалили"); return; }
+        if (dc && is_thread(dc) && (dc->tflags & TF_DELETED)) { ui_notice(TR("эту ветку удалили")); return; }
+        if (dc && dc->guild_id && guild_find(dc->guild_id) && guild_find(dc->guild_id)->pending && U.mode != M_EDIT) { ui_notice(TR("сначала примите правила сервера")); return; }
     }
     if (U.mode != M_EDIT && S.open_ch) {
         SendLimit sl;
@@ -8543,7 +8887,7 @@ static void submit(void) {
         if (sl.timeout_until || sl.slow_until) {
             char w[64];
             send_wait_text(sl.timeout_until ? sl.timeout_until : sl.slow_until, sl.timeout_until != 0, w, sizeof w);
-            ui_notice("%s - текст остался в поле", w);
+            ui_notice(TR("%s - текст остался в поле"), w);
             return;
         }
     }
@@ -8562,7 +8906,7 @@ static void submit(void) {
 static void call_dm(void) {
     Channel *c = chan_find(S.open_ch);
     if (U.focus == F_CHANNELS && U.sel_row >= 0 && U.sel_row < U.nrows) c = chan_find(U.rows[U.sel_row].id);
-    if (!c || c->guild_id) { ui_notice("звонок - из личной переписки"); return; }
+    if (!c || c->guild_id) { ui_notice(TR("звонок - из личной переписки")); return; }
     call_start(c->id);                          /* op 4, звонок собеседнику — после CALL_CREATE (store.c) */
 }
 static void voice_keys(const Key *k) {
@@ -8570,9 +8914,9 @@ static void voice_keys(const Key *k) {
     case K_F5: voice_toggle_mute(); break;
     case K_F6: voice_toggle_deaf(); break;
     case K_F7: voice_leave(); break;
-    case K_F8: if (O.ptt) { static bool on; on = !on; voice_ptt(on); ui_notice(on ? "рация: передача" : "рация: молчание"); } else ui_notice("рация включается флагом --ptt"); break;
-    case K_F9: voice_vad_adjust(-3); ui_notice("порог голоса: %d дБ", voice_vad_db()); break;
-    case K_F10: voice_vad_adjust(3); ui_notice("порог голоса: %d дБ", voice_vad_db()); break;
+    case K_F8: if (O.ptt) { static bool on; on = !on; voice_ptt(on); ui_notice(on ? TR("рация: передача") : TR("рация: молчание")); } else ui_notice(TR("рация включается флагом --ptt")); break;
+    case K_F9: voice_vad_adjust(-3); ui_notice(TR("порог голоса: %d дБ"), voice_vad_db()); break;
+    case K_F10: voice_vad_adjust(3); ui_notice(TR("порог голоса: %d дБ"), voice_vad_db()); break;
     case K_F2:
         if (S.call.ringing) { voice_join(0, S.call.channel_id); S.call.ringing = false; }
         break;
@@ -8590,8 +8934,8 @@ static void fx_cycle(void) {
     VoiceFx fx = voicefx_get();
     VoiceStatus vs;
     voice_status(&vs);
-    ui_notice("смена голоса: %s%s", fx == VFX_LOW ? "ниже" : fx == VFX_HIGH ? "выше" : "выкл, ваш голос как есть",
-              fx != VFX_OFF && vs.phase == VS_IDLE ? " (включится в звонке)" : "");
+    ui_notice(TR("смена голоса: %s%s"), fx == VFX_LOW ? TR("ниже") : fx == VFX_HIGH ? TR("выше") : TR("выкл, ваш голос как есть"),
+              fx != VFX_OFF && vs.phase == VS_IDLE ? TR(" (включится в звонке)") : "");
 }
 
 /* ---- VLESS: окно «нет связи» ---- */
@@ -8630,12 +8974,12 @@ static void vl_leave(void) {
     U.focus = U.prev_focus;
 }
 static void vl_restart(void) {
-    busy("переподключение...");
+    busy(TR("переподключение..."));
     bool ok = vless_restart();
     busy(NULL);
     U.vl_note[0] = 0;
-    if (ok) ui_notice("VLESS снова работает, %d мс", vless_latency_ms());
-    else ui_notice("VLESS: переподключиться не удалось");
+    if (ok) ui_notice(TR("VLESS снова работает, %d мс"), vless_latency_ms());
+    else ui_notice(TR("VLESS: переподключиться не удалось"));
 }
 static void vl_submit_link(void) {
     size_t a = 0, b = U.in.len;
@@ -8645,24 +8989,24 @@ static void vl_submit_link(void) {
     memmove(U.in.p, U.in.p + a, b - a);
     wipe(U.in.p + (b - a), U.in.len - (b - a));  /* хвост после сдвига — тоже куски ссылки */
     U.in.len = b - a;
-    busy("проверка ссылки...");
+    busy(TR("проверка ссылки..."));
     char err[200] = "";
     int ms = -1;
     bool ok = vless_set_link(U.in.p, err, sizeof err, &ms);
     busy(NULL);
     vl_leave();                                  /* затирает буфер со ссылкой */
-    if (ok) { U.vl_note[0] = 0; startup_direct_set(false); ui_notice("VLESS работает, %d мс", ms); }
+    if (ok) { U.vl_note[0] = 0; startup_direct_set(false); ui_notice(TR("VLESS работает, %d мс"), ms); }
     else {
-        char *e = san(err[0] ? err : "причина неизвестна", false);
-        snprintf(U.vl_note, sizeof U.vl_note, "ссылка не подошла: %s", e);
+        char *e = san(err[0] ? err : TR("причина неизвестна"), false);
+        snprintf(U.vl_note, sizeof U.vl_note, TR("ссылка не подошла: %s"), e);
         free(e);
-        if (streamer_on()) ui_notice("VLESS: ссылка не подошла (подробности скрыты)");
+        if (streamer_on()) ui_notice(TR("VLESS: ссылка не подошла (подробности скрыты)"));
         else ui_notice("VLESS: %s", U.vl_note);
     }
 }
 static void vl_off_answer(bool yes) {
     vl_leave();
-    if (yes) { vless_disable(); U.vl_note[0] = 0; ui_notice("VLESS отключён: трафик идёт напрямую"); }
+    if (yes) { vless_disable(); U.vl_note[0] = 0; ui_notice(TR("VLESS отключён: трафик идёт напрямую")); }
 }
 /* R / C / D окна VLESS (и русская раскладка: к / с / в). true — нажатие съедено. */
 static bool vl_card_key(const Key *k) {
@@ -8683,8 +9027,8 @@ static bool vl_card_key(const Key *k) {
 /* «+» в поле ввода или Ctrl+O: строка ввода — путь к файлу, недописанный текст отложен и уйдёт подписью. */
 static void file_enter(void) {
     Channel *c = chan_find(S.open_ch);
-    if (!c) { ui_notice("сначала откройте канал"); return; }
-    if (c->guild_id && !c->can_send) { ui_notice("нет права писать в этот канал"); return; }
+    if (!c) { ui_notice(TR("сначала откройте канал")); return; }
+    if (c->guild_id && !c->can_send) { ui_notice(TR("нет права писать в этот канал")); return; }
     U.file_err[0] = 0;
     vl_enter(M_FILE);
 }
@@ -8692,9 +9036,9 @@ static void file_submit(void) {
     size_t a = 0, b = U.in.len;
     while (a < b && (U.in.p[a] == ' ' || U.in.p[a] == '\t' || U.in.p[a] == '"' || U.in.p[a] == '\'')) a++;
     while (b > a && (U.in.p[b - 1] == ' ' || U.in.p[b - 1] == '\t' || U.in.p[b - 1] == '"' || U.in.p[b - 1] == '\'')) b--;
-    if (a == b) { snprintf(U.file_err, sizeof U.file_err, "укажите путь к файлу"); return; }
+    if (a == b) { snprintf(U.file_err, sizeof U.file_err, TR("укажите путь к файлу")); return; }
     char path[1024], err[200] = "";
-    if (b - a >= sizeof path) { snprintf(U.file_err, sizeof U.file_err, "слишком длинный путь"); return; }
+    if (b - a >= sizeof path) { snprintf(U.file_err, sizeof U.file_err, TR("слишком длинный путь")); return; }
     memcpy(path, U.in.p + a, b - a);
     path[b - a] = 0;
     /* подпись — отложенный черновик без пустых краёв */
@@ -8708,7 +9052,7 @@ static void file_submit(void) {
     wipe(path, sizeof path);
     free(text);
     if (!ok) {
-        char *e = san(err[0] ? err : "причина неизвестна", false);
+        char *e = san(err[0] ? err : TR("причина неизвестна"), false);
         snprintf(U.file_err, sizeof U.file_err, "%s", e);
         free(e);
         return;
@@ -8766,7 +9110,7 @@ static void search_off(void);
 static void rpanel_open(int kind) {
     if (U.rp == kind) { rpanel_close(); return; }
     Channel *c = chan_find(S.open_ch);
-    if (kind == RP_PINS && (!c || is_voice(c))) { ui_notice("закреплённые - в текстовом канале или беседе"); return; }
+    if (kind == RP_PINS && (!c || is_voice(c))) { ui_notice(TR("закреплённые - в текстовом канале или беседе")); return; }
     search_off();
     rpanel_close();
     U.rp = kind;
@@ -8798,7 +9142,7 @@ static void search_off(void) {
 static void search_go(void) {
     Channel *c = chan_find(S.open_ch);
     if (!U.sq[0]) { U.sq_edit = false; return; }
-    if (!c || is_voice(c)) { ui_notice("поиск - из текстового канала или личной беседы"); return; }
+    if (!c || is_voice(c)) { ui_notice(TR("поиск - из текстового канала или личной беседы")); return; }
     search_start(c->guild_id, c->guild_id ? 0 : c->id, U.sq);
     U.sr_open = true;
     U.sr_focus = true;
@@ -8807,7 +9151,7 @@ static void search_go(void) {
 }
 static void search_begin(void) {
     Channel *c = chan_find(S.open_ch);
-    if (!c || is_voice(c) || friends_screen()) { ui_notice("поиск - из текстового канала или личной беседы"); return; }
+    if (!c || is_voice(c) || friends_screen()) { ui_notice(TR("поиск - из текстового канала или личной беседы")); return; }
     U.sq_edit = true;
     U.menu = false;
 }
@@ -8856,11 +9200,11 @@ static void pick_go(void) {
         u64 uid = fr_rels[ix[U.pick_sel]].id, g = pick_gdm;
         char err[160] = "";
         U.pick = false; pick_gdm = 0;
-        if (gdm_add(g, uid, err, sizeof err)) ui_notice("добавлен в группу: %s", user_name(uid));
+        if (gdm_add(g, uid, err, sizeof err)) ui_notice(TR("добавлен в группу: %s"), user_name(uid));
         else if (err[0]) { char *e = san(err, false); ui_notice("%s", e); free(e); }
     }
     else if (U.pick_sel >= 0 && U.pick_sel < n) { u64 uid = fr_rels[ix[U.pick_sel]].id; U.pick = false; dm_open(uid); }
-    else ui_notice("выберите друга");
+    else ui_notice(TR("выберите друга"));
     free(ix);
 }
 static void pick_key(const Key *k) {
@@ -8894,13 +9238,13 @@ static void fr_action(int sub, int idx, int mx, int my) {
     if (sub == FA_ROW) sub = r.type == REL_FRIEND ? FA_MSG : r.type == REL_IN ? FA_ACCEPT : r.type == REL_BLOCKED ? FA_UNBLOCK : -1;
     switch (sub) {
     case FA_MSG: if (r.type == REL_FRIEND) dm_open(r.id); break;
-    case FA_ACCEPT: if (r.type == REL_IN) { rel_accept(r.id); ui_notice("заявка в друзья принята: %s", un(r.id)); } break;
-    case FA_UNBLOCK: if (r.type == REL_BLOCKED) { rel_remove(r.id); ui_notice("разблокирован: %s", un(r.id)); } break;
+    case FA_ACCEPT: if (r.type == REL_IN) { rel_accept(r.id); ui_notice(TR("заявка в друзья принята: %s"), un(r.id)); } break;
+    case FA_UNBLOCK: if (r.type == REL_BLOCKED) { rel_remove(r.id); ui_notice(TR("разблокирован: %s"), un(r.id)); } break;
     case FA_DECLINE:
         if (r.type == REL_FRIEND) { U.mode = M_UNFRIEND; U.target = r.id; }
         else if (r.type == REL_IN || r.type == REL_OUT || r.type == REL_BLOCKED) {
             rel_remove(r.id);
-            ui_notice(r.type == REL_IN ? "заявка отклонена: %s" : r.type == REL_OUT ? "заявка отменена: %s" : "разблокирован: %s", un(r.id));
+            ui_notice(r.type == REL_IN ? TR("заявка отклонена: %s") : r.type == REL_OUT ? TR("заявка отменена: %s") : TR("разблокирован: %s"), un(r.id));
         }
         break;
     case FA_MORE:
@@ -8911,7 +9255,7 @@ static void fr_action(int sub, int idx, int mx, int my) {
         U.menu_y = my;
         U.menu_sel = 0;
         break;
-    default: if (r.type == REL_OUT) ui_notice("заявка отправлена, ждём ответа; Del - отменить"); break;
+    default: if (r.type == REL_OUT) ui_notice(TR("заявка отправлена, ждём ответа; Del - отменить")); break;
     }
 }
 /* Клавиатура на экране «Друзья» (фокус F_MESSAGES). */
@@ -8953,18 +9297,18 @@ static void fm_submit(int bid) {
 #ifdef MC_WAVE2
     if (bid == FB_RETRY) { chan_info_retry(); return; }
 #endif
-    if (FM.loading && bid == FB_OK && (FM.id == FM_GSET || FM.id == FM_CHEDIT)) { snprintf(FM.err, sizeof FM.err, "подождите: текущие значения ещё загружаются"); return; }
+    if (FM.loading && bid == FB_OK && (FM.id == FM_GSET || FM.id == FM_CHEDIT)) { snprintf(FM.err, sizeof FM.err, TR("подождите: текущие значения ещё загружаются")); return; }
     switch (FM.id) {
     case FM_ADDSRV: fm_open(bid == FB_X1 ? FM_JOIN : FM_GCREATE, 0, 0); return;
     case FM_GCREATE: ok = guild_create(FM.f[0].val, FM.f[1].val, err, sizeof err); break;
     case FM_JOIN: {
         char code[64];
-        if (!invite_parse(FM.f[0].val, code, sizeof code)) { snprintf(FM.err, sizeof FM.err, "это не похоже на приглашение"); return; }
+        if (!invite_parse(FM.f[0].val, code, sizeof code)) { snprintf(FM.err, sizeof FM.err, TR("это не похоже на приглашение")); return; }
         invite_open(code);
         fm_reset();               /* не fm_open: он закрыл бы только что открытое приглашение */
         FM.id = FM_JOINCARD;
-        snprintf(FM.title, sizeof FM.title, "Вас пригласили на сервер");
-        fm_btn("Отмена", FB_CANCEL, 0); fm_btn("Вступить на сервер", FB_OK, 1);
+        snprintf(FM.title, sizeof FM.title, TR("Вас пригласили на сервер"));
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Вступить на сервер"), FB_OK, 1);
         FM.foc = 0;                              /* вступление — только щелчком или Tab + пробел */
         return;
     }
@@ -8976,11 +9320,11 @@ static void fm_submit(int bid) {
             /* браузер идёт мимо VLESS: при включённом туннеле — явное подтверждение вторым нажатием */
             if (vless_state() != VL_OFF && !FM.confirm) {
                 FM.confirm = true;
-                snprintf(FM.err, sizeof FM.err, "браузер откроет ссылку мимо VLESS: Discord увидит ваш IP. Нажмите ещё раз");
+                snprintf(FM.err, sizeof FM.err, TR("браузер откроет ссылку мимо VLESS: Discord увидит ваш IP. Нажмите ещё раз"));
                 return;
             }
             FM.confirm = false;
-            if (!invite_open_browser()) snprintf(FM.err, sizeof FM.err, "браузер не открылся");
+            if (!invite_open_browser()) snprintf(FM.err, sizeof FM.err, TR("браузер не открылся"));
             return;
         }
         if (is->busy) return;
@@ -8992,9 +9336,9 @@ static void fm_submit(int bid) {
         return;                                  /* окно остаётся: итог (вступили / ошибка / браузер) — в карточке */
     }
     case FM_INVITE:
-        if (bid == FB_X1) { const char *l = invite_created(); if (l) copy_text(l); else ui_notice("сначала создайте ссылку"); return; }
+        if (bid == FB_X1) { const char *l = invite_created(); if (l) copy_text(l); else ui_notice(TR("сначала создайте ссылку")); return; }
         invite_create(FM.cid, AGE_S[FM.f[0].ch], USES_V[FM.f[1].ch]);
-        snprintf(FM.f[2].val, FM.f[2].cap, "создаётся...");
+        snprintf(FM.f[2].val, FM.f[2].cap, TR("создаётся..."));
         return;
     case FM_GSET:
         if (bid == FB_X1) { u64 g = FM.gid; fm_open(FM_GDELETE, g, 0); return; }
@@ -9006,13 +9350,38 @@ static void fm_submit(int bid) {
     case FM_CHCREATE: {
         Channel *par = chan_find(FM.cid);
         ok = chan_create(FM.gid, FM.f[0].ch ? CHK_VOICE : CHK_TEXT, FM.f[1].val, par && par->type == CH_CATEGORY ? par->id : 0, err, sizeof err);
-        if (ok && FM.f[2].ch) ui_notice("приватность: задайте, кому виден канал, в 'Изменить канал' -> 'Права'");
+        if (ok && FM.f[2].ch) ui_notice(TR("приватность: задайте, кому виден канал, в 'Изменить канал' -> 'Права'"));
         break;
     }
     case FM_CATCREATE: ok = chan_create(FM.gid, CHK_CATEGORY, FM.f[0].val, 0, err, sizeof err); break;
-    case FM_ALERTS: alert_words_set(FM.f[0].val); ui_notice("слова-тревоги сохранены"); break;
-    case FM_FILTER: filter_words_set(FM.f[0].val); ui_notice("фильтр сохранён"); break;
+    case FM_ALERTS: alert_words_set(FM.f[0].val); ui_notice(TR("слова-тревоги сохранены")); break;
+    case FM_FILTER: filter_words_set(FM.f[0].val); ui_notice(TR("фильтр сохранён")); break;
     case FM_FALT: snprintf(file_alt, sizeof file_alt, "%s", FM.f[0].val); break;
+#ifdef ASTRA_VIDEO
+    case FM_SHARE: {
+        int src = FM.f[0].ch;
+        uintptr_t id = src < sh_n ? sh_ids[src] : 0;
+        VoiceStatus v5;
+        voice_status(&v5);
+        ok = share_start(FM.f[1].ch, id, err, sizeof err);
+        if (ok) {
+            sh_running = true;
+            sh_ch = v5.channel_id;
+            sh_prev_streamer = streamer_on();
+            streamer_set(true);
+            ui_notice("%s", TR("трансляция началась: отправка в Discord появится позже, сейчас - только захват и кодирование"));
+        }
+        break;
+    }
+#endif
+    case FM_NOTE: ok = note_set(fm_note_uid, FM.f[0].val, err, sizeof err); if (ok) { note_open(fm_note_uid); ui_notice(TR("заметка сохранена")); } break;
+    case FM_STATUS: {
+        static const u8 ps[4] = { PS_ONLINE, PS_IDLE, PS_DND, PS_INVISIBLE };
+        presence_set_for(ps[FM.f[0].ch & 3], ST_DUR_MIN[FM.f[1].ch]);
+        if (fm_changed(&FM.f[2]) || FM.f[3].ch) ok = custom_status_set(FM.f[2].val, ST_DUR_MIN[FM.f[3].ch], err, sizeof err);
+        if (ok) ui_notice(TR("статус сохранён"));
+        break;
+    }
     case FM_MOD: {
         const char *why = fm_mod_kind <= MOD_BAN ? FM.f[FM.nf - 1].val : "";
         switch (fm_mod_kind) {
@@ -9023,15 +9392,15 @@ static void fm_submit(int bid) {
         case MOD_MOVE: ok = mod_voice_move(FM.gid, fm_mod_uid, mod_rid[FM.f[0].ch], err, sizeof err); break;
         default: ok = mod_voice_mute(FM.gid, fm_mod_uid, FM.f[0].ch != 0, FM.f[1].ch != 0, err, sizeof err); break;
         }
-        if (ok) ui_notice("готово");
+        if (ok) ui_notice(TR("готово"));
         break;
     }
     case FM_TRENAME: ok = thread_edit(FM.cid, FM.f[0].val, -1, -1, err, sizeof err); break;
     case FM_GRENAME: ok = gdm_rename(FM.cid, FM.f[0].val, err, sizeof err); break;
-    case FM_FPOST: ok = forum_post_create(FM.cid, FM.f[0].val, FM.f[1].val, err, sizeof err); if (ok) ui_notice("пост опубликован"); break;
-    case FM_MEPROF: ok = profile_me_set(FM.f[0].val[0] ? FM.f[0].val : NULL, FM.f[1].val[0] ? FM.f[1].val : NULL, err, sizeof err); if (ok) ui_notice("профиль сохранён"); break;
+    case FM_FPOST: ok = forum_post_create(FM.cid, FM.f[0].val, FM.f[1].val, err, sizeof err); if (ok) ui_notice(TR("пост опубликован")); break;
+    case FM_MEPROF: ok = profile_me_set(FM.f[0].val[0] ? FM.f[0].val : NULL, FM.f[1].val[0] ? FM.f[1].val : NULL, err, sizeof err); if (ok) ui_notice(TR("профиль сохранён")); break;
     case FM_VSTATUS: ok = voice_channel_status_set(FM.cid, FM.f[0].val, err, sizeof err); break;
-    case FM_THREAD: ok = thread_create(FM.cid, fm_mid, FM.f[0].val, err, sizeof err); if (ok) ui_notice("ветка создана"); break;
+    case FM_THREAD: ok = thread_create(FM.cid, fm_mid, FM.f[0].val, err, sizeof err); if (ok) ui_notice(TR("ветка создана")); break;
     case FM_CHEDIT: {
         if (bid == FB_X1) { u64 g = FM.gid, c = FM.cid; fm_open(FM_CHDELETE, g, c); return; }
         if (bid == FB_X2) { u64 g = FM.gid, c = FM.cid; fm_open(FM_PERMS, g, c); return; }
@@ -9068,7 +9437,7 @@ static void fm_submit(int bid) {
     case FM_ADDFRIEND: ok = rel_add_name(FM.f[0].val, err, sizeof err); break;
     default: break;
     }
-    if (!ok) { char *e = san(err[0] ? err : "не получилось", false); snprintf(FM.err, sizeof FM.err, "%s", e); free(e); return; }
+    if (!ok) { char *e = san(err[0] ? err : TR("не получилось"), false); snprintf(FM.err, sizeof FM.err, "%s", e); free(e); return; }
     fm_close();
 }
 /* Клавиатура окна-формы (модально). */
@@ -9086,7 +9455,7 @@ static void fm_key(const Key *k) {
     case K_ENTER:
         if (FM.id == FM_JOINCARD) {              /* случайный Enter не вступает на сервер */
             if (FM.foc >= FM.nf && FM.foc - FM.nf < FM.nb && FM.b[FM.foc - FM.nf].id == FB_CANCEL) fm_close();
-            else snprintf(FM.err, sizeof FM.err, "вступление - щелчком по кнопке или Tab и пробел");
+            else snprintf(FM.err, sizeof FM.err, TR("вступление - щелчком по кнопке или Tab и пробел"));
             return;
         }
         if (FM.foc >= FM.nf && FM.foc - FM.nf < FM.nb) fm_submit(FM.b[FM.foc - FM.nf].id);
@@ -9101,7 +9470,7 @@ static void fm_key(const Key *k) {
         if (f && f->kind == FF_TEXT) {
             int nc = 0;
             for (const char *p = f->val; *p; p++) if (((unsigned char)*p & 0xC0) != 0x80) nc++;
-            if (f->maxc && nc >= f->maxc) { snprintf(FM.err, sizeof FM.err, "не больше %d символов", f->maxc); return; }
+            if (f->maxc && nc >= f->maxc) { snprintf(FM.err, sizeof FM.err, TR("не больше %d символов"), f->maxc); return; }
             q_key(f->val, f->cap, k); FM.err[0] = 0;
         }
         return;
@@ -9122,7 +9491,7 @@ static void fm_mouse(const Hit *h) {
 }
 /* Перестановка каналов (меню сервера -> «Переставить каналы»): Alt+Up/Down двигает выбранный канал. */
 static void move_step(int d) {
-    if (U.sel_row < 0 || U.sel_row >= U.nrows || U.rows[U.sel_row].kind != R_CHAN) { ui_notice("выберите канал Up/Down"); return; }
+    if (U.sel_row < 0 || U.sel_row >= U.nrows || U.rows[U.sel_row].kind != R_CHAN) { ui_notice(TR("выберите канал Up/Down")); return; }
     Channel *c = chan_find(U.rows[U.sel_row].id);
     if (!c || !c->guild_id) return;
 #ifdef MC_WAVE2
@@ -9143,23 +9512,24 @@ static void copy_text(const char *s) {
     buf_puts(&b, "\x07");
     term_write(b.p, b.len);
     buf_free(&b);
-    ui_notice("текст скопирован");
+    ui_notice(TR("текст скопирован"));
 }
 /* ---- действия над сообщением (клавиши r/e/d/+ и пункты меню) ---- */
 static void msg_action(Message *m, int what) {
     switch (what) {
     case MI_FX: fx_cycle(); return;
-    case MI_VADDN: voice_vad_adjust(-3); ui_notice("порог голоса: %d дБ", voice_vad_db()); return;
-    case MI_VADUP: voice_vad_adjust(3); ui_notice("порог голоса: %d дБ", voice_vad_db()); return;
+    case MI_VADDN: voice_vad_adjust(-3); ui_notice(TR("порог голоса: %d дБ"), voice_vad_db()); return;
+    case MI_VADUP: voice_vad_adjust(3); ui_notice(TR("порог голоса: %d дБ"), voice_vad_db()); return;
     case MI_HELP: U.help = true; U.help_scroll = 0; U.full = true; return;
     case MI_QUIT: g_quit = true; return;
     case MI_FOCUS30: case MI_FOCUS60: case MI_FOCUS120: {
         int mn = what == MI_FOCUS30 ? 30 : what == MI_FOCUS60 ? 60 : 120;
         focus_set(mn);
-        ui_notice("режим фокуса на %d мин: упоминания - только ЛС и @вы", mn);
+        ui_notice(TR("режим фокуса на %d мин: упоминания - только ЛС и @вы"), mn);
         return;
     }
-    case MI_FOCUSOFF: focus_set(0); ui_notice("режим фокуса выключен"); return;
+    case MI_FOCUSOFF: focus_set(0); ui_notice(TR("режим фокуса выключен")); return;
+    case MI_STATUS_SET: U.menu = false; fm_open(FM_STATUS, 0, 0); fm_mark(); return;
     case MI_ST_ON: case MI_ST_IDLE: case MI_ST_DND: case MI_ST_INV: {
         static const u8 ps[4] = { PS_ONLINE, PS_IDLE, PS_DND, PS_INVISIBLE };
         presence_set(ps[what - MI_ST_ON]);
@@ -9176,7 +9546,7 @@ static void msg_action(Message *m, int what) {
                 g, what == MI_G_INV ? ch : 0);
         return;
     }
-    case MI_G_MOVE: U.moving = !U.moving; U.focus = F_CHANNELS; ui_notice(U.moving ? "перестановка: Up/Down - канал, Alt+Up/Down - переставить, Esc - готово" : "перестановка закончена"); return;
+    case MI_G_MOVE: U.moving = !U.moving; U.focus = F_CHANNELS; ui_notice(U.moving ? TR("перестановка: Up/Down - канал, Alt+Up/Down - переставить, Esc - готово") : TR("перестановка закончена")); return;
     case MI_C_EDIT: case MI_C_PERMS: case MI_C_INV: case MI_C_DEL: {
         Channel *c = chan_find(U.menu_cid);
         if (!c) return;
@@ -9205,7 +9575,7 @@ static void msg_action(Message *m, int what) {
     case MI_GDM_ADD: pick_gdm = U.menu_cid; U.menu = false; pick_open(); return;
     case MI_GDM_LEAVE: {
         char err[160] = "";
-        if (gdm_leave(U.menu_cid, err, sizeof err)) ui_notice("вы покинули группу");
+        if (gdm_leave(U.menu_cid, err, sizeof err)) ui_notice(TR("вы покинули группу"));
         else if (err[0]) { char *e = san(err, false); ui_notice("%s", e); free(e); }
         return;
     }
@@ -9214,7 +9584,7 @@ static void msg_action(Message *m, int what) {
         char e[160] = "";
         if (!c) return;
         bool join = !(c->tflags & TF_JOINED);
-        if (thread_member(c->id, join, e, sizeof e)) ui_notice(join ? "вы вступили в ветку" : "вы покинули ветку");
+        if (thread_member(c->id, join, e, sizeof e)) ui_notice(join ? TR("вы вступили в ветку") : TR("вы покинули ветку"));
         else if (e[0]) { char *se = san(e, false); ui_notice("%s", se); free(se); }
         return;
     }
@@ -9223,24 +9593,24 @@ static void msg_action(Message *m, int what) {
     case MI_C_ID: { char t[32]; snprintf(t, sizeof t, "%llu", (unsigned long long)U.menu_cid); copy_text(t); return; }
     case MI_FR_MSG: if (rel_find(U.menu_uid)) dm_open(U.menu_uid); return;
     case MI_FR_DEL: if (rel_find(U.menu_uid)) { U.mode = M_UNFRIEND; U.target = U.menu_uid; } return;
-    case MI_FR_UNBLOCK: if (rel_find(U.menu_uid)) { rel_remove(U.menu_uid); ui_notice("разблокирован: %s", un(U.menu_uid)); } return;
+    case MI_FR_UNBLOCK: if (rel_find(U.menu_uid)) { rel_remove(U.menu_uid); ui_notice(TR("разблокирован: %s"), un(U.menu_uid)); } return;
     default: break;
     }
     if (!m) return;
 #ifdef MC_PACKA
     if (what == MI_MRETRY) { msg_retry(m->id); return; }
     if (what == MI_MDISCARD) { msg_discard(m->id); return; }
-    if (m->state != MS_SENT && what != MI_COPY) { ui_notice("сообщение ещё не отправлено: можно повторить, отменить или скопировать"); return; }
+    if (m->state != MS_SENT && what != MI_COPY) { ui_notice(TR("сообщение ещё не отправлено: можно повторить, отменить или скопировать")); return; }
 #endif
     switch (what) {
     case MI_REPLY: U.mode = M_REPLY; U.target = m->id; U.focus = F_INPUT; break;
     case MI_EDIT:
-        if (m->author_id != S.me_id) { ui_notice("изменять можно только свои сообщения"); return; }
-        if (!edit_src(m)) { ui_notice("текст этого сообщения недоступен для правки"); return; }
+        if (m->author_id != S.me_id) { ui_notice(TR("изменять можно только свои сообщения")); return; }
+        if (!edit_src(m)) { ui_notice(TR("текст этого сообщения недоступен для правки")); return; }
         U.mode = M_EDIT; U.target = m->id; edit_set(edit_src(m)); U.focus = F_INPUT;
         break;
     case MI_DELETE:
-        if (m->author_id != S.me_id) { ui_notice("удалять можно только свои сообщения"); return; }
+        if (m->author_id != S.me_id) { ui_notice(TR("удалять можно только свои сообщения")); return; }
         U.mode = M_DELETE; U.target = m->id;
         break;
     case MI_REACT: U.mode = M_REACT; U.target = m->id; in_clear(); U.focus = F_INPUT; break;
@@ -9263,7 +9633,7 @@ static void msg_action(Message *m, int what) {
 #else
     case MI_PIN: msg_pin(S.open_ch, m->id, true); break;
 #endif
-    case MI_UNREAD: mark_unread(S.open_ch, m->id); ui_notice("канал отмечен непрочитанным с этого сообщения"); break;
+    case MI_UNREAD: mark_unread(S.open_ch, m->id); ui_notice(TR("канал отмечен непрочитанным с этого сообщения")); break;
 #endif
     default: break;
     }
@@ -9356,6 +9726,39 @@ static void button(int id, int x, int y) {
     case B_TM_X: tm_on = false; thread_members_close(); break;
     case B_RAMBAR: show_ram = !show_ram; break;
     case B_FSPOIL: file_spoil = !file_spoil; break;
+    case B_CARD_IGN: if (U.card_uid) { bool on = !ignored(U.card_uid); ignore_set(U.card_uid, on); ui_notice(on ? TR("сообщения скрыты (только у вас)") : TR("больше не игнорируется")); } break;
+    case B_CARD_NOTE: if (U.card_uid) note_open(U.card_uid); break;
+    case B_NOTE_EDIT: if (U.card_uid) { fm_note_uid = U.card_uid; fm_open(FM_NOTE, 0, 0); } break;
+    case B_RULES: { const Channel *oc = chan_find(S.open_ch); if (oc && oc->guild_id) { guild_rules_open(oc->guild_id); rules_on = true; } break; }
+    case B_RULES_OK: {
+        const RulesState *rs = guild_rules_state();
+        char err[160] = "";
+        if (rs && guild_rules_accept(rs->gid, err, sizeof err)) { ui_notice(TR("правила приняты - можно писать")); rules_on = false; guild_rules_close(); }
+        else if (err[0]) { char *e = san(err, false); ui_notice("%s", e); free(e); }
+        break;
+    }
+    case B_RULES_X: rules_on = false; guild_rules_close(); break;
+    case B_SOUNDS: sounds_enable(!sounds_enabled()); break;
+    case B_LANG: lang_set(!g_lang_en); break;
+    case B_UP_APPLY: update_apply(); if (O.demo) ui_notice("%s", TR("в демо-режиме обновления не скачиваются")); break;
+    case B_UP_LATER: { const UpdateState *us = update_state(); if (us) snprintf(upd_later, sizeof upd_later, "%s", us->version); upd_on = false; break; }
+    case B_UP_RESTART: if (!update_restart()) ui_notice("%s", TR("перезапуск не удался - запустите программу заново")); break;
+    case B_UP_AUTO: update_auto_set(!update_auto()); break;
+    case B_UP_ANYWAY: update_apply_anyway(); break;
+    case B_UP_CANCEL: update_apply_cancel(); break;
+    case B_UP_CHECK: update_check(true); if (O.demo) ui_notice("%s", TR("в демо-режиме обновления не проверяются")); break;
+    case B_DUCK: voice_duck_others(!voice_duck_others_on()); break;
+#ifdef ASTRA_VIDEO
+    case B_SHARE: {
+        if (sh_running) { share_ui_stop("трансляция остановлена"); break; }
+        VoiceStatus v4;
+        voice_status(&v4);
+        if (v4.phase == VS_IDLE) { ui_notice("%s", TR("сначала подключитесь к голосовому каналу или звонку")); break; }
+        fm_open(FM_SHARE, 0, 0);
+        break;
+    }
+#endif
+    case B_HPF: voice_hpf(!voice_hpf_on()); break;
     case B_FSEND: if (U.mode == M_FILE) file_submit(); break;
     case B_MOD: {
         const Channel *oc = chan_find(S.open_ch);
@@ -9365,11 +9768,11 @@ static void button(int id, int x, int y) {
         break;
     }
     case B_FALT: fm_open(FM_FALT, 0, 0); break;
-    case B_IMGCLICK: img_click = !img_click; ui_notice(img_click ? "картинки - по щелчку" : "картинки - сразу"); break;
+    case B_IMGCLICK: img_click = !img_click; ui_notice(img_click ? TR("картинки - по щелчку") : TR("картинки - сразу")); break;
     case B_NOTIFY: { int nm = notify_mode(); nm = nm == NOTIFY_OFF ? NOTIFY_PLAIN : nm == NOTIFY_PLAIN ? NOTIFY_TEXT : NOTIFY_OFF; notify_set(nm); break; }
     case B_FILTER: U.settings = false; U.full = true; fm_open(FM_FILTER, 0, 0); break;
     case B_FULL: full_toggle(); break;
-    case B_STREAMER: streamer_set(!streamer_on()); ui_notice(streamer_on() ? "режим стримера включён" : "режим стримера выключен"); break;
+    case B_STREAMER: streamer_set(!streamer_on()); ui_notice(streamer_on() ? TR("режим стримера включён") : TR("режим стримера выключен")); break;
     case B_PTT_SET: ptt_capture = true; break;   /* следующее событие окна (не опрос клавиатуры) */
     case B_PTT_CLR: voice_ptt_bind(0); ptt_capture = false; break;
     case B_VADAUTO: voice_vad_auto(!voice_vad_is_auto()); break;
@@ -9389,9 +9792,9 @@ static void button(int id, int x, int y) {
     case B_STARTASK:
         /* безопасность П3-а: «напрямую» записывается только при выключенном VLESS (явный выбор без туннеля);
          * при работающей ссылке вопроса и так нет, а запись пустила бы напрямую, пропади ссылка */
-        if (!startup_direct() && vless_state() != VL_OFF) { ui_notice("пока работает ссылка VLESS, вопроса при запуске и так нет"); break; }
+        if (!startup_direct() && vless_state() != VL_OFF) { ui_notice(TR("пока работает ссылка VLESS, вопроса при запуске и так нет")); break; }
         startup_direct_set(!startup_direct());
-        ui_notice(startup_direct() ? "при запуске: без вопроса (сохранённая ссылка или напрямую)" : "при запуске: спрашивать про VLESS");
+        ui_notice(startup_direct() ? TR("при запуске: без вопроса (сохранённая ссылка или напрямую)") : TR("при запуске: спрашивать про VLESS"));
         break;
     case B_TXT_EXP: if (U.btn_arg >= 0 && U.btn_arg < S.nmsgs) txt_toggle(S.msgs[U.btn_arg].id); break;
     case B_TXT_DL:
@@ -9401,7 +9804,7 @@ static void button(int id, int x, int y) {
                 size_t e = a;
                 while (c[e] && c[e] != '\n') e++;
                 int t = text_line(c, a, e);
-                if (t >= 0) { char u2[2048]; att_url(c, (size_t)t, u2, sizeof u2, true); if (!u2[0]) break; copy_text(u2); ui_notice("ссылка на файл скопирована: откройте её в браузере"); break; }
+                if (t >= 0) { char u2[2048]; att_url(c, (size_t)t, u2, sizeof u2, true); if (!u2[0]) break; copy_text(u2); ui_notice(TR("ссылка на файл скопирована: откройте её в браузере")); break; }
                 a = c[e] ? e + 1 : e;
             }
         }
@@ -9419,12 +9822,12 @@ static void button(int id, int x, int y) {
         U.sr_sel = U.sr_scroll = 0;
         if (U.inbox_tab) mentions_open(); else mentions_close();
         break;
-    case B_ACK_ALL: ack_all(); ui_notice("всё отмечено прочитанным"); break;
+    case B_ACK_ALL: ack_all(); ui_notice(TR("всё отмечено прочитанным")); break;
     case B_PRESENT: msgs_present(); U.msg_scroll = 0; U.sel_msg = -1; break;
     case B_NEWMSG: if (U.new_from) jump_to(S.open_ch, U.new_from); break;
     case B_STATUS: menu_open(MENU_STATUS, -1, x, y); break;
-    case B_CARD_BLOCK: { u64 u = U.card_uid; U.card_uid = 0; profile_close(); if (u && u != S.me_id) { rel_block(u); ui_notice("заблокирован: %s", user_name(u)); } break; }
-    case B_CARD_ADD: { u64 u = U.card_uid; U.card_uid = 0; profile_close(); if (u && u != S.me_id) { rel_add(u); ui_notice("заявка в друзья отправлена: %s", user_name(u)); } break; }
+    case B_CARD_BLOCK: { u64 u = U.card_uid; U.card_uid = 0; profile_close(); if (u && u != S.me_id) { rel_block(u); ui_notice(TR("заблокирован: %s"), user_name(u)); } break; }
+    case B_CARD_ADD: { u64 u = U.card_uid; U.card_uid = 0; profile_close(); if (u && u != S.me_id) { rel_add(u); ui_notice(TR("заявка в друзья отправлена: %s"), user_name(u)); } break; }
     case B_MB_REACT: case B_MB_REPLY: case B_MB_EDIT: case B_MB_MORE: {
         int mi = -1;
         Message *m = msg_find(U.bar_msg, &mi);
@@ -9443,7 +9846,7 @@ static void button(int id, int x, int y) {
         if (U.btn_arg >= 0 && U.btn_arg < U.nrows) {
             Channel *cat = chan_find(U.rows[U.btn_arg].id);
             if (cat && can_manage_channels(cat->guild_id)) fm_open(FM_CHCREATE, cat->guild_id, cat->id);
-            else ui_notice("нет права управлять каналами");
+            else ui_notice(TR("нет права управлять каналами"));
         }
         break;
     }
@@ -9460,8 +9863,8 @@ static void button(int id, int x, int y) {
     }
     case B_SETTINGS: U.settings = true; U.full = true; (void)x; (void)y; break;
     case B_SET_CLOSE: U.settings = false; U.full = true; break;
-    case B_VADDN: voice_vad_adjust(-3); ui_notice("порог голоса: %d дБ", voice_vad_db()); break;
-    case B_VADUP: voice_vad_adjust(3); ui_notice("порог голоса: %d дБ", voice_vad_db()); break;
+    case B_VADDN: voice_vad_adjust(-3); ui_notice(TR("порог голоса: %d дБ"), voice_vad_db()); break;
+    case B_VADUP: voice_vad_adjust(3); ui_notice(TR("порог голоса: %d дБ"), voice_vad_db()); break;
     case B_QUIT: g_quit = true; break;
     case B_MEMBERS: U.members_off = !U.members_off; break;
     case B_CHATX: U.vchat_off = !U.vchat_off; break;
@@ -9477,7 +9880,7 @@ static void button(int id, int x, int y) {
         u64 u = U.card_uid;
         char err[160] = "";
         U.card_uid = 0; profile_close();
-        if (u && gdm_remove(S.open_ch, u, err, sizeof err)) ui_notice("исключён из группы: %s", user_name(u));
+        if (u && gdm_remove(S.open_ch, u, err, sizeof err)) ui_notice(TR("исключён из группы: %s"), user_name(u));
         else if (err[0]) { char *e = san(err, false); ui_notice("%s", e); free(e); }
         break;
     }
@@ -9505,6 +9908,8 @@ static void mouse(const Key *k) {
     U.dirty = true;
     if (U.busy[0]) return;
     if (AVB.uid) { if (k->button == 1 || k->button == 3) avb_close(); return; }   /* №101: щелчок — закрыть */
+    if (upd_on) { const Hit *uh = hit_item(k->x, k->y); if (k->button == 1 && uh && uh->act == A_BTN && (uh->sub == B_UP_APPLY || uh->sub == B_UP_LATER || uh->sub == B_UP_RESTART || uh->sub == B_UP_ANYWAY || uh->sub == B_UP_CANCEL)) button(uh->sub, 0, 0); return; }
+    if (rules_on) { const Hit *rh = hit_item(k->x, k->y); if (k->button == 1 && rh && rh->act == A_BTN && (rh->sub == B_RULES_OK || rh->sub == B_RULES_X)) button(rh->sub, 0, 0); return; }
     if (tm_on) { const Hit *th = hit_item(k->x, k->y); if (k->button == 1 && th && th->act == A_BTN && th->sub == B_TM_X) { tm_on = false; thread_members_close(); } return; }
     if (CSEL.on && !U.help && !U.settings) {     /* окно списка бота модально */
         const Hit *ch = hit_item(k->x, k->y);
@@ -9539,7 +9944,7 @@ static void mouse(const Key *k) {
         bool yes = h && h->act == A_BTN && h->sub == B_YES && k->button == 1;
         if (U.mode == M_DELETE) { if (yes) delete_message(U.target); U.mode = M_NORMAL; }
         else if (U.mode == M_UNFRIEND) {
-            if (yes && rel_find(U.target)) { rel_remove(U.target); ui_notice("удалён из друзей: %s", un(U.target)); }
+            if (yes && rel_find(U.target)) { rel_remove(U.target); ui_notice(TR("удалён из друзей: %s"), un(U.target)); }
             U.mode = M_NORMAL; U.target = 0;
         }
         else vl_off_answer(yes);
@@ -9572,7 +9977,7 @@ static void mouse(const Key *k) {
         return;
     }
     if (U.card_uid && !U.help && !U.settings) {  /* карточка пользователя: её кнопки; щелчок мимо — закрыть */
-        if (h && k->button == 1 && h->act == A_BTN && (h->sub == B_CARD_MSG || h->sub == B_CARD_ID || h->sub == B_CARD_X || h->sub == B_CARD_BLOCK || h->sub == B_CARD_ADD || h->sub == B_CARD_KICK || h->sub == B_CARD_FULL || h->sub == B_AVBIG)) button(h->sub, h->x, h->y);
+        if (h && k->button == 1 && h->act == A_BTN && (h->sub == B_CARD_MSG || h->sub == B_CARD_ID || h->sub == B_CARD_X || h->sub == B_CARD_BLOCK || h->sub == B_CARD_ADD || h->sub == B_CARD_KICK || h->sub == B_CARD_FULL || h->sub == B_AVBIG || h->sub == B_CARD_IGN || h->sub == B_CARD_NOTE || h->sub == B_NOTE_EDIT)) button(h->sub, h->x, h->y);
         else if (h && k->button == 1 && h->act == A_BTN && h->sub == B_MOD) { U.btn_arg = h->arg; button(B_MOD, h->x, h->y); }
         else { U.card_uid = 0; profile_close(); }
         return;
@@ -9593,7 +9998,7 @@ static void mouse(const Key *k) {
     if (U.sq_edit && !(h && h->act == A_BTN && (h->sub == B_SEARCH || h->sub == B_SRCH_CLR))) U.sq_edit = false;
     if (U.sr_focus && !(h && (h->act == A_SRES || (h->act == A_BTN && h->sub == B_SRCH_X)))) U.sr_focus = false;
     if (U.mode == M_FILE && k->button == 1 && !(h && (h->act == A_INPUT || (h->act == A_BTN && (h->sub == B_CANCEL || h->sub == B_ATTACH))))) {
-        if (h && h->act == A_BTN && h->sub == B_NOP) { if (h->tip && h->tip < sizeof TIPS / sizeof *TIPS) ui_notice("%s", TIPS[h->tip]); return; }
+        if (h && h->act == A_BTN && h->sub == B_NOP) { if (h->tip && h->tip < sizeof TIPS / sizeof *TIPS) ui_notice("%s", tr(TIPS[h->tip])); return; }
         vl_leave();                              /* щелчок в другое место (и в пустое) — выбор файла отменён, черновик вернулся */
         if (!h) return;
     }
@@ -9664,7 +10069,7 @@ static void mouse(const Key *k) {
         break;
     case A_BTN:
         if (h->sub == B_NOP && h->tip == T_DATE && h->arg >= 0 && h->arg < S.nmsgs) { char d[96]; date_full(S.msgs[h->arg].ts, d, sizeof d); ui_notice("%s", d); }
-        else if (h->sub == B_NOP) { if (h->tip && h->tip < sizeof TIPS / sizeof *TIPS) ui_notice("%s", TIPS[h->tip]); }
+        else if (h->sub == B_NOP) { if (h->tip && h->tip < sizeof TIPS / sizeof *TIPS) ui_notice("%s", tr(TIPS[h->tip])); }
         else { U.btn_arg = h->arg; button(h->sub, h->x, h->y); }
         break;
     case A_INPUT: U.focus = F_INPUT; break;
@@ -9719,7 +10124,7 @@ static void handle_key(const Key *k) {
         if (k->code == K_ESC) return;
         int vk = plat_key_vk(k);
         if (vk) voice_ptt_bind(vk);
-        else ui_notice("эту клавишу нельзя назначить рации");
+        else ui_notice(TR("эту клавишу нельзя назначить рации"));
         return;
     }
     if (k->code == K_ENTER && k->alt && !k->ctrl && full_toggle()) return;
@@ -9742,6 +10147,15 @@ static void handle_key(const Key *k) {
     }
     if (AVB.uid) { if (k->code == K_ESC || k->code == K_ENTER) avb_close(); U.dirty = true; return; }   /* №101 */
     if (tm_on) { if (k->code == K_ESC) { tm_on = false; thread_members_close(); } U.dirty = true; return; }   /* №97 */
+    if (rules_on) { if (k->code == K_ESC) { rules_on = false; guild_rules_close(); } U.dirty = true; return; }   /* №128 */
+    if (upd_on) {                                /* обновление: Enter — главная кнопка, Esc — «Позже» */
+        const UpdateState *us = update_state();
+        U.dirty = true;
+        if (k->code == K_ESC) button(us && us->shared_dir ? B_UP_CANCEL : B_UP_LATER, 0, 0);
+        else if (k->code == K_ENTER && us && us->phase == UP_AVAILABLE && !us->shared_dir) button(B_UP_APPLY, 0, 0);
+        else if (k->code == K_ENTER && us && us->phase == UP_READY) button(B_UP_RESTART, 0, 0);
+        return;
+    }
     if (CSEL.on && !U.help && !U.settings) { comp_sel_key(k); return; }   /* окно списка бота */
     if (IV.on && !U.help && !U.settings) {       /* просмотр картинки: Left/Right — соседние, Esc — закрыть */
         U.dirty = true;
@@ -9839,11 +10253,11 @@ static void handle_key(const Key *k) {
         if (k->code == K_CHAR && k->ctrl && k->shift && (c == 'd' || c == 'D' || c == 0x432 || c == 0x412)) { voice_toggle_deaf(); U.dirty = true; return; }
         if (k->alt && (k->code == K_UP || k->code == K_DOWN) && U.moving) { move_step(k->code == K_UP ? -1 : 1); U.dirty = true; return; }
         if (k->alt && (k->code == K_UP || k->code == K_DOWN)) { chan_step(k->code == K_UP ? -1 : 1, k->shift); U.dirty = true; return; }
-        if (k->code == K_ESC && U.moving) { U.moving = false; ui_notice("перестановка закончена"); U.dirty = true; return; }
+        if (k->code == K_ESC && U.moving) { U.moving = false; ui_notice(TR("перестановка закончена")); U.dirty = true; return; }
         if (k->code == K_ESC && k->shift) {
             Channel *oc = chan_find(S.open_ch);
-            if (oc && oc->guild_id) { ack_guild(oc->guild_id); ui_notice("сервер отмечен прочитанным"); }
-            else if (cur_guild_id()) { ack_guild(cur_guild_id()); ui_notice("сервер отмечен прочитанным"); }
+            if (oc && oc->guild_id) { ack_guild(oc->guild_id); ui_notice(TR("сервер отмечен прочитанным")); }
+            else if (cur_guild_id()) { ack_guild(cur_guild_id()); ui_notice(TR("сервер отмечен прочитанным")); }
             U.dirty = true;
             return;
         }
@@ -9912,7 +10326,7 @@ static void handle_key(const Key *k) {
     if (U.mode == M_UNFRIEND) {
         if (k->code == K_CHAR && !k->ctrl && !k->alt && (k->ch == 'y' || k->ch == 'Y' || k->ch == 0x43D /* н */) && rel_find(U.target)) {
             rel_remove(U.target);
-            ui_notice("удалён из друзей: %s", un(U.target));
+            ui_notice(TR("удалён из друзей: %s"), un(U.target));
         }
         U.mode = M_NORMAL;
         U.target = 0;
@@ -10057,9 +10471,9 @@ static void editor_key(const Key *k) {
     case K_UP:
         if (!U.in.len && U.mode == M_NORMAL) {
             Message *m = last_own();
-            if (S.detached) ui_notice("сначала вернитесь к настоящему: внизу ленты");   /* М5: последнее своё не загружено */
+            if (S.detached) ui_notice(TR("сначала вернитесь к настоящему: внизу ленты"));   /* М5: последнее своё не загружено */
             else if (m && edit_src(m)) { U.mode = M_EDIT; U.target = m->id; edit_set(edit_src(m)); }
-            else if (m) ui_notice("текст этого сообщения недоступен для правки");
+            else if (m) ui_notice(TR("текст этого сообщения недоступен для правки"));
         } else if (U.in.len == 0) U.focus = F_MESSAGES;
         return;
     case K_DOWN: return;
@@ -10119,6 +10533,42 @@ void ui_tick(void) {
     {
         static bool ep_was;
         if (ep_was && !U.ep) emoji_close();      /* №32: эмодзи сервера живут, пока открыт пикер */
+#ifdef ASTRA_VIDEO
+        if (sh_running) {
+            ShareState ns2;
+            share_state(&ns2);
+            if (ns2.fps_out != SHS.fps_out || ns2.mbps != SHS.mbps || ns2.active != SHS.active) U.dirty = true;
+            SHS = ns2;
+            VoiceStatus v6;
+            voice_status(&v6);
+            if (!ns2.active) share_ui_stop(ns2.reason[0] ? ns2.reason : "трансляция остановлена");
+            else if (v6.phase == VS_IDLE) share_ui_stop("трансляция остановлена: вы вышли из звонка");
+            else if (v6.channel_id != sh_ch) share_ui_stop("трансляция остановлена: другой канал");
+        }
+#endif
+        {
+            const UpdateState *us = update_state();
+            static int up_was = -1;
+            if (us && us->phase != up_was) {
+                up_was = us->phase;
+                U.dirty = true;
+                if (us->phase == UP_AVAILABLE && strcmp(upd_shown, us->version) && strcmp(upd_later, us->version) && !LG.on) {
+                    snprintf(upd_shown, sizeof upd_shown, "%s", us->version);
+                    upd_on = true;
+                }
+                if (us->phase == UP_DOWNLOADING || us->phase == UP_READY || (us->phase == UP_FAILED && upd_on)) upd_on = !LG.on;
+            }
+            if (us && us->phase == UP_DOWNLOADING) U.dirty = true;   /* полоса загрузки */
+            static bool told;                    /* один раз за всё время: о проверке обновлений */
+            if (!told && S.ready && !LG.on) {
+                told = true;
+                char b2[4] = "";
+                if (!O.demo && !O.no_save && keyring_load("upd_told", b2, sizeof b2) <= 0 && update_auto()) {
+                    ui_notice("%s", TR("Astra DS раз в сутки проверяет обновления на GitHub. Отключить - Настройки > Обновления или --no-update"));
+                    keyring_save("upd_told", "1", 1);
+                }
+            }
+        }
         /* №57: индекс команд — пока в поле «/...» или вводятся опции; иначе освобождён */
         bool slw = SL.cmd >= 0 || sl_typing();
         if (SL.cmd >= 0 && SL.cid && SL.cid != S.open_ch) { sl_reset(); slw = false; }
@@ -10139,6 +10589,7 @@ void ui_tick(void) {
         bool here = U.settings && !U.help && !LG.on && U.set_sec == SS_VOICE;
         if (!here) DEV.got = false;              /* при следующем входе — свежий список устройств */
         if (ptt_capture && !here) ptt_capture = false;
+        { const NoteState *nst = note_state(); if (nst && nst->uid && nst->uid != U.card_uid && !FM.id) note_close(); }
 
         if (mic_test_on && !here) { mic_test_on = false; voice_mic_test(false); }
         int lv = mic_test_on ? voice_mic_level() : -1;
@@ -10171,10 +10622,10 @@ void ui_tick(void) {
         if (cs && cs->what[0]) snprintf(cap_what, sizeof cap_what, "%s", cs->what);
         u8 out = cs ? cs->outcome : CAP_NONE;
         if (out != cap_out) {
-            if (out == CAP_PASSED) ui_notice("Проверка пройдена, повторяю действие: %s...", cap_what[0] ? cap_what : "запрос к Discord");
+            if (out == CAP_PASSED) ui_notice(TR("Проверка пройдена, повторяю действие: %s..."), cap_what[0] ? cap_what : TR("запрос к Discord"));
             else if (out == CAP_FAILED) {
-                char *e = san(cs->error[0] ? cs->error : "окно закрыто", false);
-                ui_notice("Проверка не пройдена: %s. Enter - открыть снова, Esc - отменить", e);
+                char *e = san(cs->error[0] ? cs->error : TR("окно закрыто"), false);
+                ui_notice(TR("Проверка не пройдена: %s. Enter - открыть снова, Esc - отменить"), e);
                 free(e);
             }
             /* CAP_CANCELLED — итог уже пишет net.c («...: отменено - проверка не пройдена») */
@@ -10232,7 +10683,7 @@ void ui_on_message(u64 channel_id, bool mention) {
 
 static void ui_drop_file(const char *path) {
     if (!path || !*path || LG.on) return;
-    if (!chan_find(S.open_ch)) { ui_notice("перетащите файл в открытый канал или беседу"); return; }
+    if (!chan_find(S.open_ch)) { ui_notice(TR("перетащите файл в открытый канал или беседу")); return; }
     if (U.mode != M_FILE) file_enter();
     if (U.mode != M_FILE) return;
     in_clear();
@@ -10242,6 +10693,10 @@ static void ui_drop_file(const char *path) {
 }
 void ui_init(void) {
     g_ui_drop = ui_drop_file;
+#ifdef ASTRA_VIDEO
+    term_capture_exclude(true);                  /* безопасник: окно видео-версии не попадает ни в чей захват */
+#endif
+    if (!lang_inited) ui_lang_init(-1);
     U.focus = F_GUILDS;
     U.full = true;
     U.dirty = true;

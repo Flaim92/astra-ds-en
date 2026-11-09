@@ -150,6 +150,14 @@ PlatThread *thread_start(int (*fn)(void *), void *arg) {
     return t;
 }
 void thread_join(PlatThread *t) { if (t) { pthread_join(t->t, NULL); free(t); } }
+void plat_timer_hires(bool on) { (void)on; }
+int plat_ui_lang(void) {                        /* LC_ALL / LC_MESSAGES / LANG: ru/uk/be -> русский; C/POSIX/пусто — русский (как раньше) */
+    const char *l = getenv("LC_ALL");
+    if (!l || !*l) l = getenv("LC_MESSAGES");
+    if (!l || !*l) l = getenv("LANG");
+    if (!l || !*l || !strcmp(l, "C") || !strncmp(l, "C.", 2) || !strcmp(l, "POSIX")) return 0;
+    return strncmp(l, "ru", 2) && strncmp(l, "uk", 2) && strncmp(l, "be", 2) ? 1 : 0;
+}
 void thread_audio_priority(void) {
     struct sched_param sp = { .sched_priority = 10 };
     if (pthread_setschedparam(pthread_self(), SCHED_RR, &sp) != 0) {
@@ -181,9 +189,18 @@ bool udp_resolve(const char *ip, uint16_t port, void *addr16) {
 int udp_send(intptr_t s, const void *buf, size_t n, const void *addr16) {
     return (int)sendto((int)s, buf, n, MSG_NOSIGNAL, (const struct sockaddr *)addr16, sizeof(struct sockaddr_in));
 }
-int udp_recv(intptr_t s, void *buf, size_t n) {
-    ssize_t r = recv((int)s, buf, n, 0);
-    return r < 0 ? -1 : (int)r;
+int udp_recv(intptr_t s, void *buf, size_t n, void *from16) {
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    socklen_t al = sizeof a;
+    ssize_t r = recvfrom((int)s, buf, n, 0, (struct sockaddr *)&a, &al);
+    if (r < 0) return -1;
+    if (from16) memcpy(from16, &a, sizeof a);
+    return (int)r;
+}
+bool udp_same(const void *a16, const void *b16) {
+    const struct sockaddr_in *a = a16, *b = b16;
+    return a->sin_family == AF_INET && b->sin_family == AF_INET && a->sin_port == b->sin_port && a->sin_addr.s_addr == b->sin_addr.s_addr;
 }
 void udp_close(intptr_t s) { if (s >= 0) close((int)s); }
 

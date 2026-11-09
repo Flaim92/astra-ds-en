@@ -328,7 +328,7 @@ void chan_label(const Channel *c, char *out, size_t n) {
         if (w < 0) break;
         len += (size_t)w;
     }
-    if (!out[0]) snprintf(out, n, "(пусто)");
+    if (!out[0]) snprintf(out, n, ui_tr("(пусто)"));
 }
 /* ревью 11 С1: в счёт непрочитанного идут только ветки, где я участник; форумы — никогда */
 static bool chan_counts(const Channel *c) {
@@ -538,10 +538,10 @@ static u8 presence_code(const char *s) {
 }
 const char *presence_name(u8 st) {
     switch (st) {
-    case PS_ONLINE: return "в сети";
-    case PS_IDLE: return "не активен";
-    case PS_DND: return "не беспокоить";
-    default: return "не в сети";
+    case PS_ONLINE: return ui_tr("в сети");
+    case PS_IDLE: return ui_tr("не активен");
+    case PS_DND: return ui_tr("не беспокоить");
+    default: return ui_tr("не в сети");
     }
 }
 /* {user_id | user:{id}, status} — только для друзей; возврат: изменилось ли */
@@ -560,11 +560,11 @@ static bool presence_apply(const cJSON *p) {
 /* Действия (записи): в демо — только локально, без сети. */
 static void on_rel_done(Resp *r, void *ctx) {
     (void)ctx;
-    if (r->status < 200 || r->status >= 300) ui_notice("друзья: Discord ответил %ld", r->status);
+    if (r->status < 200 || r->status >= 300) ui_notice(ui_tr("друзья: Discord ответил %ld"), r->status);
 }
 void rel_accept(u64 uid) {
     const Relation *r = rel_find(uid);
-    if (!r || r->type != REL_IN) { ui_notice("нет входящей заявки"); return; }
+    if (!r || r->type != REL_IN) { ui_notice(ui_tr("нет входящей заявки")); return; }
     if (O.demo) { rel_set(uid, REL_FRIEND); ui_dirty(); return; }      /* по сети придёт RELATIONSHIP_ADD */
     char path[64];
     snprintf(path, sizeof path, "/users/@me/relationships/%llu", (unsigned long long)uid);
@@ -594,13 +594,13 @@ static Channel *dm_with(u64 uid) {
 }
 static void on_dm_created(Resp *r, void *ctx) {
     (void)ctx;
-    if (r->status != 200 && r->status != 201) { ui_notice("беседа не создана: Discord ответил %ld", r->status); return; }
+    if (r->status != 200 && r->status != 201) { ui_notice(ui_tr("беседа не создана: Discord ответил %ld"), r->status); return; }
     cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len);
     u64 id = jid(j, "id");
     int t = (int)jint(j, "type", -1);
     if (id && (t == CH_DM || t == CH_GROUP)) { chan_upsert(j, 0); store_sort_dms(); }
     json_done();
-    if (!id || !chan_find(id)) { ui_notice("беседа: неожиданный ответ Discord"); return; }
+    if (!id || !chan_find(id)) { ui_notice(ui_tr("беседа: неожиданный ответ Discord")); return; }
     ui_open_dm(id);
 }
 void dm_open(u64 uid) {
@@ -692,10 +692,10 @@ static void append_mention(Buf *b, const char *p, size_t n, const cJSON *mention
         buf_printf(b, "@%s", s);
         free(s);
     } else if (inner[0] == '@' && inner[1] == '&') {
-        buf_puts(b, "@роль");
+        buf_puts(b, ui_tr("@роль"));
     } else if (inner[0] == '#') {
         Channel *c = chan_find(strtoull(inner + 1, NULL, 10));
-        buf_printf(b, "#%s", c && c->name ? c->name : "канал");
+        buf_printf(b, "#%s", c && c->name ? c->name : ui_tr("канал"));
     } else if (inner[0] == ':' || (inner[0] == 'a' && inner[1] == ':')) {
         const char *s = inner[0] == 'a' ? inner + 1 : inner;
         const char *e = strchr(s + 1, ':');
@@ -726,13 +726,13 @@ static char *render_content(const char *raw, const cJSON *mentions) {
 }
 static const char *system_text(int type) {
     switch (type) {
-    case 1: return "[добавил участника]";
-    case 2: return "[убрал участника]";
-    case 3: return "[звонок]";
-    case 4: return "[изменил название]";
-    case 6: return "[закрепил сообщение]";
-    case 7: return "[присоединился к серверу]";
-    case 8: return "[буст сервера]";
+    case 1: return ui_tr("[добавил участника]");
+    case 2: return ui_tr("[убрал участника]");
+    case 3: return ui_tr("[звонок]");
+    case 4: return ui_tr("[изменил название]");
+    case 6: return ui_tr("[закрепил сообщение]");
+    case 7: return ui_tr("[присоединился к серверу]");
+    case 8: return ui_tr("[буст сервера]");
     default: return NULL;
     }
 }
@@ -771,12 +771,12 @@ static u32 member_color(const Guild *g, const cJSON *member) {
 }
 /* Подпись ответа на сообщение без текста */
 static const char *ref_placeholder(const cJSON *ref) {
-    if (cJSON_GetArraySize(jget(ref, "attachments")) > 0) return jint(ref, "flags", 0) & 8192 ? "[голосовое]" : "[файл]";
-    if (cJSON_GetArraySize(jget(ref, "sticker_items")) > 0) return "[стикер]";
-    if (jget(ref, "poll")) return "[опрос]";
-    if (cJSON_GetArraySize(jget(ref, "embeds")) > 0) return "[встройка]";
-    if (jget(ref, "message_snapshots")) return "[пересланное]";
-    return "(без текста)";
+    if (cJSON_GetArraySize(jget(ref, "attachments")) > 0) return jint(ref, "flags", 0) & 8192 ? ui_tr("[голосовое]") : ui_tr("[файл]");
+    if (cJSON_GetArraySize(jget(ref, "sticker_items")) > 0) return ui_tr("[стикер]");
+    if (jget(ref, "poll")) return ui_tr("[опрос]");
+    if (cJSON_GetArraySize(jget(ref, "embeds")) > 0) return ui_tr("[встройка]");
+    if (jget(ref, "message_snapshots")) return ui_tr("[пересланное]");
+    return ui_tr("(без текста)");
 }
 static bool g_no_user_put;                       /* поиск: авторов в таблицу пользователей не добавлять */
 static void message_fill(Message *m, const cJSON *o) {
@@ -831,13 +831,14 @@ static void message_fill(Message *m, const cJSON *o) {
         for (char *p = fn; *p; p++) if (*p == ']') *p = ')';   /* В1: «]» в имени не подменяет url вложения */
         /* А1: маркер ATT_MARK (\x01) — только у настоящих вложений: san вырезает управляющие байты из
          * любого пользовательского текста, так что «[файл: x] url», набранное собеседником, вложением не станет */
-        buf_printf(&b, "%s" ATT_MARK_S "[файл: %s] %s", b.len ? "\n" : "", fn, url);
+        buf_printf(&b, "%s" ATT_MARK_S, b.len ? "\n" : "");
+        buf_printf(&b, ui_tr("[файл: %s] %s"), fn, url);
         free(fn); free(url);
     }
     /* эмбеды — карточками в Message.emb (ревью 11 М2: без дубля «[встройка]» в content) */
     cJSON_ArrayForEach(x, jget(src, "sticker_items")) {
         char *n = san(jstr(x, "name"), false);
-        buf_printf(&b, "%s[стикер: %s]", b.len ? "\n" : "", n);
+        buf_printf(&b, ui_tr("%s[стикер: %s]"), b.len ? "\n" : "", n);
         free(n);
     }
     m->content = b.p ? b.p : xstrdup("");
@@ -860,7 +861,7 @@ static void message_fill(Message *m, const cJSON *o) {
     } else if (mref && !m->forwarded) {
         m->ref_id = jid(jget(o, "message_reference"), "message_id");
         m->ref_author = xstrdup("?");
-        m->ref_text = xstrdup("(сообщение недоступно)");
+        m->ref_text = xstrdup(ui_tr("(сообщение недоступно)"));
     }
     reactions_from(m, jget(o, "reactions"));
 }
@@ -1013,11 +1014,11 @@ static void on_search(Resp *r, void *ctx) {
         http_async_delayed("GET", search_path, NULL, on_search, ctx, ms);
     } else {
         SR.busy = SR.indexing = false;
-        if (r->status == 202) snprintf(SR.error, sizeof SR.error, "индекс поиска ещё строится, попробуйте позже");
-        else if (r->status == 429) snprintf(SR.error, sizeof SR.error, "слишком часто, повтор через %d с", (int)(ra + 0.999) > 0 ? (int)(ra + 0.999) : 1);
-        else if (r->status == 403) snprintf(SR.error, sizeof SR.error, "нет доступа к поиску здесь");
-        else if (r->status == 0) snprintf(SR.error, sizeof SR.error, "нет связи с Discord");
-        else snprintf(SR.error, sizeof SR.error, "поиск: Discord ответил %ld", r->status);
+        if (r->status == 202) snprintf(SR.error, sizeof SR.error, ui_tr("индекс поиска ещё строится, попробуйте позже"));
+        else if (r->status == 429) snprintf(SR.error, sizeof SR.error, ui_tr("слишком часто, повтор через %d с"), (int)(ra + 0.999) > 0 ? (int)(ra + 0.999) : 1);
+        else if (r->status == 403) snprintf(SR.error, sizeof SR.error, ui_tr("нет доступа к поиску здесь"));
+        else if (r->status == 0) snprintf(SR.error, sizeof SR.error, ui_tr("нет связи с Discord"));
+        else snprintf(SR.error, sizeof SR.error, ui_tr("поиск: Discord ответил %ld"), r->status);
     }
     json_done();
     ui_dirty();
@@ -1112,7 +1113,7 @@ static void search_run(void) {
         } else if (ascii_prefix_ci(tok, "before:") || ascii_prefix_ci(tok, "after:")) {
             bool before = (tok[0] | 32) == 'b';
             u64 sf = date_snowflake(tok + (before ? 7 : 6));
-            if (!sf) { snprintf(err, sizeof err, "%s: дата в виде ГГГГ-ММ-ДД", before ? "before" : "after"); break; }
+            if (!sf) { snprintf(err, sizeof err, ui_tr("%s: дата в виде ГГГГ-ММ-ДД"), before ? "before" : "after"); break; }
             buf_printf(&extra, before ? "&max_id=%llu" : "&min_id=%llu", (unsigned long long)sf);
         } else {
             if (content.len) buf_put(&content, " ", 1);
@@ -1121,7 +1122,7 @@ static void search_run(void) {
     }
     free(q);
     if (err[0] || (!content.len && !extra.len)) {
-        snprintf(SR.error, sizeof SR.error, "%s", err[0] ? err : "пустой запрос");
+        snprintf(SR.error, sizeof SR.error, "%s", err[0] ? err : ui_tr("пустой запрос"));
         buf_free(&content); buf_free(&extra);
         if (!err[0]) SR.error[0] = 0;
         ui_dirty();
@@ -1226,16 +1227,16 @@ static void hits_free(SearchHit **h, int *n) {
     *n = 0;
 }
 static void http_err(char *out, size_t n, const char *what, long st) {
-    if (st == 0) snprintf(out, n, "%s: нет связи с Discord", what);
-    else if (st == 403) snprintf(out, n, "%s: нет доступа", what);
-    else if (st == 404) snprintf(out, n, "%s: не найдено", what);
-    else if (st == 429) snprintf(out, n, "%s: слишком часто, попробуйте позже", what);
-    else snprintf(out, n, "%s: Discord ответил %ld", what, st);
+    if (st == 0) snprintf(out, n, ui_tr("%s: нет связи с Discord"), what);
+    else if (st == 403) snprintf(out, n, ui_tr("%s: нет доступа"), what);
+    else if (st == 404) snprintf(out, n, ui_tr("%s: не найдено"), what);
+    else if (st == 429) snprintf(out, n, ui_tr("%s: слишком часто, попробуйте позже"), what);
+    else snprintf(out, n, ui_tr("%s: Discord ответил %ld"), what, st);
 }
 static void on_write_done(Resp *r, void *ctx) {
     if (r->status < 200 || r->status >= 300) {
         char e[160];
-        http_err(e, sizeof e, ctx ? (const char *)ctx : "запрос", r->status);
+        http_err(e, sizeof e, ctx ? (const char *)ctx : ui_tr("запрос"), r->status);
         ui_notice("%s", e);
     }
 }
@@ -1246,7 +1247,7 @@ static u64 jump_cid, jump_mid;
 static void on_jump(Resp *r, void *ctx) {
     bool present = jump_mid == 0;
     if ((unsigned)(uintptr_t)ctx != jump_gen || S.open_ch != jump_cid) return;
-    if (r->status != 200) { char e[160]; http_err(e, sizeof e, present ? "новые сообщения" : "переход", r->status); ui_notice("%s", e); return; }
+    if (r->status != 200) { char e[160]; http_err(e, sizeof e, present ? ui_tr("новые сообщения") : ui_tr("переход"), r->status); ui_notice("%s", e); return; }
     cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len);
     if (cJSON_IsArray(j)) store_set_messages(j, false);           /* msgs_clear: detached/jump_id сброшены */
     json_done();
@@ -1256,13 +1257,13 @@ static void on_jump(Resp *r, void *ctx) {
     S.history_end = false;                                         /* меньше 50 вокруг — не значит, что старее нет */
     S.detached = c && newest < c->last_msg;
     S.jump_id = jump_mid;
-    if (!msg_find(jump_mid, NULL)) ui_notice("сообщение не найдено (удалено или нет доступа)");
+    if (!msg_find(jump_mid, NULL)) ui_notice(ui_tr("сообщение не найдено (удалено или нет доступа)"));
     ui_dirty();
 }
 void msgs_jump(u64 channel_id, u64 message_id) {
     if (!channel_id || !message_id) return;
     if (channel_id != S.open_ch) ui_open_channel(channel_id);
-    if (channel_id != S.open_ch) { ui_notice("канал недоступен"); return; }
+    if (channel_id != S.open_ch) { ui_notice(ui_tr("канал недоступен")); return; }
     jump_gen++;
     jump_cid = channel_id;
     jump_mid = message_id;
@@ -1274,7 +1275,7 @@ void msgs_jump(u64 channel_id, u64 message_id) {
             S.jump_id = message_id;
             S.detached = c && S.nmsgs && S.msgs[S.nmsgs - 1].id < c->last_msg;
             S.history_end = false;
-        } else ui_notice("сообщение не найдено (удалено или нет доступа)");
+        } else ui_notice(ui_tr("сообщение не найдено (удалено или нет доступа)"));
         ui_dirty();
         return;
     }
@@ -1343,7 +1344,7 @@ void pins_apply(const cJSON *j) {
 static void on_pins(Resp *r, void *ctx) {
     if ((unsigned)(uintptr_t)ctx != pins_gen) return;
     PN.busy = false;
-    if (r->status != 200) { http_err(PN.error, sizeof PN.error, "закреплённые", r->status); ui_dirty(); return; }
+    if (r->status != 200) { http_err(PN.error, sizeof PN.error, ui_tr("закреплённые"), r->status); ui_dirty(); return; }
     cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len);
     pins_apply(j);
     json_done();
@@ -1375,11 +1376,11 @@ static void pin_result(u64 msg_id, bool pin, long status) {
     if (status >= 200 && status < 300) {
         Message *m = msg_find(msg_id, NULL);
         if (m) m->pinned = pin;
-        ui_notice("%s", pin ? "сообщение закреплено" : "сообщение откреплено");
+        ui_notice("%s", pin ? ui_tr("сообщение закреплено") : ui_tr("сообщение откреплено"));
     } else {
         char e[160];
-        if (status == 403) snprintf(e, sizeof e, "%s: нет прав (403)", pin ? "закрепить" : "открепить");
-        else http_err(e, sizeof e, pin ? "закрепить" : "открепить", status);
+        if (status == 403) snprintf(e, sizeof e, ui_tr("%s: нет прав (403)"), pin ? ui_tr("закрепить") : ui_tr("открепить"));
+        else http_err(e, sizeof e, pin ? ui_tr("закрепить") : ui_tr("открепить"), status);
         ui_notice("%s", e);
     }
     ui_dirty();
@@ -1411,7 +1412,7 @@ void mentions_apply(const cJSON *arr) {
 static void on_mentions(Resp *r, void *ctx) {
     if ((unsigned)(uintptr_t)ctx != ment_gen) return;
     MN.busy = false;
-    if (r->status != 200) { http_err(MN.error, sizeof MN.error, "упоминания", r->status); ui_dirty(); return; }
+    if (r->status != 200) { http_err(MN.error, sizeof MN.error, ui_tr("упоминания"), r->status); ui_dirty(); return; }
     cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len);
     mentions_apply(j);
     json_done();
@@ -1490,7 +1491,7 @@ static void ack_bulk(u64 gid) {
         }
         if (n && (n == 100 || !c)) {
             buf_puts(&b, "]}");
-            http_async("POST", "/read-states/ack-bulk", b.p, on_write_done, (void *)"прочитано");
+            http_async("POST", "/read-states/ack-bulk", b.p, on_write_done, (void *)ui_tr("прочитано"));
             b.len = 0;
             n = 0;
         }
@@ -1553,11 +1554,11 @@ static i64 ring_at;                             /* крайний срок ож�
 static void ring_send(u64 ch) {
     char path[96];
     snprintf(path, sizeof path, "/channels/%llu/call/ring", (unsigned long long)ch);
-    http_async("POST", path, "{\"recipients\":null}", on_write_done, (void *)"звонок");
+    http_async("POST", path, "{\"recipients\":null}", on_write_done, (void *)ui_tr("звонок"));
 }
 void call_start(u64 channel_id) {
     Channel *c = chan_find(channel_id);
-    if (!c || c->guild_id) { ui_notice("звонок - из личной переписки"); return; }
+    if (!c || c->guild_id) { ui_notice(ui_tr("звонок - из личной переписки")); return; }
     voice_join(0, channel_id);
     if (O.demo) return;
     ring_ch = channel_id;
@@ -1593,7 +1594,7 @@ static void ring_post(u64 cid, u64 uid, bool stop) {
     snprintf(path, sizeof path, "/channels/%llu/call/%s", (unsigned long long)cid, stop ? "stop-ringing" : "ring");
     if (uid) snprintf(body, sizeof body, "{\"recipients\":[\"%llu\"]}", (unsigned long long)uid);
     else snprintf(body, sizeof body, "{\"recipients\":null}");
-    http_async("POST", path, body, on_write_done, (void *)(stop ? "перестать звонить" : "звонок"));
+    http_async("POST", path, body, on_write_done, (void *)(stop ? ui_tr("перестать звонить") : ui_tr("звонок")));
 }
 static bool ring_still_wanted(u64 ch);
 /* ревью 13 М4: управлять звонком можно только в своём (я в голосе этой ЛС) */
@@ -1659,7 +1660,7 @@ void rel_block(u64 uid) {
     if (O.demo) { rel_set(uid, REL_BLOCKED); ui_dirty(); return; }
     char path[64];
     snprintf(path, sizeof path, "/users/@me/relationships/%llu", (unsigned long long)uid);
-    http_async("PUT", path, "{\"type\":2}", on_write_done, (void *)"заблокировать");
+    http_async("PUT", path, "{\"type\":2}", on_write_done, (void *)ui_tr("заблокировать"));
 }
 void rel_add(u64 uid) {
     if (!uid || uid == S.me_id) return;
@@ -1669,26 +1670,26 @@ void rel_add(u64 uid) {
     if (O.demo) { rel_set(uid, REL_OUT); ui_dirty(); return; }
     char path[64];
     snprintf(path, sizeof path, "/users/@me/relationships/%llu", (unsigned long long)uid);
-    http_async("PUT", path, "{}", on_write_done, (void *)"заявка в друзья");
+    http_async("PUT", path, "{}", on_write_done, (void *)ui_tr("заявка в друзья"));
 }
 
 /* «Добавить в друзья» по имени пользователя (как кнопка Discord): POST /users/@me/relationships
  * {"username":..,"discriminator":null}. Имя — только [a-z0-9_.], 2..32 (правила имён Discord). */
 static void on_rel_name(Resp *r, void *ctx) {
     (void)ctx;
-    if (r->status == 204 || r->status == 200) { ui_notice("заявка в друзья отправлена"); return; }
-    if (r->status == 400) { ui_notice("заявка не отправлена: нет такого пользователя или он не принимает заявки"); return; }
+    if (r->status == 204 || r->status == 200) { ui_notice(ui_tr("заявка в друзья отправлена")); return; }
+    if (r->status == 400) { ui_notice(ui_tr("заявка не отправлена: нет такого пользователя или он не принимает заявки")); return; }
     char e[160];
-    http_err(e, sizeof e, "заявка в друзья", r->status);
+    http_err(e, sizeof e, ui_tr("заявка в друзья"), r->status);
     ui_notice("%s", e);
 }
 bool rel_add_name(const char *username, char *err, size_t errn) {
     size_t n = username ? strlen(username) : 0;
-    if (n < 2 || n > 32) { snprintf(err, errn, "имя пользователя: 2-32 символа"); return false; }
+    if (n < 2 || n > 32) { snprintf(err, errn, ui_tr("имя пользователя: 2-32 символа")); return false; }
     for (size_t i = 0; i < n; i++) {
         char c = username[i];
         if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.')) {
-            snprintf(err, errn, "имя пользователя: только латиница a-z, цифры, _ и .");
+            snprintf(err, errn, ui_tr("имя пользователя: только латиница a-z, цифры, _ и ."));
             return false;
         }
     }
@@ -1698,7 +1699,7 @@ bool rel_add_name(const char *username, char *err, size_t errn) {
                              "\"a9b5fb07-92ff-493f-86fe-352a2803b3df\",\"captcha_service\":\"hcaptcha\"}", NULL, NULL);
             return true;
         }
-        ui_notice("заявка в друзья отправлена (демо)");
+        ui_notice(ui_tr("заявка в друзья отправлена (демо)"));
         return true;
     }
     char body[96];
@@ -1801,7 +1802,7 @@ void profile_apply(const cJSON *j) {
 static void on_profile(Resp *r, void *ctx) {
     if ((unsigned)(uintptr_t)ctx != pf_gen) return;
     PF.busy = false;
-    if (r->status != 200) { http_err(PF.error, sizeof PF.error, "профиль", r->status); ui_dirty(); return; }
+    if (r->status != 200) { http_err(PF.error, sizeof PF.error, ui_tr("профиль"), r->status); ui_dirty(); return; }
     cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len);
     profile_apply(j);
     json_done();
@@ -2077,7 +2078,7 @@ void store_event(const char *t, const cJSON *d) {
             S.call.ringing = true;
             const cJSON *vs0 = cJSON_GetArrayItem(jget(d, "voice_states"), 0);
             S.call.caller = vs0 ? jid(vs0, "user_id") : 0;
-            ui_notice("\a входящий звонок: F2 - принять, F3 - отклонить");
+            ui_notice(ui_tr("\a входящий звонок: F2 - принять, F3 - отклонить"));
         } else if (S.call.channel_id == cid) {
             S.call.ringing = false;
         }
@@ -2136,11 +2137,11 @@ bool can_create_invite(u64 cid) {
     return (p & P_CREATE_INVITE) != 0;
 }
 static void on_op(Resp *r, void *ctx) {
-    const char *what = ctx ? (const char *)ctx : "запрос";
-    if (r->status >= 200 && r->status < 300) { ui_notice("%s: готово", what); ui_dirty(); return; }
+    const char *what = ctx ? (const char *)ctx : ui_tr("запрос");
+    if (r->status >= 200 && r->status < 300) { ui_notice(ui_tr("%s: готово"), what); ui_dirty(); return; }
     char e[160];
-    if (r->status == 403) snprintf(e, sizeof e, "%s: нет прав (403)", what);
-    else if (r->status == 400) snprintf(e, sizeof e, "%s: Discord не принял данные (400)", what);
+    if (r->status == 403) snprintf(e, sizeof e, ui_tr("%s: нет прав (403)"), what);
+    else if (r->status == 400) snprintf(e, sizeof e, ui_tr("%s: Discord не принял данные (400)"), what);
     else http_err(e, sizeof e, what, r->status);
     ui_notice("%s", e);
 }
@@ -2148,12 +2149,12 @@ static void on_op(Resp *r, void *ctx) {
 static size_t u8len(const char *s) { size_t n = 0; for (; *s; s++) n += ((unsigned char)*s & 0xC0) != 0x80; return n; }
 /* Имя сервера/канала: 1..max символов после san(), без переводов строк. */
 static bool name_ok(const char *n, size_t maxc, char *err, size_t errn) {
-    if (!n || !*n) { snprintf(err, errn, "название не может быть пустым"); return false; }
-    if (u8len(n) > maxc) { snprintf(err, errn, "название: не больше %zu символов", maxc); return false; }
+    if (!n || !*n) { snprintf(err, errn, ui_tr("название не может быть пустым")); return false; }
+    if (u8len(n) > maxc) { snprintf(err, errn, ui_tr("название: не больше %zu символов"), maxc); return false; }
     char *t = san(n, false);
     bool ok = !strcmp(t, n);
     free(t);
-    if (!ok) snprintf(err, errn, "в названии недопустимые символы");
+    if (!ok) snprintf(err, errn, ui_tr("в названии недопустимые символы"));
     return ok;
 }
 /* Картинка с диска -> "data:image/...;base64,..." (в куче только на время запроса). "" -> null. */
@@ -2169,8 +2170,8 @@ static bool image_json(const char *path, Buf *out, char *err, size_t errn) {
     else if (n >= 3 && d[0] == 0xFF && d[1] == 0xD8 && d[2] == 0xFF) mime = "image/jpeg";
     else if (n >= 6 && !memcmp(d, "GIF8", 4)) mime = "image/gif";
     bool ok = false;
-    if (n > ICON_MAX) snprintf(err, errn, "картинка больше 256 КБ");
-    else if (!mime) snprintf(err, errn, "картинка: нужен PNG, JPEG или GIF");
+    if (n > ICON_MAX) snprintf(err, errn, ui_tr("картинка больше 256 КБ"));
+    else if (!mime) snprintf(err, errn, ui_tr("картинка: нужен PNG, JPEG или GIF"));
     else {
         buf_printf(out, "\"data:%s;base64,", mime);
         base64_enc(d, n, out);
@@ -2203,19 +2204,19 @@ bool guild_create(const char *name, const char *icon_path, char *err, size_t err
         json_done();
         buf_free(&g);
         buf_free(&b);
-        ui_notice("сервер создан (демо)");
+        ui_notice(ui_tr("сервер создан (демо)"));
         return true;
     }
-    http_async("POST", "/guilds", b.p, on_op, (void *)"создание сервера");
+    http_async("POST", "/guilds", b.p, on_op, (void *)ui_tr("создание сервера"));
     buf_free(&b);
     return true;
 }
 bool guild_edit(u64 gid, const char *name, const char *description, const char *icon_path, const char *banner_path, char *err, size_t errn) {
     Guild *g = guild_find(gid);
-    if (!g) { snprintf(err, errn, "сервер не найден"); return false; }
+    if (!g) { snprintf(err, errn, ui_tr("сервер не найден")); return false; }
     if (!can_manage_guild(gid)) { snprintf(err, errn, "нет права \"Управлять сервером\""); return false; }
     if (name && !name_ok(name, 100, err, errn)) return false;
-    if (description && u8len(description) > 120) { snprintf(err, errn, "описание: не больше 120 символов"); return false; }
+    if (description && u8len(description) > 120) { snprintf(err, errn, ui_tr("описание: не больше 120 символов")); return false; }
     Buf b = {0};
     buf_puts(&b, "{");
     bool any = false;
@@ -2228,19 +2229,19 @@ bool guild_edit(u64 gid, const char *name, const char *description, const char *
     if (icon_path) { buf_puts(&b, any ? ",\"icon\":" : "\"icon\":"); if (!image_json(icon_path, &b, err, errn)) { buf_free(&b); return false; } any = true; }
     if (banner_path) { buf_puts(&b, any ? ",\"banner\":" : "\"banner\":"); if (!image_json(banner_path, &b, err, errn)) { buf_free(&b); return false; } any = true; }
     buf_puts(&b, "}");
-    if (!any) { buf_free(&b); snprintf(err, errn, "нечего менять"); return false; }
+    if (!any) { buf_free(&b); snprintf(err, errn, ui_tr("нечего менять")); return false; }
     if (O.demo) {
         if (name) { free(g->name); g->name = san(name, false); }
         if (description) { free(GD.desc); GD.desc = *description ? san(description, true) : NULL; GD.gid = gid; GD.loaded = true; }
         buf_free(&b);
-        ui_notice("сервер изменён (демо)");
+        ui_notice(ui_tr("сервер изменён (демо)"));
         ui_dirty();
         return true;
     }
     char path[64];
     snprintf(path, sizeof path, "/guilds/%llu", (unsigned long long)gid);
     if (GD.gid == gid) GD.loaded = false;       /* описание перечитать при следующем показе */
-    http_async("PATCH", path, b.p, on_op, (void *)"изменение сервера");
+    http_async("PATCH", path, b.p, on_op, (void *)ui_tr("изменение сервера"));
     buf_free(&b);
     return true;
 }
@@ -2253,21 +2254,21 @@ static void guild_drop_local(u64 gid) {
 }
 void guild_leave(u64 gid) {
     if (!guild_find(gid)) return;
-    if (guild_is_owner(gid)) { ui_notice("владелец не может покинуть свой сервер (только удалить)"); return; }
-    if (O.demo) { guild_drop_local(gid); ui_notice("вы покинули сервер (демо)"); return; }
+    if (guild_is_owner(gid)) { ui_notice(ui_tr("владелец не может покинуть свой сервер (только удалить)")); return; }
+    if (O.demo) { guild_drop_local(gid); ui_notice(ui_tr("вы покинули сервер (демо)")); return; }
     char path[64];
     snprintf(path, sizeof path, "/users/@me/guilds/%llu", (unsigned long long)gid);
-    http_async("DELETE", path, "{\"lurking\":false}", on_op, (void *)"выход с сервера");
+    http_async("DELETE", path, "{\"lurking\":false}", on_op, (void *)ui_tr("выход с сервера"));
 }
 bool guild_delete(u64 gid, const char *typed_name, char *err, size_t errn) {
     Guild *g = guild_find(gid);
-    if (!g) { snprintf(err, errn, "сервер не найден"); return false; }
-    if (!guild_is_owner(gid)) { snprintf(err, errn, "удалить сервер может только владелец"); return false; }
-    if (!typed_name || !g->name || strcmp(typed_name, g->name)) { snprintf(err, errn, "для подтверждения введите название сервера точно"); return false; }
-    if (O.demo) { guild_drop_local(gid); ui_notice("сервер удалён (демо)"); return true; }
+    if (!g) { snprintf(err, errn, ui_tr("сервер не найден")); return false; }
+    if (!guild_is_owner(gid)) { snprintf(err, errn, ui_tr("удалить сервер может только владелец")); return false; }
+    if (!typed_name || !g->name || strcmp(typed_name, g->name)) { snprintf(err, errn, ui_tr("для подтверждения введите название сервера точно")); return false; }
+    if (O.demo) { guild_drop_local(gid); ui_notice(ui_tr("сервер удалён (демо)")); return true; }
     char path[64];
     snprintf(path, sizeof path, "/guilds/%llu", (unsigned long long)gid);
-    http_async("DELETE", path, NULL, on_op, (void *)"удаление сервера");
+    http_async("DELETE", path, NULL, on_op, (void *)ui_tr("удаление сервера"));
     return true;
 }
 
@@ -2294,7 +2295,7 @@ const char *guild_description(u64 gid) {
     GD.desc = NULL;
     GD.gid = gid;
     GD.loaded = false;
-    if (O.demo) { GD.desc = xstrdup(gid == 2000 ? "Уютный сервер для своих. Без токсичности." : ""); GD.loaded = true; return GD.desc; }
+    if (O.demo) { GD.desc = xstrdup(gid == 2000 ? ui_tr("Уютный сервер для своих. Без токсичности.") : ""); GD.loaded = true; return GD.desc; }
     GD.busy = true;
     char path[48];
     snprintf(path, sizeof path, "/guilds/%llu", (unsigned long long)gid);
@@ -2371,18 +2372,18 @@ const char *role_name(u64 gid, u64 rid) {
 /* ---------- каналы ---------- */
 static bool chan_manageable(u64 cid, Channel **out, char *err, size_t errn) {
     Channel *c = chan_find(cid);
-    if (!c || !c->guild_id) { if (err) snprintf(err, errn, "канал не найден"); return false; }
+    if (!c || !c->guild_id) { if (err) snprintf(err, errn, ui_tr("канал не найден")); return false; }
     if (!can_manage_channels(c->guild_id)) { if (err) snprintf(err, errn, "нет права \"Управлять каналами\""); return false; }
     *out = c;
     return true;
 }
 bool chan_create(u64 gid, int kind, const char *name, u64 parent_id, char *err, size_t errn) {
-    if (!guild_find(gid)) { snprintf(err, errn, "сервер не найден"); return false; }
+    if (!guild_find(gid)) { snprintf(err, errn, ui_tr("сервер не найден")); return false; }
     if (!can_manage_channels(gid)) { snprintf(err, errn, "нет права \"Управлять каналами\""); return false; }
-    if (kind != CHK_TEXT && kind != CHK_VOICE && kind != CHK_CATEGORY) { snprintf(err, errn, "неизвестный тип канала"); return false; }
+    if (kind != CHK_TEXT && kind != CHK_VOICE && kind != CHK_CATEGORY) { snprintf(err, errn, ui_tr("неизвестный тип канала")); return false; }
     if (!name_ok(name, 100, err, errn)) return false;
     Channel *p = parent_id ? chan_find(parent_id) : NULL;
-    if (parent_id && (!p || p->type != CH_CATEGORY || p->guild_id != gid || kind == CHK_CATEGORY)) { snprintf(err, errn, "родитель - только категория этого сервера"); return false; }
+    if (parent_id && (!p || p->type != CH_CATEGORY || p->guild_id != gid || kind == CHK_CATEGORY)) { snprintf(err, errn, ui_tr("родитель - только категория этого сервера")); return false; }
     Buf b = {0};
     buf_puts(&b, "{\"name\":");
     buf_json_str(&b, name);
@@ -2400,12 +2401,12 @@ bool chan_create(u64 gid, int kind, const char *name, u64 parent_id, char *err, 
         json_done();
         buf_free(&c);
         buf_free(&b);
-        ui_notice("канал создан (демо)");
+        ui_notice(ui_tr("канал создан (демо)"));
         return true;
     }
     char path[64];
     snprintf(path, sizeof path, "/guilds/%llu/channels", (unsigned long long)gid);
-    http_async("POST", path, b.p, on_op, (void *)"создание канала");
+    http_async("POST", path, b.p, on_op, (void *)ui_tr("создание канала"));
     buf_free(&b);
     return true;
 }
@@ -2413,9 +2414,9 @@ bool chan_edit(u64 cid, const ChanEdit *e, char *err, size_t errn) {
     Channel *c;
     if (!e || !chan_manageable(cid, &c, err, errn)) return false;
     if (e->name && !name_ok(e->name, 100, err, errn)) return false;
-    if (e->topic && u8len(e->topic) > 1024) { snprintf(err, errn, "тема: не больше 1024 символов"); return false; }
-    if (e->slowmode > 21600) { snprintf(err, errn, "медленный режим: не больше 6 часов"); return false; }
-    if (e->user_limit > 99) { snprintf(err, errn, "лимит участников: 0..99"); return false; }
+    if (e->topic && u8len(e->topic) > 1024) { snprintf(err, errn, ui_tr("тема: не больше 1024 символов")); return false; }
+    if (e->slowmode > 21600) { snprintf(err, errn, ui_tr("медленный режим: не больше 6 часов")); return false; }
+    if (e->user_limit > 99) { snprintf(err, errn, ui_tr("лимит участников: 0..99")); return false; }
     /* ревью 6 С1: только изменённые поля — если исходные значения загружены (chan_info), равные им не шлём */
     bool known = CI.cid == cid && CI.loaded;
     const char *nm = e->name && !(known && !strcmp(e->name, CI.name)) ? e->name : NULL;
@@ -2436,20 +2437,20 @@ bool chan_edit(u64 cid, const ChanEdit *e, char *err, size_t errn) {
     if (ul >= 0) { SEP(); buf_printf(&b, "\"user_limit\":%d", ul); }
 #undef SEP
     buf_puts(&b, "}");
-    if (!n) { buf_free(&b); snprintf(err, errn, "нечего менять"); return false; }
-    if (!n) { buf_free(&b); snprintf(err, errn, "ничего не изменено"); return false; }
+    if (!n) { buf_free(&b); snprintf(err, errn, ui_tr("нечего менять")); return false; }
+    if (!n) { buf_free(&b); snprintf(err, errn, ui_tr("ничего не изменено")); return false; }
     CI.loaded = false;                          /* значения перечитать при следующем показе */
     if (O.demo) {
         if (nm) { free(c->name); c->name = san(nm, false); }
         if (tp && cid == topic_ch) { free(c->topic); c->topic = topic_copy(tp); }
         buf_free(&b);
-        ui_notice("канал изменён (демо)");
+        ui_notice(ui_tr("канал изменён (демо)"));
         ui_dirty();
         return true;
     }
     char path[48];
     snprintf(path, sizeof path, "/channels/%llu", (unsigned long long)cid);
-    http_async("PATCH", path, b.p, on_op, (void *)"изменение канала");
+    http_async("PATCH", path, b.p, on_op, (void *)ui_tr("изменение канала"));
     buf_free(&b);
     return true;
 }
@@ -2468,7 +2469,7 @@ static void on_chan_info(Resp *r, void *ctx) {
     if ((u64)(uintptr_t)ctx != CI.cid) return;
     CI.busy = false;
     if (r->status == 200) { cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len); ci_fill(j); json_done(); }
-    else { ui_notice("канал: настройки не загрузились (%ld)", r->status); CI.failed = r->status ? r->status : -1; }   /* не повторять в каждом кадре */
+    else { ui_notice(ui_tr("канал: настройки не загрузились (%ld)"), r->status); CI.failed = r->status ? r->status : -1; }   /* не повторять в каждом кадре */
     ui_dirty();
 }
 long chan_info_failed(u64 cid) { return CI.cid == cid ? CI.failed : 0; }
@@ -2511,12 +2512,12 @@ void chan_delete(u64 cid) {
         cJSON *j = json_parse(b, strlen(b));
         if (j) store_event("CHANNEL_DELETE", j);
         json_done();
-        ui_notice("канал удалён (демо)");
+        ui_notice(ui_tr("канал удалён (демо)"));
         return;
     }
     char path[48];
     snprintf(path, sizeof path, "/channels/%llu", (unsigned long long)cid);
-    http_async("DELETE", path, NULL, on_op, (void *)"удаление канала");
+    http_async("DELETE", path, NULL, on_op, (void *)ui_tr("удаление канала"));
 }
 /* Группа сортировки Discord: категории, голосовые, остальные (текстовые) — позиции сравниваются внутри группы. */
 static int chan_group(int t) { return t == CH_CATEGORY ? 2 : (t == CH_VOICE || t == CH_STAGE) ? 1 : 0; }
@@ -2553,7 +2554,7 @@ void chan_swap(u64 cid, int dir) {
     buf_put(&b, "]", 1);
     char path[48];
     snprintf(path, sizeof path, "/guilds/%llu/channels", (unsigned long long)c->guild_id);
-    http_async("PATCH", path, b.p, on_op, (void *)"перестановка каналов");
+    http_async("PATCH", path, b.p, on_op, (void *)ui_tr("перестановка каналов"));
     buf_free(&b);
 }
 void chan_move(u64 cid, u64 new_parent, int new_position) {
@@ -2567,7 +2568,7 @@ void chan_move(u64 cid, u64 new_parent, int new_position) {
     }
     if (new_position < 0) new_position = 0;
     Channel *p = new_parent ? chan_find(new_parent) : NULL;
-    if (new_parent && (!p || p->type != CH_CATEGORY || p->guild_id != c->guild_id || c->type == CH_CATEGORY)) { ui_notice("переместить можно только в категорию этого сервера"); return; }
+    if (new_parent && (!p || p->type != CH_CATEGORY || p->guild_id != c->guild_id || c->type == CH_CATEGORY)) { ui_notice(ui_tr("переместить можно только в категорию этого сервера")); return; }
     if (O.demo) { c->position = new_position; c->parent_id = new_parent; ui_dirty(); return; }
     char path[48], body[160];
     snprintf(path, sizeof path, "/guilds/%llu/channels", (unsigned long long)c->guild_id);
@@ -2575,12 +2576,12 @@ void chan_move(u64 cid, u64 new_parent, int new_position) {
     else if (new_parent) snprintf(body, sizeof body, "[{\"id\":\"%llu\",\"position\":%d,\"parent_id\":\"%llu\",\"lock_permissions\":false}]",
                                   (unsigned long long)cid, new_position, (unsigned long long)new_parent);
     else snprintf(body, sizeof body, "[{\"id\":\"%llu\",\"position\":%d,\"parent_id\":null}]", (unsigned long long)cid, new_position);
-    http_async("PATCH", path, body, on_op, (void *)"перемещение канала");
+    http_async("PATCH", path, body, on_op, (void *)ui_tr("перемещение канала"));
 }
 void chan_perm_set(u64 cid, u64 target, int type, u64 allow, u64 deny) {
     Channel *c;
     char err[96];
-    if (!chan_manageable(cid, &c, err, sizeof err) || !can_manage_roles(c->guild_id)) { ui_notice("нет прав менять права канала"); return; }
+    if (!chan_manageable(cid, &c, err, sizeof err) || !can_manage_roles(c->guild_id)) { ui_notice(ui_tr("нет прав менять права канала")); return; }
     if (!target || (type != OW_ROLE && type != OW_MEMBER)) return;
     allow &= ~deny;                             /* один бит не может быть и разрешён, и запрещён */
     if (O.demo) {
@@ -2595,7 +2596,7 @@ void chan_perm_set(u64 cid, u64 target, int type, u64 allow, u64 deny) {
     char path[96], body[128];
     snprintf(path, sizeof path, "/channels/%llu/permissions/%llu", (unsigned long long)cid, (unsigned long long)target);
     snprintf(body, sizeof body, "{\"type\":%d,\"allow\":\"%llu\",\"deny\":\"%llu\"}", type, (unsigned long long)allow, (unsigned long long)deny);
-    http_async("PUT", path, body, on_op, (void *)"права канала");
+    http_async("PUT", path, body, on_op, (void *)ui_tr("права канала"));
 }
 /* Исходная перезапись канала для target (из модели): false — нет перезаписи. */
 bool chan_overwrite(u64 cid, u64 target, u64 *allow, u64 *deny, int *type) {
@@ -2621,7 +2622,7 @@ void chan_perm_edit(u64 cid, u64 target, int type, u64 mask, u64 allow, u64 deny
 void chan_perm_clear(u64 cid, u64 target) {
     Channel *c;
     char err[96];
-    if (!chan_manageable(cid, &c, err, sizeof err) || !can_manage_roles(c->guild_id)) { ui_notice("нет прав менять права канала"); return; }
+    if (!chan_manageable(cid, &c, err, sizeof err) || !can_manage_roles(c->guild_id)) { ui_notice(ui_tr("нет прав менять права канала")); return; }
     if (O.demo) {
         for (int i = 0; i < c->now_; i++) if (c->ow[i].id == target) { c->ow[i] = c->ow[--c->now_]; break; }
         compute_perms(c);
@@ -2630,7 +2631,7 @@ void chan_perm_clear(u64 cid, u64 target) {
     }
     char path[96];
     snprintf(path, sizeof path, "/channels/%llu/permissions/%llu", (unsigned long long)cid, (unsigned long long)target);
-    http_async("DELETE", path, NULL, on_op, (void *)"права канала");
+    http_async("DELETE", path, NULL, on_op, (void *)ui_tr("права канала"));
 }
 
 /* ---------- приглашения ---------- */
@@ -2691,25 +2692,25 @@ void invite_apply(const cJSON *j) {
     IV.channel_name = iv_cname;
     IV.inviter = iv_inviter;
     IV.joined = IV.guild_id && guild_find(IV.guild_id) != NULL;
-    if (!IV.guild_id) snprintf(IV.error, sizeof IV.error, "приглашение не на сервер (группа?) - не поддерживается");
+    if (!IV.guild_id) snprintf(IV.error, sizeof IV.error, ui_tr("приглашение не на сервер (группа?) - не поддерживается"));
     ui_dirty();
 }
 static void on_invite(Resp *r, void *ctx) {
     if ((unsigned)(uintptr_t)ctx != iv_gen) return;
     IV.busy = false;
     if (r->status == 200) { cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len); invite_apply(j); json_done(); return; }
-    if (r->status == 404 || r->status == 400) snprintf(IV.error, sizeof IV.error, "приглашение недействительно или истекло");
-    else http_err(IV.error, sizeof IV.error, "приглашение", r->status);
+    if (r->status == 404 || r->status == 400) snprintf(IV.error, sizeof IV.error, ui_tr("приглашение недействительно или истекло"));
+    else http_err(IV.error, sizeof IV.error, ui_tr("приглашение"), r->status);
     ui_dirty();
 }
 static char iv_input[200];                      /* что ввёл пользователь (для inputValue) */
 void invite_open(const char *code_or_url) {
     invite_close();
     snprintf(iv_input, sizeof iv_input, "%s", code_or_url ? code_or_url : "");
-    if (!invite_parse(code_or_url, IV.code, sizeof IV.code)) { snprintf(IV.error, sizeof IV.error, "это не ссылка-приглашение Discord"); ui_dirty(); return; }
+    if (!invite_parse(code_or_url, IV.code, sizeof IV.code)) { snprintf(IV.error, sizeof IV.error, ui_tr("это не ссылка-приглашение Discord")); ui_dirty(); return; }
     if (O.demo) {
-        if (!strcmp(IV.code, "xyz")) snprintf(IV.error, sizeof IV.error, "приглашение недействительно или истекло");
-        else if (!strcmp(IV.code, "429")) snprintf(IV.error, sizeof IV.error, "приглашение: слишком часто, попробуйте позже");
+        if (!strcmp(IV.code, "xyz")) snprintf(IV.error, sizeof IV.error, ui_tr("приглашение недействительно или истекло"));
+        else if (!strcmp(IV.code, "429")) snprintf(IV.error, sizeof IV.error, ui_tr("приглашение: слишком часто, попробуйте позже"));
         else {
             static const char D[] = "{\"code\":\"abc\",\"guild\":{\"id\":\"2300\",\"name\":\"Котики 2\",\"icon\":\"7123456789abcdef0123456789abcdef\"},"
                 "\"channel\":{\"name\":\"общий\"},\"inviter\":{\"id\":\"1001\",\"global_name\":\"Алиса\"},\"approximate_member_count\":1234,\"approximate_presence_count\":321}";
@@ -2738,7 +2739,7 @@ static void on_join(Resp *r, void *ctx) {
     if (r->status == 200) { IV.joined = true; ui_notice("вы вступили на сервер \"%s\"", iv_gname); }
     else if ((r->status == 400 && r->body.p && strstr(r->body.p, "captcha")) || r->status == 403) {
         IV.need_browser = true;                     /* капча или отказ: вступить через браузер */
-        snprintf(IV.error, sizeof IV.error, "Discord требует вступить через браузер");
+        snprintf(IV.error, sizeof IV.error, ui_tr("Discord требует вступить через браузер"));
     }
     else {
         /* причина от Discord (code + message): 403 бывает и «нужна подтверждённая почта/телефон», и «вас не пускают» */
@@ -2747,8 +2748,8 @@ static void on_join(Resp *r, void *ctx) {
         long code = (long)jint(j, "code", 0);
         (void)m;
         if (r->status == 403 || r->status == 401)
-            snprintf(IV.error, sizeof IV.error, "Discord отклонил вступление (код %ld) - вступите из официального приложения, затем сервер будет доступен в Astra DS", code ? code : r->status);
-        else http_err(IV.error, sizeof IV.error, "вступление", r->status);
+            snprintf(IV.error, sizeof IV.error, ui_tr("Discord отклонил вступление (код %ld) - вступите из официального приложения, затем сервер будет доступен в Astra DS"), code ? code : r->status);
+        else http_err(IV.error, sizeof IV.error, ui_tr("вступление"), r->status);
         utf8_cut(IV.error, sizeof IV.error - 1);
         json_done();
     }
@@ -2759,17 +2760,17 @@ static void on_join(Resp *r, void *ctx) {
  * в браузере (https://discord.gg/КОД), сервер приходит событием GUILD_CREATE. Пауза между вступлениями,
  * разовое предупреждение о риске (частые вступления из стороннего клиента Discord может наказать). */
 const char *invite_risk_text(void) {
-    return "Вступление из стороннего клиента: Discord может попросить капчу или отказать, а частые вступления - "
-           "ограничить аккаунт. Если Discord попросит проверку, Astra DS предложит вступить через браузер.";
+    return ui_tr("Вступление из стороннего клиента: Discord может попросить капчу или отказать, а частые вступления - "
+           "ограничить аккаунт. Если Discord попросит проверку, Astra DS предложит вступить через браузер.");
 }
 void invite_risk_ack(void) { iv_risk_ack = true; IV.risk_warning = false; ui_dirty(); }
 bool invite_open_browser(void) {
     if (!invite_code_ok(IV.code, strlen(IV.code))) return false;
     char url[64];
     snprintf(url, sizeof url, "https://discord.gg/%s", IV.code);
-    if (O.demo) { ui_notice("демо: открыл бы %s в браузере", url); return true; }
+    if (O.demo) { ui_notice(ui_tr("демо: открыл бы %s в браузере"), url); return true; }
     bool ok = open_url_browser(url);
-    ui_notice(ok ? "открыто в браузере: вступите там - сервер появится в Astra DS сам" : "браузер не открылся: откройте %s вручную", url);
+    ui_notice(ok ? ui_tr("открыто в браузере: вступите там - сервер появится в Astra DS сам") : ui_tr("браузер не открылся: откройте %s вручную"), url);
     return ok;
 }
 void invite_join(void) {
@@ -2777,14 +2778,14 @@ void invite_join(void) {
     if (!iv_risk_ack) { IV.risk_warning = true; ui_dirty(); return; }   /* сначала — разовое предупреждение */
     i64 now = now_ms();
     if (iv_last_join && now - iv_last_join < INVITE_GAP_MS) {
-        snprintf(IV.error, sizeof IV.error, "вступать можно не чаще раза в 30 с - подождите %lld с", (long long)((INVITE_GAP_MS - (now - iv_last_join) + 999) / 1000));
+        snprintf(IV.error, sizeof IV.error, ui_tr("вступать можно не чаще раза в 30 с - подождите %lld с"), (long long)((INVITE_GAP_MS - (now - iv_last_join) + 999) / 1000));
         ui_dirty();
         return;
     }
     iv_last_join = now;
     if (O.demo && !strcmp(IV.code, "captcha")) {    /* демо: Discord «просит капчу» — путь через браузер */
         IV.need_browser = true;
-        snprintf(IV.error, sizeof IV.error, "Discord требует вступить через браузер");
+        snprintf(IV.error, sizeof IV.error, ui_tr("Discord требует вступить через браузер"));
         ui_dirty();
         return;
     }
@@ -2828,19 +2829,19 @@ static void on_inv_create(Resp *r, void *ctx) {
     if (r->status == 200) {
         cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len);
         const char *c = jstr(j, "code");
-        if (c && invite_code_ok(c, strlen(c))) { snprintf(iv_link, sizeof iv_link, "https://discord.gg/%s", c); ui_notice("приглашение: %s", iv_link); }
+        if (c && invite_code_ok(c, strlen(c))) { snprintf(iv_link, sizeof iv_link, "https://discord.gg/%s", c); ui_notice(ui_tr("приглашение: %s"), iv_link); }
         json_done();
-    } else { char e[160]; http_err(e, sizeof e, "приглашение", r->status); ui_notice("%s", e); }
+    } else { char e[160]; http_err(e, sizeof e, ui_tr("приглашение"), r->status); ui_notice("%s", e); }
     ui_dirty();
 }
 void invite_create(u64 cid, int max_age_s, int max_uses) {
     iv_link[0] = 0;
-    if (!can_create_invite(cid)) { ui_notice("нет права создавать приглашения в этом канале"); return; }
+    if (!can_create_invite(cid)) { ui_notice(ui_tr("нет права создавать приглашения в этом канале")); return; }
     if (max_age_s < 0) max_age_s = 0;
     if (max_age_s > 604800) max_age_s = 604800;
     if (max_uses < 0) max_uses = 0;
     if (max_uses > 100) max_uses = 100;
-    if (O.demo) { snprintf(iv_link, sizeof iv_link, "https://discord.gg/demo%llu", (unsigned long long)(cid % 1000)); ui_notice("приглашение: %s (демо)", iv_link); ui_dirty(); return; }
+    if (O.demo) { snprintf(iv_link, sizeof iv_link, "https://discord.gg/demo%llu", (unsigned long long)(cid % 1000)); ui_notice(ui_tr("приглашение: %s (демо)"), iv_link); ui_dirty(); return; }
     char path[64], body[96];
     snprintf(path, sizeof path, "/channels/%llu/invites", (unsigned long long)cid);
     snprintf(body, sizeof body, "{\"max_age\":%d,\"max_uses\":%d,\"temporary\":false}", max_age_s, max_uses);
@@ -2888,7 +2889,7 @@ void mute_guild(u64 gid, bool mute) {
     if (!g) return;
     u8 old = g->muted;
     g->muted = mute;                            /* сразу в модели; USER_GUILD_SETTINGS_UPDATE подтвердит */
-    settings_patch(gid, mute ? "{\"muted\":true,\"mute_config\":null}" : "{\"muted\":false}", mute ? "заглушить сервер" : "включить сервер",
+    settings_patch(gid, mute ? "{\"muted\":true,\"mute_config\":null}" : "{\"muted\":false}", mute ? ui_tr("заглушить сервер") : ui_tr("включить сервер"),
                    SR_GMUTE, gid, old);
     ui_dirty();
 }
@@ -2900,7 +2901,7 @@ void mute_channel(u64 cid, bool mute) {
     char b[160];
     snprintf(b, sizeof b, "{\"channel_overrides\":{\"%llu\":{\"muted\":%s%s}}}", (unsigned long long)cid,
              mute ? "true" : "false", mute ? ",\"mute_config\":null" : "");
-    settings_patch(c->guild_id, b, mute ? "заглушить канал" : "включить канал", SR_CMUTE, cid, old);
+    settings_patch(c->guild_id, b, mute ? ui_tr("заглушить канал") : ui_tr("включить канал"), SR_CMUTE, cid, old);
     ui_dirty();
 }
 void notify_level(u64 gid, u64 cid, int level) {
@@ -2912,14 +2913,14 @@ void notify_level(u64 gid, u64 cid, int level) {
         u8 old = c->notify;
         c->notify = (u8)level;
         snprintf(b, sizeof b, "{\"channel_overrides\":{\"%llu\":{\"message_notifications\":%d}}}", (unsigned long long)cid, level);
-        settings_patch(c->guild_id, b, "уведомления канала", SR_CNOTIFY, cid, old);
+        settings_patch(c->guild_id, b, ui_tr("уведомления канала"), SR_CNOTIFY, cid, old);
     } else {
         Guild *g = guild_find(gid);
         if (!g || level == NOTIFY_DEFAULT) return;
         u8 old = g->notify;
         g->notify = (u8)level;
         snprintf(b, sizeof b, "{\"message_notifications\":%d}", level);
-        settings_patch(gid, b, "уведомления сервера", SR_GNOTIFY, gid, old);
+        settings_patch(gid, b, ui_tr("уведомления сервера"), SR_GNOTIFY, gid, old);
     }
     ui_dirty();
 }
@@ -2961,9 +2962,9 @@ static void slow_after_send(u64 cid) {
     if (l.slowmode > 0) slow_set(cid, wall_ms() / 1000 + l.slowmode);
 }
 static void fmt_wait(i64 s, char *out, size_t n) {
-    if (s >= 3600) snprintf(out, n, "%lld ч %lld мин", (long long)(s / 3600), (long long)(s / 60 % 60));
-    else if (s >= 60) snprintf(out, n, "%lld мин %lld с", (long long)(s / 60), (long long)(s % 60));
-    else snprintf(out, n, "%lld с", (long long)s);
+    if (s >= 3600) snprintf(out, n, ui_tr("%lld ч %lld мин"), (long long)(s / 3600), (long long)(s / 60 % 60));
+    else if (s >= 60) snprintf(out, n, ui_tr("%lld мин %lld с"), (long long)(s / 60), (long long)(s % 60));
+    else snprintf(out, n, ui_tr("%lld с"), (long long)s);
 }
 static i64 slow_next_wake(void) {
     SendLimit l;
@@ -3008,7 +3009,7 @@ static void pend_on_clear(void) {
         pend_drop(i);
     }
     demo_slow = 0;
-    if (back) ui_notice("неотправленное сообщение возвращено в поле ввода");
+    if (back) ui_notice(ui_tr("неотправленное сообщение возвращено в поле ввода"));
 }
 static void on_send(Resp *r, void *ctx) {
     u64 nonce = (u64)(uintptr_t)ctx;
@@ -3042,11 +3043,11 @@ static void on_send(Resp *r, void *ctx) {
             slow_set(PD[i].cid, wall_ms() / 1000 + (i64)(ra + 0.999));
             char w[48];
             fmt_wait((i64)(ra + 0.999), w, sizeof w);
-            ui_notice("медленный режим: можно писать через %s", w);
+            ui_notice(ui_tr("медленный режим: можно писать через %s"), w);
             return;
         }
     }
-    http_err(e, sizeof e, "сообщение не отправлено", r->status);
+    http_err(e, sizeof e, ui_tr("сообщение не отправлено"), r->status);
     ui_notice("%s", e);
 }
 static void send_post(int i) {
@@ -3073,10 +3074,10 @@ u64 msg_send(u64 cid, const char *text, u64 reply_to, int opts) {
         send_limit(cid, &l);
         i64 now = wall_ms() / 1000;
         char w[48];
-        if (l.timeout_until) { fmt_wait(l.timeout_until - now, w, sizeof w); ui_notice("тайм-аут на сервере: писать можно через %s", w); return 0; }
+        if (l.timeout_until) { fmt_wait(l.timeout_until - now, w, sizeof w); ui_notice(ui_tr("тайм-аут на сервере: писать можно через %s"), w); return 0; }
         Guild *pg = c->guild_id ? guild_find(c->guild_id) : NULL;
-        if (pg && pg->pending) { ui_notice("сначала примите правила сервера"); return 0; }   /* №128 */
-        if (l.slow_until) { fmt_wait(l.slow_until - now, w, sizeof w); ui_notice("медленный режим: можно писать через %s", w); return 0; }
+        if (pg && pg->pending) { ui_notice(ui_tr("сначала примите правила сервера")); return 0; }   /* №128 */
+        if (l.slow_until) { fmt_wait(l.slow_until - now, w, sizeof w); ui_notice(ui_tr("медленный режим: можно писать через %s"), w); return 0; }
     }
     bool slow = O.demo && strstr(text, "!slow");
     if (O.demo && chan_is_thread(c) && strstr(text, "!delthread")) { demo_del_th = cid; demo_del_at = now_ms() + 3000; }
@@ -3087,7 +3088,7 @@ u64 msg_send(u64 cid, const char *text, u64 reply_to, int opts) {
     if (i == PEND_MAX) {                        /* полна: вытеснить самый старый «не отправлено» */
         int old = -1;
         for (int k = 0; k < PEND_MAX; k++) if (!PD[k].fly && (old < 0 || PD[k].at < PD[old].at)) old = k;
-        if (old < 0) { ui_notice("слишком много неотправленных сообщений"); return 0; }
+        if (old < 0) { ui_notice(ui_tr("слишком много неотправленных сообщений")); return 0; }
         local_remove(PD[old].nonce);
         pend_drop(old);
         i = old;
@@ -3191,7 +3192,7 @@ static void on_emojis(Resp *r, void *ctx) {
     if ((u64)(uintptr_t)ctx != EM.gid || !EM.busy) return;
     EM.busy = false;
     if (r->status == 200) { cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len); emoji_fill(j); json_done(); }
-    else http_err(EM.err, sizeof EM.err, "эмодзи сервера", r->status);
+    else http_err(EM.err, sizeof EM.err, ui_tr("эмодзи сервера"), r->status);
     ui_dirty();
 }
 void emoji_open(u64 gid) {
@@ -3427,19 +3428,19 @@ static void poll_vote_ev(const cJSON *d, int delta) {
 static void on_poll(Resp *r, void *ctx) {
     if (r->status >= 200 && r->status < 300) return;   /* голоса придут событиями MESSAGE_POLL_VOTE_* */
     char e[160];
-    http_err(e, sizeof e, ctx ? (const char *)ctx : "опрос", r->status);
+    http_err(e, sizeof e, ctx ? (const char *)ctx : ui_tr("опрос"), r->status);
     ui_notice("%s", e);
 }
 bool poll_vote(u64 cid, u64 mid, const u32 *ids, int n, char *err, size_t errn) {
     Message *m = msg_find(mid, NULL);
     Poll *p = m ? m->poll : NULL;
-    if (!p || cid != S.open_ch) { snprintf(err, errn, "опрос не найден"); return false; }
-    if (p->final || (p->expiry && p->expiry <= wall_ms() / 1000)) { snprintf(err, errn, "опрос завершён"); return false; }
-    if (n < 0 || n > p->n || (n > 1 && !p->multi)) { snprintf(err, errn, "в этом опросе можно выбрать один ответ"); return false; }
+    if (!p || cid != S.open_ch) { snprintf(err, errn, ui_tr("опрос не найден")); return false; }
+    if (p->final || (p->expiry && p->expiry <= wall_ms() / 1000)) { snprintf(err, errn, ui_tr("опрос завершён")); return false; }
+    if (n < 0 || n > p->n || (n > 1 && !p->multi)) { snprintf(err, errn, ui_tr("в этом опросе можно выбрать один ответ")); return false; }
     for (int k = 0; k < n; k++) {
         bool ok = false;
         for (int i = 0; i < p->n; i++) if (p->a[i].id == ids[k]) ok = true;
-        if (!ok) { snprintf(err, errn, "нет такого ответа"); return false; }
+        if (!ok) { snprintf(err, errn, ui_tr("нет такого ответа")); return false; }
     }
     if (O.demo) {                               /* демо: голос сразу в модели */
         for (int i = 0; i < p->n; i++) {
@@ -3457,19 +3458,19 @@ bool poll_vote(u64 cid, u64 mid, const u32 *ids, int n, char *err, size_t errn) 
     buf_puts(&b, "]}");
     char path[96];
     snprintf(path, sizeof path, "/channels/%llu/polls/%llu/answers/@me", (unsigned long long)cid, (unsigned long long)mid);
-    http_async("PUT", path, b.p, on_poll, (void *)(n ? "голос не принят" : "голос не снят"));
+    http_async("PUT", path, b.p, on_poll, (void *)(n ? ui_tr("голос не принят") : ui_tr("голос не снят")));
     buf_free(&b);
     return true;
 }
 bool poll_end(u64 cid, u64 mid, char *err, size_t errn) {
     Message *m = msg_find(mid, NULL);
-    if (!m || !m->poll || cid != S.open_ch) { snprintf(err, errn, "опрос не найден"); return false; }
-    if (m->author_id != S.me_id) { snprintf(err, errn, "завершить опрос может только автор"); return false; }
-    if (m->poll->final) { snprintf(err, errn, "опрос уже завершён"); return false; }
+    if (!m || !m->poll || cid != S.open_ch) { snprintf(err, errn, ui_tr("опрос не найден")); return false; }
+    if (m->author_id != S.me_id) { snprintf(err, errn, ui_tr("завершить опрос может только автор")); return false; }
+    if (m->poll->final) { snprintf(err, errn, ui_tr("опрос уже завершён")); return false; }
     if (O.demo) { m->poll->final = true; ui_dirty(); return true; }
     char path[96];
     snprintf(path, sizeof path, "/channels/%llu/polls/%llu/expire", (unsigned long long)cid, (unsigned long long)mid);
-    http_async("POST", path, NULL, on_poll, (void *)"опрос не завершён");
+    http_async("POST", path, NULL, on_poll, (void *)ui_tr("опрос не завершён"));
     return true;
 }
 
@@ -3658,23 +3659,23 @@ static void on_ix(Resp *r, void *ctx) {
     if (r->status >= 200 && r->status < 300) return;
     ix_nonce = 0;
     char e[160];
-    http_err(e, sizeof e, "бот не принял нажатие", r->status);
+    http_err(e, sizeof e, ui_tr("бот не принял нажатие"), r->status);
     ui_notice("%s", e);
 }
 static bool comp_send(u64 cid, u64 mid, int i, const int *opts, int n, char *err, size_t errn) {
     Message *m = msg_find(mid, NULL);
     Channel *c = chan_find(cid);
-    if (!m || !m->comp || !c || cid != S.open_ch || i < 0 || i >= m->comp->n) { snprintf(err, errn, "кнопка не найдена"); return false; }
+    if (!m || !m->comp || !c || cid != S.open_ch || i < 0 || i >= m->comp->n) { snprintf(err, errn, ui_tr("кнопка не найдена")); return false; }
     const Comp *k = &m->comp->c[i];
-    if (k->disabled) { snprintf(err, errn, "кнопка недоступна"); return false; }
+    if (k->disabled) { snprintf(err, errn, ui_tr("кнопка недоступна")); return false; }
     if (k->style == 5) {
-        if (!*comp_str(m, i, CS_URL)) snprintf(err, errn, "ссылка содержит недопустимые символы");
-        else snprintf(err, errn, "это ссылка: %s", comp_str(m, i, CS_URL));
+        if (!*comp_str(m, i, CS_URL)) snprintf(err, errn, ui_tr("ссылка содержит недопустимые символы"));
+        else snprintf(err, errn, ui_tr("это ссылка: %s"), comp_str(m, i, CS_URL));
         return false;
     }
-    if (k->type == CT_SELECT && (n < k->min || n > k->max || n > k->nopt)) { snprintf(err, errn, "выберите от %d до %d", k->min, k->max); return false; }
-    if (ix_nonce && now_ms() < ix_until) { snprintf(err, errn, "ждём ответа бота на прошлое нажатие"); return false; }
-    if (O.demo) { ui_notice("демо: бот получил «%s»", k->type == CT_BUTTON ? comp_str(m, i, CS_LABEL) : "выбор"); return true; }
+    if (k->type == CT_SELECT && (n < k->min || n > k->max || n > k->nopt)) { snprintf(err, errn, ui_tr("выберите от %d до %d"), k->min, k->max); return false; }
+    if (ix_nonce && now_ms() < ix_until) { snprintf(err, errn, ui_tr("ждём ответа бота на прошлое нажатие")); return false; }
+    if (O.demo) { ui_notice(ui_tr("демо: бот получил «%s»"), k->type == CT_BUTTON ? comp_str(m, i, CS_LABEL) : ui_tr("выбор")); return true; }
     u64 nonce = snowflake_now();
     Buf b = {0};
     buf_printf(&b, "{\"type\":3,\"nonce\":\"%llu\",", (unsigned long long)nonce);
@@ -3688,7 +3689,7 @@ static bool comp_send(u64 cid, u64 mid, int i, const int *opts, int n, char *err
         buf_puts(&b, ",\"type\":3,\"values\":[");
         for (int q = 0; q < n; q++) {
             const char *lb, *v;
-            if (opts[q] < 0 || !comp_option(m, i, opts[q], &lb, &v)) { buf_free(&b); snprintf(err, errn, "нет такого варианта"); return false; }
+            if (opts[q] < 0 || !comp_option(m, i, opts[q], &lb, &v)) { buf_free(&b); snprintf(err, errn, ui_tr("нет такого варианта")); return false; }
             if (q) buf_puts(&b, ",");
             buf_json_str(&b, v);
         }
@@ -3703,22 +3704,22 @@ static bool comp_send(u64 cid, u64 mid, int i, const int *opts, int n, char *err
 }
 bool comp_click(u64 cid, u64 mid, int i, char *err, size_t errn) {
     Message *m = msg_find(mid, NULL);
-    if (m && m->comp && i >= 0 && i < m->comp->n && m->comp->c[i].type != CT_BUTTON) { snprintf(err, errn, "это список"); return false; }
+    if (m && m->comp && i >= 0 && i < m->comp->n && m->comp->c[i].type != CT_BUTTON) { snprintf(err, errn, ui_tr("это список")); return false; }
     return comp_send(cid, mid, i, NULL, 0, err, errn);
 }
 bool comp_select(u64 cid, u64 mid, int i, const int *opts, int n, char *err, size_t errn) {
     Message *m = msg_find(mid, NULL);
-    if (m && m->comp && i >= 0 && i < m->comp->n && m->comp->c[i].type != CT_SELECT) { snprintf(err, errn, "это кнопка"); return false; }
+    if (m && m->comp && i >= 0 && i < m->comp->n && m->comp->c[i].type != CT_SELECT) { snprintf(err, errn, ui_tr("это кнопка")); return false; }
     return comp_send(cid, mid, i, opts, n, err, errn);
 }
 static void ix_event(const char *t, const cJSON *d) {
     u64 n = strtoull(jstr(d, "nonce") ? jstr(d, "nonce") : "0", NULL, 10);
     if (!ix_nonce || n != ix_nonce) return;
     ix_nonce = 0;
-    if (!strcmp(t, "INTERACTION_FAILURE")) ui_notice("бот не ответил на нажатие");
+    if (!strcmp(t, "INTERACTION_FAILURE")) ui_notice(ui_tr("бот не ответил на нажатие"));
 }
 static void ix_tick(i64 now) {
-    if (ix_nonce && now >= ix_until) { ix_nonce = 0; ui_notice("бот не ответил на нажатие"); }
+    if (ix_nonce && now >= ix_until) { ix_nonce = 0; ui_notice(ui_tr("бот не ответил на нажатие")); }
 }
 
 /* ---------- №109/111 запросы на переписку, группы ЛС ---------- */
@@ -3731,7 +3732,7 @@ static void dm_flags(Channel *c, const cJSON *o) {
     if (jget(o, "is_message_request") || jget(o, "is_spam")) c->dmflags = f;
 }
 static void on_dm_op(Resp *r, void *ctx) {
-    const char *what = ctx ? (const char *)ctx : "запрос";
+    const char *what = ctx ? (const char *)ctx : ui_tr("запрос");
     if (r->status >= 200 && r->status < 300) { ui_dirty(); return; }
     char e[160];
     http_err(e, sizeof e, what, r->status);
@@ -3740,7 +3741,7 @@ static void on_dm_op(Resp *r, void *ctx) {
 static Channel *dm_chan(u64 cid, char *err, size_t errn, bool group) {
     Channel *c = chan_find(cid);
     if (!c || c->guild_id || (group && c->type != CH_GROUP) || (!group && c->type != CH_DM && c->type != CH_GROUP)) {
-        snprintf(err, errn, group ? "это не группа" : "беседа не найдена");
+        snprintf(err, errn, group ? ui_tr("это не группа") : ui_tr("беседа не найдена"));
         return NULL;
     }
     return c;
@@ -3748,32 +3749,32 @@ static Channel *dm_chan(u64 cid, char *err, size_t errn, bool group) {
 bool dm_request_accept(u64 cid, char *err, size_t errn) {
     Channel *c = dm_chan(cid, err, errn, false);
     if (!c) return false;
-    if (!(c->dmflags & (DMF_REQUEST | DMF_SPAM))) { snprintf(err, errn, "это не запрос на переписку"); return false; }
+    if (!(c->dmflags & (DMF_REQUEST | DMF_SPAM))) { snprintf(err, errn, ui_tr("это не запрос на переписку")); return false; }
     c->dmflags = 0;
     ui_dirty();
     if (O.demo) return true;
     char path[80];
     snprintf(path, sizeof path, "/channels/%llu/recipients/@me", (unsigned long long)cid);
-    http_async("PUT", path, "{\"consent_status\":2}", on_dm_op, (void *)"запрос не принят");
+    http_async("PUT", path, "{\"consent_status\":2}", on_dm_op, (void *)ui_tr("запрос не принят"));
     return true;
 }
 bool dm_request_reject(u64 cid, char *err, size_t errn) {
     Channel *c = dm_chan(cid, err, errn, false);
     if (!c) return false;
-    if (!(c->dmflags & (DMF_REQUEST | DMF_SPAM))) { snprintf(err, errn, "это не запрос на переписку"); return false; }
+    if (!(c->dmflags & (DMF_REQUEST | DMF_SPAM))) { snprintf(err, errn, ui_tr("это не запрос на переписку")); return false; }
     if (O.demo) { chan_remove(cid); ui_dirty(); return true; }
     char path[64];
     snprintf(path, sizeof path, "/channels/%llu", (unsigned long long)cid);
-    http_async("DELETE", path, NULL, on_dm_op, (void *)"запрос не отклонён");   /* CHANNEL_DELETE уберёт беседу */
+    http_async("DELETE", path, NULL, on_dm_op, (void *)ui_tr("запрос не отклонён"));   /* CHANNEL_DELETE уберёт беседу */
     return true;
 }
 bool gdm_add(u64 cid, u64 uid, char *err, size_t errn) {
     Channel *c = dm_chan(cid, err, errn, true);
     if (!c) return false;
     const Relation *r = rel_find(uid);
-    if (!r || r->type != REL_FRIEND) { snprintf(err, errn, "добавить в группу можно только друга"); return false; }
-    for (int i = 0; i < c->nrecip; i++) if (c->recipients[i] == uid) { snprintf(err, errn, "уже в группе"); return false; }
-    if (c->nrecip >= 9) { snprintf(err, errn, "в группе не больше 10 человек"); return false; }
+    if (!r || r->type != REL_FRIEND) { snprintf(err, errn, ui_tr("добавить в группу можно только друга")); return false; }
+    for (int i = 0; i < c->nrecip; i++) if (c->recipients[i] == uid) { snprintf(err, errn, ui_tr("уже в группе")); return false; }
+    if (c->nrecip >= 9) { snprintf(err, errn, ui_tr("в группе не больше 10 человек")); return false; }
     if (O.demo) {
         c->recipients = xrealloc(c->recipients, (size_t)(c->nrecip + 1) * sizeof(u64));
         c->recipients[c->nrecip++] = uid;
@@ -3782,14 +3783,14 @@ bool gdm_add(u64 cid, u64 uid, char *err, size_t errn) {
     }
     char path[96];
     snprintf(path, sizeof path, "/channels/%llu/recipients/%llu", (unsigned long long)cid, (unsigned long long)uid);
-    http_async("PUT", path, "{}", on_dm_op, (void *)"не добавлен в группу");   /* CHANNEL_RECIPIENT_ADD обновит */
+    http_async("PUT", path, "{}", on_dm_op, (void *)ui_tr("не добавлен в группу"));   /* CHANNEL_RECIPIENT_ADD обновит */
     return true;
 }
 bool gdm_remove(u64 cid, u64 uid, char *err, size_t errn) {
     Channel *c = dm_chan(cid, err, errn, true);
     if (!c) return false;
-    if (gdm_owner(cid) != S.me_id) { snprintf(err, errn, "исключать может только владелец группы"); return false; }
-    if (uid == S.me_id) { snprintf(err, errn, "чтобы уйти, выберите «Выйти из группы»"); return false; }
+    if (gdm_owner(cid) != S.me_id) { snprintf(err, errn, ui_tr("исключать может только владелец группы")); return false; }
+    if (uid == S.me_id) { snprintf(err, errn, ui_tr("чтобы уйти, выберите «Выйти из группы»")); return false; }
     if (O.demo) {
         for (int i = 0; i < c->nrecip; i++) if (c->recipients[i] == uid) { c->recipients[i] = c->recipients[--c->nrecip]; break; }
         ui_dirty();
@@ -3797,7 +3798,7 @@ bool gdm_remove(u64 cid, u64 uid, char *err, size_t errn) {
     }
     char path[96];
     snprintf(path, sizeof path, "/channels/%llu/recipients/%llu", (unsigned long long)cid, (unsigned long long)uid);
-    http_async("DELETE", path, NULL, on_dm_op, (void *)"не исключён из группы");
+    http_async("DELETE", path, NULL, on_dm_op, (void *)ui_tr("не исключён из группы"));
     return true;
 }
 bool gdm_leave(u64 cid, char *err, size_t errn) {
@@ -3805,7 +3806,7 @@ bool gdm_leave(u64 cid, char *err, size_t errn) {
     if (O.demo) { chan_remove(cid); ui_dirty(); return true; }
     char path[64];
     snprintf(path, sizeof path, "/channels/%llu", (unsigned long long)cid);
-    http_async("DELETE", path, NULL, on_dm_op, (void *)"не удалось выйти из группы");
+    http_async("DELETE", path, NULL, on_dm_op, (void *)ui_tr("не удалось выйти из группы"));
     return true;
 }
 
@@ -4116,7 +4117,7 @@ i64 focus_until(void) { return focus_end > wall_ms() / 1000 ? focus_end : 0; }
 static i64 focus_next_wake(void) {
     if (!focus_was) return INT64_MAX;
     i64 w = wall_ms();
-    if (focus_end * 1000 <= w) { focus_was = false; focus_end = 0; ui_dirty(); ui_notice("режим фокуса закончился"); return INT64_MAX; }
+    if (focus_end * 1000 <= w) { focus_was = false; focus_end = 0; ui_dirty(); ui_notice(ui_tr("режим фокуса закончился")); return INT64_MAX; }
     return now_ms() + (focus_end * 1000 - w) + 50;
 }
 static bool streamer;
@@ -4147,8 +4148,8 @@ const char *voice_channel_status(u64 cid) {
 }
 bool voice_channel_status_set(u64 cid, const char *text, char *err, size_t errn) {
     Channel *c = chan_find(cid);
-    if (!c || !c->guild_id || (c->type != CH_VOICE && c->type != CH_STAGE)) { snprintf(err, errn, "статус — только у голосового канала"); return false; }
-    if (text && u8len(text) > 500) { snprintf(err, errn, "статус: не больше 500 символов"); return false; }
+    if (!c || !c->guild_id || (c->type != CH_VOICE && c->type != CH_STAGE)) { snprintf(err, errn, ui_tr("статус — только у голосового канала")); return false; }
+    if (text && u8len(text) > 500) { snprintf(err, errn, ui_tr("статус: не больше 500 символов")); return false; }
     if (O.demo) { vcs_put(cid, text); ui_dirty(); return true; }
     Buf b = {0};
     buf_puts(&b, "{\"status\":");
@@ -4156,7 +4157,7 @@ bool voice_channel_status_set(u64 cid, const char *text, char *err, size_t errn)
     buf_puts(&b, "}");
     char path[80];
     snprintf(path, sizeof path, "/channels/%llu/voice-status", (unsigned long long)cid);
-    http_async("PUT", path, b.p, on_write_done, (void *)"статус канала");   /* модель — по VOICE_CHANNEL_STATUS_UPDATE */
+    http_async("PUT", path, b.p, on_write_done, (void *)ui_tr("статус канала"));   /* модель — по VOICE_CHANNEL_STATUS_UPDATE */
     buf_free(&b);
     return true;
 }
@@ -4264,17 +4265,17 @@ static void on_thread_made(Resp *r, void *ctx) {
         cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len);
         if (jid(j, "id")) { thread_upsert(j, 0); Channel *c = chan_find(jid(j, "id")); if (c) c->tflags |= TF_JOINED; }
         json_done();
-        ui_notice("ветка создана");
+        ui_notice(ui_tr("ветка создана"));
         ui_dirty();
         return;
     }
     char e[160];
-    http_err(e, sizeof e, "ветка не создана", r->status);
+    http_err(e, sizeof e, ui_tr("ветка не создана"), r->status);
     ui_notice("%s", e);
 }
 bool thread_create(u64 cid, u64 mid, const char *name, char *err, size_t errn) {
     Channel *c = chan_find(cid);
-    if (!c || !c->guild_id || (c->type != CH_TEXT && c->type != CH_NEWS)) { snprintf(err, errn, "ветку можно создать в текстовом канале сервера"); return false; }
+    if (!c || !c->guild_id || (c->type != CH_TEXT && c->type != CH_NEWS)) { snprintf(err, errn, ui_tr("ветку можно создать в текстовом канале сервера")); return false; }
     if (!name_ok(name, 100, err, errn)) return false;
     if (O.demo) {
         static u64 next = 3190;
@@ -4307,13 +4308,13 @@ static void on_thread_join(Resp *r, void *ctx) {
     Channel *c = chan_find(v >> 1);
     if (c) c->tflags ^= TF_JOINED;              /* откат */
     char e[160];
-    http_err(e, sizeof e, (v & 1) ? "не удалось вступить в ветку" : "не удалось выйти из ветки", r->status);
+    http_err(e, sizeof e, (v & 1) ? ui_tr("не удалось вступить в ветку") : ui_tr("не удалось выйти из ветки"), r->status);
     ui_notice("%s", e);
     ui_dirty();
 }
 bool thread_member(u64 tid, bool join, char *err, size_t errn) {
     Channel *c = chan_find(tid);
-    if (!chan_is_thread(c)) { snprintf(err, errn, "ветка не найдена"); return false; }
+    if (!chan_is_thread(c)) { snprintf(err, errn, ui_tr("ветка не найдена")); return false; }
     if (!!(c->tflags & TF_JOINED) == join) return true;
     c->tflags ^= TF_JOINED;                     /* сразу в модели */
     ui_dirty();
@@ -4333,7 +4334,7 @@ static void thread_event(const char *t, const cJSON *d) {
         u64 id = jid(d, "id");
         Channel *c = chan_find(id);
         if (id != S.open_ch) chan_remove(id);
-        else if (c) { c->tflags |= TF_DELETED; c->can_send = false; ui_notice("эту ветку удалили"); }   /* ревью 11 М5 */
+        else if (c) { c->tflags |= TF_DELETED; c->can_send = false; ui_notice(ui_tr("эту ветку удалили")); }   /* ревью 11 М5 */
     } else if (!strcmp(t, "THREAD_LIST_SYNC")) {
         u64 gid = jid(d, "guild_id");
         if (gid != thr_gid) return;
@@ -4405,8 +4406,8 @@ static void on_forum(Resp *r, void *ctx) {
     if ((unsigned)(uintptr_t)ctx != fr_gen) return;
     FR.busy = false;
     if (r->status == 200) { cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len); forum_fill(j); json_done(); }
-    else if (r->status == 202) snprintf(FR.err, sizeof FR.err, "Discord готовит список — откройте ещё раз через пару секунд");
-    else http_err(FR.err, sizeof FR.err, "посты форума", r->status);
+    else if (r->status == 202) snprintf(FR.err, sizeof FR.err, ui_tr("Discord готовит список — откройте ещё раз через пару секунд"));
+    else http_err(FR.err, sizeof FR.err, ui_tr("посты форума"), r->status);
     ui_dirty();
 }
 void forum_open(u64 cid, int page, int sort) {
@@ -4455,7 +4456,7 @@ u64 forum_post_open(int i) {
     Channel *c = chan_find(p->id);
     if (!c) return 0;
     free(c->name);
-    c->name = xstrdup(p->name ? p->name : "пост");
+    c->name = xstrdup(p->name ? p->name : ui_tr("пост"));
     if (p->joined) c->tflags |= TF_JOINED;
     return c->id;
 }
@@ -4485,7 +4486,7 @@ static void iso_utc(i64 t, char *out, size_t n) {
     snprintf(out, n, "%04d-%02d-%02dT%02d:%02d:%02d.000Z", (int)y, (int)m, (int)d, (int)(sod / 3600), (int)(sod / 60 % 60), (int)(sod % 60));
 }
 bool custom_status_set(const char *text, int minutes, char *err, size_t errn) {
-    if (text && u8len(text) > 128) { snprintf(err, errn, "статус: не больше 128 символов"); return false; }
+    if (text && u8len(text) > 128) { snprintf(err, errn, ui_tr("статус: не больше 128 символов")); return false; }
     char *t = san(text ? text : "", false);
     snprintf(cst_text, sizeof cst_text, "%s", t);
     free(t);
@@ -4500,7 +4501,7 @@ bool custom_status_set(const char *text, int minutes, char *err, size_t errn) {
         if (cst_until) { char iso[40]; iso_utc(cst_until, iso, sizeof iso); buf_printf(&b, ",\"expires_at\":\"%s\"", iso); }
         buf_puts(&b, "}}");
     }
-    http_async("PATCH", "/users/@me/settings", b.p, on_op, (void *)"текстовый статус");
+    http_async("PATCH", "/users/@me/settings", b.p, on_op, (void *)ui_tr("текстовый статус"));
     buf_free(&b);
     if (ps_allowed()) { ps_send(my_ps ? my_ps : PS_ONLINE); ps_pend = 255; } else ps_pend = my_ps ? my_ps : PS_ONLINE;   /* сразу в присутствие */
     return true;
@@ -4508,7 +4509,7 @@ bool custom_status_set(const char *text, int minutes, char *err, size_t errn) {
 static i64 status_next_wake(void) {             /* сроки статуса и текстового статуса */
     i64 w = wall_ms() / 1000, t = INT64_MAX;
     if (ps_until) {
-        if (ps_until <= w) { ps_until = 0; presence_set(PS_ONLINE); ui_notice("статус: срок истёк — снова «в сети»"); }
+        if (ps_until <= w) { ps_until = 0; presence_set(PS_ONLINE); ui_notice(ui_tr("статус: срок истёк — снова «в сети»")); }
         else t = ps_until;
     }
     if (cst_until && *cst_text) {
@@ -4576,22 +4577,22 @@ static void on_note(Resp *r, void *ctx) {
         utf8_trunc(NT.text, sizeof NT.text - 1);
         free(t);
         json_done();
-    } else if (r->status != 404) http_err(NT.err, sizeof NT.err, "заметка", r->status);   /* 404 — заметки нет */
+    } else if (r->status != 404) http_err(NT.err, sizeof NT.err, ui_tr("заметка"), r->status);   /* 404 — заметки нет */
     ui_dirty();
 }
 void note_open(u64 uid) {
     note_close();
     if (!uid || uid == S.me_id) return;
     NT.uid = uid;
-    if (O.demo) { if (uid == 1001) snprintf(NT.text, sizeof NT.text, "Знакомы по учёбе, любит котов"); return; }
+    if (O.demo) { if (uid == 1001) snprintf(NT.text, sizeof NT.text, ui_tr("Знакомы по учёбе, любит котов")); return; }
     char path[80];
     snprintf(path, sizeof path, "/users/@me/notes/%llu", (unsigned long long)uid);
     NT.busy = true;
     http_async("GET", path, NULL, on_note, (void *)(uintptr_t)nt_gen);
 }
 bool note_set(u64 uid, const char *text, char *err, size_t errn) {
-    if (!uid || uid == S.me_id) { snprintf(err, errn, "заметка — о другом человеке"); return false; }
-    if (text && u8len(text) > 256) { snprintf(err, errn, "заметка: не больше 256 символов"); return false; }
+    if (!uid || uid == S.me_id) { snprintf(err, errn, ui_tr("заметка — о другом человеке")); return false; }
+    if (text && u8len(text) > 256) { snprintf(err, errn, ui_tr("заметка: не больше 256 символов")); return false; }
     if (NT.uid == uid) { char *t = san(text ? text : "", true); snprintf(NT.text, sizeof NT.text, "%s", t); free(t); }
     ui_dirty();
     if (O.demo) return true;
@@ -4601,7 +4602,7 @@ bool note_set(u64 uid, const char *text, char *err, size_t errn) {
     buf_puts(&b, "}");
     char path[80];
     snprintf(path, sizeof path, "/users/@me/notes/%llu", (unsigned long long)uid);
-    http_async("PUT", path, b.p, on_op, (void *)"заметка");
+    http_async("PUT", path, b.p, on_op, (void *)ui_tr("заметка"));
     buf_free(&b);
     return true;
 }
@@ -4639,7 +4640,7 @@ static void on_rules(Resp *r, void *ctx) {
     if ((unsigned)(uintptr_t)ctx != ru_gen) return;
     RU.busy = false;
     if (r->status == 200) { cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len); rules_fill(j); json_done(); }
-    else http_err(RU.err, sizeof RU.err, "правила сервера", r->status);
+    else http_err(RU.err, sizeof RU.err, ui_tr("правила сервера"), r->status);
     ui_dirty();
 }
 void guild_rules_open(u64 gid) {
@@ -4661,13 +4662,13 @@ void guild_rules_open(u64 gid) {
 }
 static void on_rules_ok(Resp *r, void *ctx) {
     u64 gid = (u64)(uintptr_t)ctx;
-    if (r->status >= 200 && r->status < 300) { Guild *g = guild_find(gid); if (g) g->pending = false; ui_notice("правила приняты"); ui_dirty(); return; }
+    if (r->status >= 200 && r->status < 300) { Guild *g = guild_find(gid); if (g) g->pending = false; ui_notice(ui_tr("правила приняты")); ui_dirty(); return; }
     char e[160];
-    http_err(e, sizeof e, "правила не приняты", r->status);
+    http_err(e, sizeof e, ui_tr("правила не приняты"), r->status);
     ui_notice("%s", e);
 }
 bool guild_rules_accept(u64 gid, char *err, size_t errn) {
-    if (RU.gid != gid || !RU.version) { snprintf(err, errn, "сначала откройте правила"); return false; }
+    if (RU.gid != gid || !RU.version) { snprintf(err, errn, ui_tr("сначала откройте правила")); return false; }
     if (O.demo) { Guild *g = guild_find(gid); if (g) g->pending = false; ui_dirty(); return true; }
     Buf b = {0};
     buf_puts(&b, "{\"version\":");
@@ -4702,18 +4703,18 @@ static void notify_msg(const cJSON *d, const Channel *c) {
     utf8_trunc(who, 60);
     free(an);
     chan_label(c, where, sizeof where);
-    if (c->guild_id) snprintf(title, sizeof title, "%s в #%s", who, where);
+    if (c->guild_id) snprintf(title, sizeof title, ui_tr("%s в #%s"), who, where);
     else snprintf(title, sizeof title, "%s", who);
     /* У-2/С1: Windows хранит уведомления на диске (wpndatabase.db), демоны Linux — историю. По умолчанию
      * (NOTIFY_PLAIN) — без имён, каналов и текста; имена и текст — только в NOTIFY_TEXT (с предупреждением в UI). */
     if (ntf_mode == NOTIFY_PLAIN || streamer_on()) {
-        show("Astra DS", c->guild_id ? "новое упоминание" : "новое сообщение");
+        show("Astra DS", c->guild_id ? ui_tr("новое упоминание") : ui_tr("новое сообщение"));
         return;
     }
     if (ntf_mode == NOTIFY_TEXT) {
         char *t = san(jstr(d, "content") ? jstr(d, "content") : "", false);
         utf8_trunc(t, 200);
-        show(title, *t ? t : "вложение");
+        show(title, *t ? t : ui_tr("вложение"));
         wipe(t, strlen(t));
         free(t);
     }
@@ -4740,7 +4741,7 @@ void threads_archived_open(u64 cid) {
 }
 bool thread_edit(u64 tid, const char *name, int archived, int locked, char *err, size_t errn) {
     Channel *c = chan_find(tid);
-    if (!chan_is_thread(c)) { snprintf(err, errn, "ветка не найдена"); return false; }
+    if (!chan_is_thread(c)) { snprintf(err, errn, ui_tr("ветка не найдена")); return false; }
     if (name && !name_ok(name, 100, err, errn)) return false;
     if (!name && archived < 0 && locked < 0) return true;
     if (O.demo) {
@@ -4760,15 +4761,15 @@ bool thread_edit(u64 tid, const char *name, int archived, int locked, char *err,
     buf_puts(&b, "}");
     char path[64];
     snprintf(path, sizeof path, "/channels/%llu", (unsigned long long)tid);
-    http_async("PATCH", path, b.p, on_op, (void *)"ветка");     /* модель — по THREAD_UPDATE */
+    http_async("PATCH", path, b.p, on_op, (void *)ui_tr("ветка"));     /* модель — по THREAD_UPDATE */
     buf_free(&b);
     return true;
 }
 bool forum_post_create(u64 cid, const char *title, const char *text, char *err, size_t errn) {
     Channel *c = chan_find(cid);
-    if (!c || (c->type != CH_FORUM && c->type != CH_MEDIA)) { snprintf(err, errn, "пост создаётся в форуме"); return false; }
+    if (!c || (c->type != CH_FORUM && c->type != CH_MEDIA)) { snprintf(err, errn, ui_tr("пост создаётся в форуме")); return false; }
     if (!name_ok(title, 100, err, errn)) return false;
-    if (!text || !*text || u8len(text) > 2000) { snprintf(err, errn, "первое сообщение: от 1 до 2000 символов"); return false; }
+    if (!text || !*text || u8len(text) > 2000) { snprintf(err, errn, ui_tr("первое сообщение: от 1 до 2000 символов")); return false; }
     if (O.demo) {
         static u64 next = 3290;
         char j[400];
@@ -4780,7 +4781,7 @@ bool forum_post_create(u64 cid, const char *title, const char *text, char *err, 
         cJSON *o = json_parse(j, strlen(j));
         thread_upsert(o, c->guild_id);
         json_done();
-        ui_notice("пост создан (демо)");
+        ui_notice(ui_tr("пост создан (демо)"));
         ui_dirty();
         return true;
     }
@@ -4818,7 +4819,7 @@ static void on_tmembers(Resp *r, void *ctx) {
     if ((unsigned)(uintptr_t)ctx != tm_gen) return;
     TM.busy = false;
     if (r->status == 200) { cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len); tm_fill(j); json_done(); }
-    else http_err(TM.err, sizeof TM.err, "участники ветки", r->status);
+    else http_err(TM.err, sizeof TM.err, ui_tr("участники ветки"), r->status);
     ui_dirty();
 }
 void thread_members_open(u64 tid) {
@@ -4841,7 +4842,7 @@ void thread_members_open(u64 tid) {
 /* ---------- №112 имя группы ЛС, №113 свой профиль ---------- */
 bool gdm_rename(u64 cid, const char *name, char *err, size_t errn) {
     Channel *c = chan_find(cid);
-    if (!c || c->type != CH_GROUP) { snprintf(err, errn, "это не группа"); return false; }
+    if (!c || c->type != CH_GROUP) { snprintf(err, errn, ui_tr("это не группа")); return false; }
     if (name && *name && !name_ok(name, 100, err, errn)) return false;
     if (O.demo) { free(c->name); c->name = name && *name ? san(name, false) : NULL; ui_dirty(); return true; }
     Buf b = {0};
@@ -4850,18 +4851,18 @@ bool gdm_rename(u64 cid, const char *name, char *err, size_t errn) {
     buf_puts(&b, "}");
     char path[64];
     snprintf(path, sizeof path, "/channels/%llu", (unsigned long long)cid);
-    http_async("PATCH", path, b.p, on_op, (void *)"имя группы");   /* CHANNEL_UPDATE обновит */
+    http_async("PATCH", path, b.p, on_op, (void *)ui_tr("имя группы"));   /* CHANNEL_UPDATE обновит */
     buf_free(&b);
     return true;
 }
 bool profile_me_set(const char *dn, const char *bio, char *err, size_t errn) {
-    if (dn && (u8len(dn) < 1 || u8len(dn) > 32)) { snprintf(err, errn, "отображаемое имя: от 1 до 32 символов"); return false; }
-    if (dn) { char *t = san(dn, false); bool ok = !strcmp(t, dn); free(t); if (!ok) { snprintf(err, errn, "в имени недопустимые символы"); return false; } }
-    if (bio && u8len(bio) > 190) { snprintf(err, errn, "«о себе»: не больше 190 символов"); return false; }
+    if (dn && (u8len(dn) < 1 || u8len(dn) > 32)) { snprintf(err, errn, ui_tr("отображаемое имя: от 1 до 32 символов")); return false; }
+    if (dn) { char *t = san(dn, false); bool ok = !strcmp(t, dn); free(t); if (!ok) { snprintf(err, errn, ui_tr("в имени недопустимые символы")); return false; } }
+    if (bio && u8len(bio) > 190) { snprintf(err, errn, ui_tr("«о себе»: не больше 190 символов")); return false; }
     if (!dn && !bio) return true;
     if (O.demo) {
         if (dn) { free(S.me_name); S.me_name = san(dn, false); user_put(S.me_id, dn); }
-        ui_notice("профиль обновлён (демо)");
+        ui_notice(ui_tr("профиль обновлён (демо)"));
         ui_dirty();
         return true;
     }
@@ -4870,7 +4871,7 @@ bool profile_me_set(const char *dn, const char *bio, char *err, size_t errn) {
         buf_puts(&b, "{\"global_name\":");
         buf_json_str(&b, dn);
         buf_puts(&b, "}");
-        http_async("PATCH", "/users/@me", b.p, on_op, (void *)"отображаемое имя");   /* USER_UPDATE обновит */
+        http_async("PATCH", "/users/@me", b.p, on_op, (void *)ui_tr("отображаемое имя"));   /* USER_UPDATE обновит */
         buf_free(&b);
     }
     if (bio) {
@@ -4878,7 +4879,7 @@ bool profile_me_set(const char *dn, const char *bio, char *err, size_t errn) {
         buf_puts(&b, "{\"bio\":");
         buf_json_str(&b, bio);
         buf_puts(&b, "}");
-        http_async("PATCH", "/users/@me/profile", b.p, on_op, (void *)"«о себе»");
+        http_async("PATCH", "/users/@me/profile", b.p, on_op, (void *)ui_tr("«о себе»"));
         buf_free(&b);
     }
     return true;
@@ -4894,7 +4895,7 @@ static void on_reactors(Resp *r, void *ctx) {
     RV.busy = false;
     RV.n = 0;
     ui_dirty();
-    if (r->status != 200) { snprintf(RV.err, sizeof RV.err, r->status ? "не загрузилось: HTTP %ld" : "не загрузилось: нет связи", r->status); return; }
+    if (r->status != 200) { snprintf(RV.err, sizeof RV.err, r->status ? ui_tr("не загрузилось: HTTP %ld") : ui_tr("не загрузилось: нет связи"), r->status); return; }
     cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len), *u;
     cJSON_ArrayForEach(u, j) {
         if (RV.n >= 25) break;
@@ -4908,7 +4909,7 @@ static void on_reactors(Resp *r, void *ctx) {
 }
 void reactors_open(u64 ch, u64 msg, int sel) {
     Message *m = msg_find(msg, NULL);
-    if (!m || !m->nreacts || ch != S.open_ch) { reactors_close(); ui_notice("у сообщения нет реакций"); return; }
+    if (!m || !m->nreacts || ch != S.open_ch) { reactors_close(); ui_notice(ui_tr("у сообщения нет реакций")); return; }
     if (sel < 0 || sel >= m->nreacts) sel = 0;
     memset(&RV, 0, sizeof RV);
     RV.on = true; RV.ch = ch; RV.msg = msg; RV.sel = sel;
@@ -4930,24 +4931,24 @@ void reactors_open(u64 ch, u64 msg, int sel) {
 }
 static void on_forwarded(Resp *r, void *ctx) {
     (void)ctx;
-    if (r->status >= 200 && r->status < 300) { ui_notice("сообщение переслано"); return; }
+    if (r->status >= 200 && r->status < 300) { ui_notice(ui_tr("сообщение переслано")); return; }
     char e[160];
-    http_err(e, sizeof e, "не переслано", r->status);
+    http_err(e, sizeof e, ui_tr("не переслано"), r->status);
     ui_notice("%s", e);
 }
 void msg_forward(u64 target, u64 src_ch, u64 msg) {
     Message *m = msg_find(msg, NULL);
     Channel *src = chan_find(src_ch), *dst = chan_find(target);
     if (!m || !src || !dst || dst->type == CH_VOICE || dst->type == CH_CATEGORY || m->state != MS_SENT) {
-        ui_notice("переслать можно в текстовый канал или беседу");
+        ui_notice(ui_tr("переслать можно в текстовый канал или беседу"));
         return;
     }
     if (O.demo) {
         Buf b = {0};
-        buf_printf(&b, "[переслано] %s", m->content ? m->content : "");
+        buf_printf(&b, ui_tr("[переслано] %s"), m->content ? m->content : "");
         demo_send(target, b.p);
         buf_free(&b);
-        ui_notice("переслано (демо)");
+        ui_notice(ui_tr("переслано (демо)"));
         return;
     }
     char path[96];
@@ -5141,7 +5142,7 @@ static bool slim_walk(const cJSON *v, const Sch *sch, char *why, size_t wn, int 
     cJSON_ArrayForEach(e, v) {
         const Sch *hit = NULL;
         for (const Sch *k = sch; k->key; k++) if (!strcmp(k->key, e->string)) hit = k;
-        if (!hit || hit->sub == S_PROTO_HOOK) { snprintf(why, wn, "лишний ключ %.40s", e->string); return false; }
+        if (!hit || hit->sub == S_PROTO_HOOK) { snprintf(why, wn, ui_tr("лишний ключ %.40s"), e->string); return false; }
         if (!slim_walk(e, hit->sub, why, wn, depth + 1)) return false;
     }
     return true;
@@ -5404,11 +5405,11 @@ static void on_cmds(Resp *r, void *ctx) {
         Slim x = { r->body.p, 0, 0, r->body.len, false };
         sl_ws(&x);
         if (x.r < x.n && r->body.p[x.r] == '{') sl_value(&x, S_CMDIDX, 0);
-        if (x.bad) { snprintf(CX.err, sizeof CX.err, "список команд не разобран"); ui_dirty(); return; }
+        if (x.bad) { snprintf(CX.err, sizeof CX.err, ui_tr("список команд не разобран")); ui_dirty(); return; }
         cJSON *j = json_parse(r->body.p, x.w);
         cx_fill(j);
         json_done();
-    } else http_err(CX.err, sizeof CX.err, "команды", r->status);
+    } else http_err(CX.err, sizeof CX.err, ui_tr("команды"), r->status);
     ui_dirty();
 }
 void cmds_test_resp(long status, const char *body);
@@ -5478,7 +5479,7 @@ static bool cx_value(Buf *b, const SlashOpt *o, const char *v, const Channel *ch
             cmd_choice((int)(o - CX.o), k, &cn, &cv);
             if (!strcmp(v, cn) || !strcmp(v, cv)) { v = cv; goto typed; }
         }
-        snprintf(err, errn, "%s: выберите из списка", nm);
+        snprintf(err, errn, ui_tr("%s: выберите из списка"), nm);
         return false;
     }
 typed:
@@ -5491,7 +5492,7 @@ typed:
         char *e = NULL;
         double d = dec ? strtod(v, &e) : 0;
         if (!dec || (e && *e) || !isfinite(d) || fabs(d) > 9007199254740992.0 || (o->type == CO_INTEGER && d != (double)(long long)d)) {
-            snprintf(err, errn, "%s: нужно число", nm);
+            snprintf(err, errn, ui_tr("%s: нужно число"), nm);
             return false;
         }
         if (o->type == CO_INTEGER) buf_printf(b, "%lld", (long long)d);
@@ -5500,14 +5501,14 @@ typed:
     }
     case CO_BOOLEAN: {
         bool t = !strcmp(v, "да") || !strcmp(v, "true") || !strcmp(v, "1"), f = !strcmp(v, "нет") || !strcmp(v, "false") || !strcmp(v, "0");
-        if (!t && !f) { snprintf(err, errn, "%s: да или нет", nm); return false; }
+        if (!t && !f) { snprintf(err, errn, ui_tr("%s: да или нет"), nm); return false; }
         buf_puts(b, t ? "true" : "false");
         return true;
     }
     case CO_USER: {
         u64 id = strtoull(v[0] == '@' ? v + 1 : v, NULL, 10);
         if (!id) for (int i = 0; i < S.nusers && !id; i++) if (S.users[i].name && !strcmp(S.users[i].name, v[0] == '@' ? v + 1 : v)) id = S.users[i].id;
-        if (!id) { snprintf(err, errn, "%s: пользователь не найден", nm); return false; }
+        if (!id) { snprintf(err, errn, ui_tr("%s: пользователь не найден"), nm); return false; }
         buf_printf(b, "\"%llu\"", (unsigned long long)id);
         return true;
     }
@@ -5515,38 +5516,38 @@ typed:
         u64 id = strtoull(v[0] == '#' ? v + 1 : v, NULL, 10);
         if (!id) for (int i = 0; i < S.nchans && !id; i++)
             if (S.chans[i].guild_id == ch->guild_id && S.chans[i].name && !strcmp(S.chans[i].name, v[0] == '#' ? v + 1 : v)) id = S.chans[i].id;
-        if (!id) { snprintf(err, errn, "%s: канал не найден", nm); return false; }
+        if (!id) { snprintf(err, errn, ui_tr("%s: канал не найден"), nm); return false; }
         buf_printf(b, "\"%llu\"", (unsigned long long)id);
         return true;
     }
-    default: snprintf(err, errn, "%s: такой тип не поддерживается", nm); return false;
+    default: snprintf(err, errn, ui_tr("%s: такой тип не поддерживается"), nm); return false;
     }
 }
 static void on_cmd_run(Resp *r, void *ctx) {
     (void)ctx;
     if (r->status >= 200 && r->status < 300) return;
     char e[160];
-    http_err(e, sizeof e, "команда не выполнена", r->status);
+    http_err(e, sizeof e, ui_tr("команда не выполнена"), r->status);
     ui_notice("%s", e);
 }
 bool cmd_run(int i, const char *const *vals, int nvals, char *err, size_t errn) {
     Channel *ch = chan_find(CX.cid);
-    if (i < 0 || i >= CX.n || !ch || CX.cid != S.open_ch) { snprintf(err, errn, "команда не найдена"); return false; }
+    if (i < 0 || i >= CX.n || !ch || CX.cid != S.open_ch) { snprintf(err, errn, ui_tr("команда не найдена")); return false; }
     const SlashCmd *c = &CX.c[i];
-    if (!c->usable) { snprintf(err, errn, "эту команду здесь не выполнить (нужны неподдерживаемые поля)"); return false; }
+    if (!c->usable) { snprintf(err, errn, ui_tr("эту команду здесь не выполнить (нужны неподдерживаемые поля)")); return false; }
     Buf opts = {0};
     int no = 0;
     for (int k = 0; k < c->nopt; k++) {
         const SlashOpt *o = &CX.o[c->opt0 + k];
         const char *v = k < nvals && vals[k] ? vals[k] : "";
-        if (!*v) { if (o->required) { snprintf(err, errn, "%s: обязательно", cmds_str(o->name_show)); buf_free(&opts); return false; } continue; }
+        if (!*v) { if (o->required) { snprintf(err, errn, ui_tr("%s: обязательно"), cmds_str(o->name_show)); buf_free(&opts); return false; } continue; }
         buf_printf(&opts, "%s{\"type\":%d,\"name\":", no++ ? "," : "", o->type);
         buf_json_str(&opts, cmds_str(o->name));
         buf_puts(&opts, ",\"value\":");
         if (!cx_value(&opts, o, v, ch, err, errn)) { buf_free(&opts); return false; }
         buf_puts(&opts, "}");
     }
-    if (O.demo) { ui_notice("демо: команда /%s отправлена", cmds_str(c->name)); buf_free(&opts); return true; }
+    if (O.demo) { ui_notice(ui_tr("демо: команда /%s отправлена"), cmds_str(c->name)); buf_free(&opts); return true; }
     Buf b = {0};
     buf_printf(&b, "{\"type\":2,\"nonce\":\"%llu\",\"application_id\":\"%llu\",", (unsigned long long)snowflake_now(), (unsigned long long)c->app_id);
     if (ch->guild_id) buf_printf(&b, "\"guild_id\":\"%llu\",", (unsigned long long)ch->guild_id);
@@ -5590,11 +5591,11 @@ bool mod_can(u64 gid, int action) {
 }
 static bool mod_pre(u64 gid, u64 uid, int action, const char *reason, char *err, size_t errn) {
     Guild *g = guild_find(gid);
-    if (!g || !uid) { snprintf(err, errn, "участник не найден"); return false; }
-    if (!mod_can(gid, action)) { snprintf(err, errn, "нет права на это действие"); return false; }
-    if (uid == g->owner_id) { snprintf(err, errn, "к владельцу сервера это не применить"); return false; }
-    if (uid == S.me_id && action != MOD_ROLES && action != MOD_MOVE && action != MOD_MUTE) { snprintf(err, errn, "к себе это не применить"); return false; }
-    if (reason && (u8len(reason) > 512 || strlen(reason) * 3 + 32 > 8000)) { snprintf(err, errn, "причина слишком длинная (до 512 символов)"); return false; }
+    if (!g || !uid) { snprintf(err, errn, ui_tr("участник не найден")); return false; }
+    if (!mod_can(gid, action)) { snprintf(err, errn, ui_tr("нет права на это действие")); return false; }
+    if (uid == g->owner_id) { snprintf(err, errn, ui_tr("к владельцу сервера это не применить")); return false; }
+    if (uid == S.me_id && action != MOD_ROLES && action != MOD_MOVE && action != MOD_MUTE) { snprintf(err, errn, ui_tr("к себе это не применить")); return false; }
+    if (reason && (u8len(reason) > 512 || strlen(reason) * 3 + 32 > 8000)) { snprintf(err, errn, ui_tr("причина слишком длинная (до 512 символов)")); return false; }
     return true;
 }
 /* причина — в заголовок X-Audit-Log-Reason (URL-кодированная) */
@@ -5613,8 +5614,8 @@ static void mod_send(const char *method, const char *path, const char *body, con
 }
 bool mod_timeout(u64 gid, u64 uid, int minutes, const char *reason, char *err, size_t errn) {
     if (!mod_pre(gid, uid, MOD_TIMEOUT, reason, err, errn)) return false;
-    if (minutes < 0 || minutes > 28 * 24 * 60) { snprintf(err, errn, "тайм-аут: до 28 суток"); return false; }
-    if (O.demo) { ui_notice(minutes ? "демо: тайм-аут на %d мин" : "демо: тайм-аут снят", minutes); return true; }
+    if (minutes < 0 || minutes > 28 * 24 * 60) { snprintf(err, errn, ui_tr("тайм-аут: до 28 суток")); return false; }
+    if (O.demo) { ui_notice(minutes ? ui_tr("демо: тайм-аут на %d мин") : ui_tr("демо: тайм-аут снят"), minutes); return true; }
     char path[96], body[96];
     snprintf(path, sizeof path, "/guilds/%llu/members/%llu", (unsigned long long)gid, (unsigned long long)uid);
     if (minutes) {
@@ -5625,25 +5626,25 @@ bool mod_timeout(u64 gid, u64 uid, int minutes, const char *reason, char *err, s
         snprintf(body, sizeof body, "{\"communication_disabled_until\":\"%04d-%02d-%02dT%02d:%02d:%02d+00:00\"}",
                  (int)y, (int)m, (int)d, (int)(sod / 3600), (int)(sod / 60 % 60), (int)(sod % 60));
     } else snprintf(body, sizeof body, "{\"communication_disabled_until\":null}");
-    mod_send("PATCH", path, body, reason, "тайм-аут");
+    mod_send("PATCH", path, body, reason, ui_tr("тайм-аут"));
     return true;
 }
 bool mod_kick(u64 gid, u64 uid, const char *reason, char *err, size_t errn) {
     if (!mod_pre(gid, uid, MOD_KICK, reason, err, errn)) return false;
-    if (O.demo) { ui_notice("демо: участник выгнан"); return true; }
+    if (O.demo) { ui_notice(ui_tr("демо: участник выгнан")); return true; }
     char path[96];
     snprintf(path, sizeof path, "/guilds/%llu/members/%llu", (unsigned long long)gid, (unsigned long long)uid);
-    mod_send("DELETE", path, NULL, reason, "выгнать");
+    mod_send("DELETE", path, NULL, reason, ui_tr("выгнать"));
     return true;
 }
 bool mod_ban(u64 gid, u64 uid, const char *reason, int delete_hours, char *err, size_t errn) {
     if (!mod_pre(gid, uid, MOD_BAN, reason, err, errn)) return false;
-    if (delete_hours < 0 || delete_hours > 168) { snprintf(err, errn, "удалить сообщения: за 0–168 часов"); return false; }
-    if (O.demo) { ui_notice("демо: участник забанен"); return true; }
+    if (delete_hours < 0 || delete_hours > 168) { snprintf(err, errn, ui_tr("удалить сообщения: за 0–168 часов")); return false; }
+    if (O.demo) { ui_notice(ui_tr("демо: участник забанен")); return true; }
     char path[96], body[64];
     snprintf(path, sizeof path, "/guilds/%llu/bans/%llu", (unsigned long long)gid, (unsigned long long)uid);
     snprintf(body, sizeof body, "{\"delete_message_seconds\":%d}", delete_hours * 3600);
-    mod_send("PUT", path, body, reason, "бан");
+    mod_send("PUT", path, body, reason, ui_tr("бан"));
     return true;
 }
 bool mod_role(u64 gid, u64 uid, u64 rid, bool add, char *err, size_t errn) {
@@ -5654,33 +5655,33 @@ bool mod_role(u64 gid, u64 uid, u64 rid, bool add, char *err, size_t errn) {
         if (g->roles[i].id == rid) rp = g->roles[i].pos;
         for (int k = 0; k < g->nmy; k++) if (g->roles[i].id == g->my_roles[k] && g->roles[i].pos > my) my = g->roles[i].pos;
     }
-    if (rp < 0 || rid == gid) { snprintf(err, errn, "роль не найдена"); return false; }
-    if (g->owner_id != S.me_id && rp >= my) { snprintf(err, errn, "эта роль не ниже вашей — выдать нельзя"); return false; }
-    if (O.demo) { ui_notice(add ? "демо: роль выдана" : "демо: роль снята"); return true; }
+    if (rp < 0 || rid == gid) { snprintf(err, errn, ui_tr("роль не найдена")); return false; }
+    if (g->owner_id != S.me_id && rp >= my) { snprintf(err, errn, ui_tr("эта роль не ниже вашей — выдать нельзя")); return false; }
+    if (O.demo) { ui_notice(add ? ui_tr("демо: роль выдана") : ui_tr("демо: роль снята")); return true; }
     char path[128];
     snprintf(path, sizeof path, "/guilds/%llu/members/%llu/roles/%llu", (unsigned long long)gid, (unsigned long long)uid, (unsigned long long)rid);
-    http_async(add ? "PUT" : "DELETE", path, add ? "{}" : NULL, on_op, (void *)(add ? "выдать роль" : "снять роль"));
+    http_async(add ? "PUT" : "DELETE", path, add ? "{}" : NULL, on_op, (void *)(add ? ui_tr("выдать роль") : ui_tr("снять роль")));
     return true;
 }
 bool mod_voice_move(u64 gid, u64 uid, u64 to, char *err, size_t errn) {
     if (!mod_pre(gid, uid, MOD_MOVE, NULL, err, errn)) return false;
     Channel *c = to ? chan_find(to) : NULL;
-    if (to && (!c || c->guild_id != gid || (c->type != CH_VOICE && c->type != CH_STAGE))) { snprintf(err, errn, "перенести можно в голосовой канал этого сервера"); return false; }
-    if (O.demo) { ui_notice(to ? "демо: перенесён" : "демо: отключён от голоса"); return true; }
+    if (to && (!c || c->guild_id != gid || (c->type != CH_VOICE && c->type != CH_STAGE))) { snprintf(err, errn, ui_tr("перенести можно в голосовой канал этого сервера")); return false; }
+    if (O.demo) { ui_notice(to ? ui_tr("демо: перенесён") : ui_tr("демо: отключён от голоса")); return true; }
     char path[96], body[64];
     snprintf(path, sizeof path, "/guilds/%llu/members/%llu", (unsigned long long)gid, (unsigned long long)uid);
     if (to) snprintf(body, sizeof body, "{\"channel_id\":\"%llu\"}", (unsigned long long)to);
     else snprintf(body, sizeof body, "{\"channel_id\":null}");
-    http_async("PATCH", path, body, on_op, (void *)(to ? "перенести" : "отключить от голоса"));
+    http_async("PATCH", path, body, on_op, (void *)(to ? ui_tr("перенести") : ui_tr("отключить от голоса")));
     return true;
 }
 bool mod_voice_mute(u64 gid, u64 uid, bool mute, bool deaf, char *err, size_t errn) {
     if (!mod_pre(gid, uid, MOD_MUTE, NULL, err, errn)) return false;
-    if (O.demo) { ui_notice("демо: заглушка %s, глухота %s", mute ? "вкл" : "выкл", deaf ? "вкл" : "выкл"); return true; }
+    if (O.demo) { ui_notice(ui_tr("демо: заглушка %s, глухота %s"), mute ? ui_tr("вкл") : ui_tr("выкл"), deaf ? ui_tr("вкл") : ui_tr("выкл")); return true; }
     char path[96], body[64];
     snprintf(path, sizeof path, "/guilds/%llu/members/%llu", (unsigned long long)gid, (unsigned long long)uid);
     snprintf(body, sizeof body, "{\"mute\":%s,\"deaf\":%s}", mute ? "true" : "false", deaf ? "true" : "false");
-    http_async("PATCH", path, body, on_op, (void *)"заглушка участника");
+    http_async("PATCH", path, body, on_op, (void *)ui_tr("заглушка участника"));
     return true;
 }
 

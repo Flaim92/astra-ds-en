@@ -394,6 +394,21 @@ static bool same_exe(HWND w) {
     CloseHandle(p);
     return ok;
 }
+#ifdef ASTRA_VIDEO
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+static bool cap_excl;                           /* скрывать окна из захвата экрана */
+static bool cap_apply(HWND w) {
+    if (!w) return true;
+    if (!cap_excl) return SetWindowDisplayAffinity(w, WDA_NONE) != 0;
+    return SetWindowDisplayAffinity(w, WDA_EXCLUDEFROMCAPTURE) || SetWindowDisplayAffinity(w, WDA_MONITOR);
+}
+bool term_capture_exclude(bool on) { cap_excl = on; return cap_apply(hwnd); }
+void capture_exclude_window(void *w) { if (cap_excl) cap_apply((HWND)w); }
+#endif
+static HANDLE g_single;                         /* мьютекс единственного экземпляра (держим до выхода) */
+void single_instance_release(void) { if (g_single) { CloseHandle(g_single); g_single = NULL; } }
 bool single_instance(void) {
     WCHAR name[160] = L"Local\\astra-ds-single-instance";
     HANDLE tok = NULL;
@@ -427,6 +442,7 @@ bool single_instance(void) {
         CloseHandle(m);
         return false;
     }
+    if (m && !g_single) g_single = m;
     return true;
 }
 
@@ -809,6 +825,9 @@ bool gb_open(bool hide) {
         hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"Astra DS", L"Astra DS", WS_POPUP,
                                -32000, -32000, 100, 100, NULL, NULL, hi, NULL);
         if (!hwnd) return false;
+#ifdef ASTRA_VIDEO
+        if (cap_excl) cap_apply(hwnd);
+#endif
         dpi = 96;                                /* снимки одинаковы на любом мониторе */
         fonts_make();
         grid_resize(COLS0, ROWS0);
@@ -817,6 +836,9 @@ bool gb_open(bool hide) {
     hwnd = CreateWindowExW(0, L"Astra DS", L"Astra DS", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                            CW_USEDEFAULT, CW_USEDEFAULT, NULL, NULL, hi, NULL);
     if (!hwnd) return false;
+#ifdef ASTRA_VIDEO
+    if (cap_excl) cap_apply(hwnd);
+#endif
     dpi = GetDpiForWindow(hwnd);
     if (!dpi) dpi = 96;
     DragAcceptFiles(hwnd, TRUE);                /* перетаскивание файла в окно */

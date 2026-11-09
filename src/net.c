@@ -355,7 +355,7 @@ void http_async_hdr(const char *method, const char *path, const char *body, cons
     if (hdr) {
         bool ok = strlen(hdr) < 8192 && strchr(hdr, ':');
         for (const char *p = hdr; ok && *p; p++) ok = *p >= 0x20 && *p <= 0x7E;
-        if (!ok) { ui_notice("запрос не отправлен: неверный заголовок"); return; }
+        if (!ok) { ui_notice(ui_tr("запрос не отправлен: неверный заголовок")); return; }
     }
     Req *r = req_new(method, path, body, cb, ctx);
     if (!r) return;
@@ -497,18 +497,18 @@ static bool is_send(const Req *r) {
 /* капча держит отправку сообщения (не другой запрос) */
 static bool cap_holds_sends(void) { return CS.pending && CP.r && is_send(CP.r); }
 static const char *cap_what(const Req *r) {
-    if (!strcmp(r->method, "POST") && !strcmp(r->path, "/users/@me/relationships")) return "заявка в друзья";
-    if (!strcmp(r->method, "POST") && !strcmp(r->path, "/users/@me/channels")) return "новая беседа";
-    if (!strcmp(r->method, "POST") && strstr(r->path, "/messages") && !strstr(r->path, "/ack") && !strstr(r->path, "/messages/")) return "отправка сообщения";
-    if (!strcmp(r->method, "PUT") && strstr(r->path, "/reactions/")) return "реакция";
-    return "запрос к Discord";
+    if (!strcmp(r->method, "POST") && !strcmp(r->path, "/users/@me/relationships")) return ui_tr("заявка в друзья");
+    if (!strcmp(r->method, "POST") && !strcmp(r->path, "/users/@me/channels")) return ui_tr("новая беседа");
+    if (!strcmp(r->method, "POST") && strstr(r->path, "/messages") && !strstr(r->path, "/ack") && !strstr(r->path, "/messages/")) return ui_tr("отправка сообщения");
+    if (!strcmp(r->method, "PUT") && strstr(r->path, "/reactions/")) return ui_tr("реакция");
+    return ui_tr("запрос к Discord");
 }
 /* Ответ — капча? Тогда запрос остаётся у нас (true), иначе — обычный путь (false). */
 static bool cap_take(Req *r) {
     if (r->r.status != 400 || !r->r.body.p || r->fp) return false;
     if (!strncmp(r->path, "/invites/", 9)) return false;   /* вступление: капча -> «вступите через браузер» (store.c) */
     if (!strstr(r->r.body.p, "captcha_key") && !strstr(r->r.body.p, "captcha_sitekey")) return false;
-    if (CP.r && CP.r != r) { ui_notice("Discord просит ещё одну проверку - сначала завершите текущую"); return false; }
+    if (CP.r && CP.r != r) { ui_notice(ui_tr("Discord просит ещё одну проверку - сначала завершите текущую")); return false; }
     if (r->cap_round >= 3) return false;        /* трижды не принято — отдаём ошибку */
     cJSON *j = json_parse(r->r.body.p, r->r.body.len);
     char svc[24], site[64];
@@ -541,8 +541,8 @@ static bool cap_take(Req *r) {
     CS.outcome = CAP_NONE;
     CS.supported = captcha_supported();
     snprintf(CS.what, sizeof CS.what, "%s", cap_what(r));
-    snprintf(CS.error, sizeof CS.error, "%s", again ? "Discord не принял проверку - пройдите её ещё раз" : "");
-    ui_notice("\a Discord просит проверку (капча): %s. Откройте окно проверки или отмените", CS.what);
+    snprintf(CS.error, sizeof CS.error, "%s", again ? ui_tr("Discord не принял проверку - пройдите её ещё раз") : "");
+    ui_notice(ui_tr("\a Discord просит проверку (капча): %s. Откройте окно проверки или отмените"), CS.what);
     ui_dirty();
     return true;
 }
@@ -556,19 +556,19 @@ void net_captcha_open(void) {
         CS.outcome = CAP_PASSED;
         snprintf(CS.what, sizeof CS.what, "%s", what);
         if (r) free_req(r);
-        ui_notice("проверка пройдена (демо): %s", what);
+        ui_notice(ui_tr("проверка пройдена (демо): %s"), what);
         ui_dirty();
         return;
     }
     if (!captcha_supported()) {
-        snprintf(CS.error, sizeof CS.error, "показать проверку нечем: нужен Edge WebView2 (в Linux - пока нет)");
+        snprintf(CS.error, sizeof CS.error, ui_tr("показать проверку нечем: нужен Edge WebView2 (в Linux - пока нет)"));
         ui_dirty();
         return;
     }
     char err[160] = "";
     wipe(CP.key, CAP_KEY);
     if (captcha_open(CP.site, CP.rqdata ? CP.rqdata : "", CP.key, CAP_KEY, false, err, sizeof err)) { CS.open = true; CS.error[0] = 0; }
-    else snprintf(CS.error, sizeof CS.error, "окно проверки не открылось: %s", err);
+    else snprintf(CS.error, sizeof CS.error, ui_tr("окно проверки не открылось: %s"), err);
     ui_dirty();
 }
 /* Отказ: вызывающий получает исходный ответ 400, пользователь — причину. */
@@ -585,12 +585,12 @@ void net_captcha_cancel(void) {
         if (r->cb) r->cb(&r->r, r->ctx);
         free_req(r);
     }
-    ui_notice("%s: отменено - проверка не пройдена", what);
+    ui_notice(ui_tr("%s: отменено - проверка не пройдена"), what);
     ui_dirty();
 }
 /* Окно закрыто без ответа: запрос ещё ждёт (можно открыть снова или отменить). */
 static void cap_failed(const char *err) {
-    snprintf(CS.error, sizeof CS.error, "проверка не пройдена: %s", err && err[0] ? err : "окно закрыто");
+    snprintf(CS.error, sizeof CS.error, ui_tr("проверка не пройдена: %s"), err && err[0] ? err : ui_tr("окно закрыто"));
     CS.outcome = CAP_FAILED;
     ui_dirty();
 }
@@ -618,7 +618,7 @@ static void cap_service(void) {
     CS.pending = false;
     CS.error[0] = 0;
     CS.outcome = CAP_PASSED;
-    ui_notice("проверка пройдена - повторяю: %s", CS.what);
+    ui_notice(ui_tr("проверка пройдена - повторяю: %s"), CS.what);
     ui_dirty();
 }
 /* После ответа на повтор: данные проверки больше не нужны (если это не новая капча). */
@@ -786,8 +786,8 @@ FILE *fopen_local(const char *path, char *err, size_t errn) {
     i64 size = 0;
     int rc = open_file(path, &fp, &size);
     if (rc == 0) return fp;
-    snprintf(err, errn, "%s", rc == 4 ? "сетевые пути и диски не поддерживаются: только локальный файл" :
-             rc == 2 ? "это папка, нужен файл" : "файл не открывается");
+    snprintf(err, errn, "%s", rc == 4 ? ui_tr("сетевые пути и диски не поддерживаются: только локальный файл") :
+             rc == 2 ? ui_tr("это папка, нужен файл") : ui_tr("файл не открывается"));
     return NULL;
 }
 /* fopen по пути UTF-8 (на Windows — широкими символами, иначе кириллица в пути искажается). */
@@ -802,10 +802,10 @@ FILE *fopen_u8(const char *path, const char *mode) {
 }
 static void on_file_sent(Resp *r, void *ctx) {
     (void)ctx;
-    if (r->status == 200 || r->status == 201) ui_notice("файл отправлен");
-    else if (r->status == 413) ui_notice("файл не отправлен: Discord не принял размер (413)");
-    else if (r->status == 0) ui_notice("файл не отправлен: нет связи или файл изменился во время отправки");
-    else ui_notice("файл не отправлен: Discord ответил %ld", r->status);
+    if (r->status == 200 || r->status == 201) ui_notice(ui_tr("файл отправлен"));
+    else if (r->status == 413) ui_notice(ui_tr("файл не отправлен: Discord не принял размер (413)"));
+    else if (r->status == 0) ui_notice(ui_tr("файл не отправлен: нет связи или файл изменился во время отправки"));
+    else ui_notice(ui_tr("файл не отправлен: Discord ответил %ld"), r->status);
 }
 /* Отправка файла — отдельный хэндл в своём curl_multi, вне очереди REST: сообщения и история не
  * ждут загрузку. Без опроса: главный цикл ждёт сокеты, которые назвал curl (curl_multi_waitfds),
@@ -922,34 +922,34 @@ bool send_file_ex(u64 channel_id, const char *path, const char *text, bool spoil
     if (!err || !errn) return false;
     err[0] = 0;
     Channel *c = chan_find(channel_id);
-    if (!c) { snprintf(err, errn, "сначала откройте канал"); return false; }
+    if (!c) { snprintf(err, errn, ui_tr("сначала откройте канал")); return false; }
     if (!c->visible || !c->can_send || c->type == CH_CATEGORY || c->type == CH_VOICE || c->type == CH_STAGE) {
-        snprintf(err, errn, "в этом канале писать нельзя");
+        snprintf(err, errn, ui_tr("в этом канале писать нельзя"));
         return false;
     }
-    if (!path || !*path) { snprintf(err, errn, "укажите путь к файлу"); return false; }
-    if (UP.r) { snprintf(err, errn, "уже идёт отправка файла"); return false; }
-    if (!O.demo && !route_ok()) { snprintf(err, errn, "VLESS не работает: напрямую не отправляю"); return false; }
+    if (!path || !*path) { snprintf(err, errn, ui_tr("укажите путь к файлу")); return false; }
+    if (UP.r) { snprintf(err, errn, ui_tr("уже идёт отправка файла")); return false; }
+    if (!O.demo && !route_ok()) { snprintf(err, errn, ui_tr("VLESS не работает: напрямую не отправляю")); return false; }
     /* путь можно вставить в кавычках (как копирует Проводник) */
     char p[1024];
     size_t pl = strlen(path);
-    if (pl >= sizeof p) { snprintf(err, errn, "слишком длинный путь"); return false; }
+    if (pl >= sizeof p) { snprintf(err, errn, ui_tr("слишком длинный путь")); return false; }
     memcpy(p, path, pl + 1);
     if (pl >= 2 && p[0] == '"' && p[pl - 1] == '"') { memmove(p, p + 1, pl - 2); p[pl - 2] = 0; }
     /* Сетевые пути (UNC \\сервер\папка, //сервер/папка, \\?\UNC\...) не принимаем: Windows открыла бы
      * SMB-соединение мимо VLESS и отдала бы чужому серверу хэш NTLM. Только локальные файлы. */
     if ((p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/')) {
-        snprintf(err, errn, "сетевые пути не поддерживаются: только локальный файл");
+        snprintf(err, errn, ui_tr("сетевые пути не поддерживаются: только локальный файл"));
         return false;
     }
     FILE *fp = NULL;
     i64 size = 0;
     int rc = open_file(p, &fp, &size);
-    if (rc == 4) { snprintf(err, errn, "сетевые пути и диски не поддерживаются: только локальный файл"); return false; }
-    if (rc == 1) { snprintf(err, errn, "файл не найден"); return false; }
-    if (rc == 2) { snprintf(err, errn, "это папка, нужен файл"); return false; }
-    if (rc) { snprintf(err, errn, "файл не открывается"); return false; }
-    if (size > (i64)FILE_MAX) { fclose(fp); snprintf(err, errn, "больше 10 МБ (%.1f МБ)", size / 1048576.0); return false; }
+    if (rc == 4) { snprintf(err, errn, ui_tr("сетевые пути и диски не поддерживаются: только локальный файл")); return false; }
+    if (rc == 1) { snprintf(err, errn, ui_tr("файл не найден")); return false; }
+    if (rc == 2) { snprintf(err, errn, ui_tr("это папка, нужен файл")); return false; }
+    if (rc) { snprintf(err, errn, ui_tr("файл не открывается")); return false; }
+    if (size > (i64)FILE_MAX) { fclose(fp); snprintf(err, errn, ui_tr("больше 10 МБ (%.1f МБ)"), size / 1048576.0); return false; }
     /* имя файла для Discord: только последняя часть пути, очищенная, без кавычек и обратных слэшей */
     const char *base = p;
     for (const char *q = p; *q; q++) if (*q == '/' || *q == '\\') base = q + 1;
@@ -976,11 +976,11 @@ bool send_file_ex(u64 channel_id, const char *path, const char *text, bool spoil
         free(desc);
         return true;
     }
-    if (g_readonly) { fclose(fp); free(name); free(desc); snprintf(err, errn, "режим только чтения"); return false; }
+    if (g_readonly) { fclose(fp); free(name); free(desc); snprintf(err, errn, ui_tr("режим только чтения")); return false; }
     char path_api[64];
     snprintf(path_api, sizeof path_api, "/channels/%llu/messages", (unsigned long long)channel_id);
     Req *r = req_new("POST", path_api, NULL, on_file_sent, NULL);
-    if (!r) { fclose(fp); free(name); free(desc); snprintf(err, errn, "не отправлено"); return false; }
+    if (!r) { fclose(fp); free(name); free(desc); snprintf(err, errn, ui_tr("не отправлено")); return false; }
     unsigned char rnd[12];
     if (!os_random(rnd, sizeof rnd)) { u64 t = (u64)now_ms(); memcpy(rnd, &t, 8); memcpy(rnd + 8, &r, 4); }
     char bnd[48] = "astrads";
@@ -1000,7 +1000,7 @@ bool send_file_ex(u64 channel_id, const char *path, const char *text, bool spoil
     r->fsize = size;
     if (!UP.m) UP.m = curl_multi_init();
     if (UP.m) start_req(r, UP.m);
-    if (!r->e) { free_req(r); snprintf(err, errn, "не отправлено: нет памяти или маршрута"); return false; }
+    if (!r->e) { free_req(r); snprintf(err, errn, ui_tr("не отправлено: нет памяти или маршрута")); return false; }
     UP.r = r;
     up_service();                                /* первый шаг сразу: curl назовёт сокеты */
     return true;
@@ -1066,7 +1066,7 @@ void http_service(void) {
             r->next = q_head;                    /* в начало очереди: порядок сохраняется */
             q_head = r;
             if (!q_tail) q_tail = r;
-            ui_notice("лимит запросов Discord: повтор через %.1f с", after);
+            ui_notice(ui_tr("лимит запросов Discord: повтор через %.1f с"), after);
             continue;
         }
     deliver:
@@ -1162,13 +1162,13 @@ static void gw_close(void) {
 
 static void schedule_retry(const char *why) {
     gw_close();
-    if (g_auth_failed) { G.st = GW_OFF; snprintf(G.status, sizeof G.status, "токен не принят"); return; }
+    if (g_auth_failed) { G.st = GW_OFF; snprintf(G.status, sizeof G.status, ui_tr("токен не принят")); return; }
     int d = BACKOFF[G.backoff < 4 ? G.backoff : 4];
     d += (int)(now_ms() % 500);
     if (G.backoff < 4) G.backoff++;
     G.retry_at = now_ms() + d;
     G.st = GW_WAIT;
-    snprintf(G.status, sizeof G.status, "%s; повтор через %d с", why, (d + 999) / 1000);
+    snprintf(G.status, sizeof G.status, ui_tr("%s; повтор через %d с"), why, (d + 999) / 1000);
     ui_dirty();
 }
 
@@ -1187,7 +1187,7 @@ static bool ws_send_raw(const char *data, size_t n) {
 }
 
 void gw_send(const char *json) {
-    if (G.st == GW_LIVE && !ws_send_raw(json, strlen(json))) schedule_retry("связь потеряна");
+    if (G.st == GW_LIVE && !ws_send_raw(json, strlen(json))) schedule_retry(ui_tr("связь потеряна"));
 }
 
 static void send_heartbeat(void) {
@@ -1229,26 +1229,26 @@ static void gw_connect(void) {
         /* VLESS включён, но не работает: ждём его (vless разбудит цикл), интерфейс предложит выбор */
         G.st = GW_WAIT;
         G.vwait = true;
-        snprintf(G.status, sizeof G.status, "ожидание VLESS");
+        snprintf(G.status, sizeof G.status, ui_tr("ожидание VLESS"));
         ui_dirty();
         return;
     }
     char url[256];
     bool resume = G.session[0] && G.seq >= 0 && G.resume_url[0];
     snprintf(url, sizeof url, "%s" GW_QUERY, resume ? G.resume_url : GW_DEFAULT);
-    snprintf(G.status, sizeof G.status, "подключение...");
+    snprintf(G.status, sizeof G.status, ui_tr("подключение..."));
     ui_dirty();
     if (!G.wm) G.wm = curl_multi_init();
     G.ws = G.wm ? curl_easy_init() : NULL;
-    if (!G.ws) { schedule_retry("нет памяти"); return; }
+    if (!G.ws) { schedule_retry(ui_tr("нет памяти")); return; }
     net_curl_common(G.ws);
-    if (!set_route(G.ws, &G.via_vless)) { schedule_retry("нет маршрута"); return; }
+    if (!set_route(G.ws, &G.via_vless)) { schedule_retry(ui_tr("нет маршрута")); return; }
     static struct curl_slist o = { "Origin: https://discord.com", NULL };
     curl_easy_setopt(G.ws, CURLOPT_URL, url);
     curl_easy_setopt(G.ws, CURLOPT_HTTPHEADER, &o);
     curl_easy_setopt(G.ws, CURLOPT_CONNECT_ONLY, 2L);
     curl_easy_setopt(G.ws, CURLOPT_TIMEOUT, 20L);
-    if (curl_multi_add_handle(G.wm, G.ws) != CURLM_OK) { schedule_retry("нет памяти"); return; }
+    if (curl_multi_add_handle(G.wm, G.ws) != CURLM_OK) { schedule_retry(ui_tr("нет памяти")); return; }
     G.st = GW_CONNECTING;
 }
 
@@ -1264,7 +1264,7 @@ static void gw_connecting(void) {
     if (rc == CURLE_AGAIN) return;
     if (rc != CURLE_OK) {
         if (G.via_vless && path_error(rc)) vless_report_failure("gateway");
-        schedule_retry("нет связи с Discord");
+        schedule_retry(ui_tr("нет связи с Discord"));
         return;
     }
     if (G.via_vless) vless_report_failure(NULL);
@@ -1272,7 +1272,7 @@ static void gw_connecting(void) {
     curl_easy_setopt(G.ws, CURLOPT_TIMEOUT, 0L);
     curl_socket_t sock = CURL_SOCKET_BAD;
     curl_easy_getinfo(G.ws, CURLINFO_ACTIVESOCKET, &sock);
-    if (sock == CURL_SOCKET_BAD) { schedule_retry("нет сокета"); return; }
+    if (sock == CURL_SOCKET_BAD) { schedule_retry(ui_tr("нет сокета")); return; }
     G.sw = sockwait_new((intptr_t)sock);
     memset(&G.z, 0, sizeof G.z);
     if (inflateInit(&G.z) != Z_OK) { schedule_retry("zlib"); return; }
@@ -1286,7 +1286,7 @@ static void gw_connecting(void) {
 }
 
 void gw_start(void) {
-    if (O.demo) { snprintf(G.status, sizeof G.status, "демо-режим, без сети"); return; }
+    if (O.demo) { snprintf(G.status, sizeof G.status, ui_tr("демо-режим, без сети")); return; }
     G.backoff = 0;
     gw_connect();
 }
@@ -1302,14 +1302,14 @@ void gw_stop(void) {
 
 static void on_close_code(int code) {
     switch (code) {
-    case 4004: g_auth_failed = true; schedule_retry("Discord отклонил токен"); return;
+    case 4004: g_auth_failed = true; schedule_retry(ui_tr("Discord отклонил токен")); return;
     case 4010: case 4011: case 4012: case 4013: case 4014:
-        G.st = GW_OFF; gw_close(); snprintf(G.status, sizeof G.status, "gateway закрыт (%d)", code); ui_dirty(); return;
+        G.st = GW_OFF; gw_close(); snprintf(G.status, sizeof G.status, ui_tr("gateway закрыт (%d)"), code); ui_dirty(); return;
     case 4007: case 4009: G.session[0] = 0; G.seq = -1; break;
     default: break;
     }
     char why[48];
-    snprintf(why, sizeof why, "соединение закрыто (%d)", code);
+    snprintf(why, sizeof why, ui_tr("соединение закрыто (%d)"), code);
     schedule_retry(why);
 }
 
@@ -1337,7 +1337,7 @@ full:;
         G.next_hb = now_ms() + (i64)(G.hb_interval * ((now_ms() % 1000) / 1000.0));
         G.acked = true;
         if (G.session[0] && G.seq >= 0) send_resume(); else send_identify();
-        snprintf(G.status, sizeof G.status, "вход...");
+        snprintf(G.status, sizeof G.status, ui_tr("вход..."));
         ui_dirty();
         break;
     }
@@ -1346,12 +1346,12 @@ full:;
         g_gw_ping = (int)(now_ms() - G.hb_sent);
         break;
     case 1: send_heartbeat(); break;
-    case 7: json_done(); schedule_retry("Discord попросил переподключиться"); return;
+    case 7: json_done(); schedule_retry(ui_tr("Discord попросил переподключиться")); return;
     case 9:
         if (!cJSON_IsTrue(d)) { G.session[0] = 0; G.seq = -1; }
         json_done();
         G.backoff = 1;
-        schedule_retry("сессия недействительна");
+        schedule_retry(ui_tr("сессия недействительна"));
         return;
     case 0: {
         const char *t = jstr(j, "t");
@@ -1368,11 +1368,11 @@ full:;
             }
             store_ready(d);
             G.backoff = 0;
-            snprintf(G.status, sizeof G.status, "в сети");
+            snprintf(G.status, sizeof G.status, ui_tr("в сети"));
             ui_on_ready();
         } else if (!strcmp(t, "RESUMED")) {
             G.backoff = 0;
-            snprintf(G.status, sizeof G.status, "в сети");
+            snprintf(G.status, sizeof G.status, ui_tr("в сети"));
             ui_dirty();
         } else {
             store_event(t, d);
@@ -1395,7 +1395,7 @@ static void handle_ready(char *text, size_t len) {
     for (size_t i = 0; i + 4 < len && i < 64; i++)
         if (!memcmp(text + i, "\"s\":", 4)) { if (text[i + 4] >= '0' && text[i + 4] <= '9') G.seq = strtoll(text + i + 4, NULL, 10); break; }
     char ru[256];
-    if (!store_ready_text(text, len, ru, sizeof ru)) { schedule_retry("READY не разобран"); return; }
+    if (!store_ready_text(text, len, ru, sizeof ru)) { schedule_retry(ui_tr("READY не разобран")); return; }
     snprintf(G.session, sizeof G.session, "%s", S.session_id ? S.session_id : "");
     G.resume_url[0] = 0;
     if (ru[0] && host_allowed_gw(ru) && strlen(ru) < sizeof G.resume_url) {
@@ -1404,7 +1404,7 @@ static void handle_ready(char *text, size_t len) {
         G.resume_url[n] = 0;
     }
     G.backoff = 0;
-    snprintf(G.status, sizeof G.status, "в сети");
+    snprintf(G.status, sizeof G.status, ui_tr("в сети"));
     ui_on_ready();
 }
 
@@ -1419,10 +1419,10 @@ static void inflate_frame(void) {
         G.z.next_out = (Bytef *)out;
         G.z.avail_out = sizeof out;
         int rc = inflate(&G.z, Z_SYNC_FLUSH);
-        if (rc != Z_OK && rc != Z_BUF_ERROR) { schedule_retry("ошибка распаковки"); return; }
+        if (rc != Z_OK && rc != Z_BUF_ERROR) { schedule_retry(ui_tr("ошибка распаковки")); return; }
         size_t got = sizeof out - G.z.avail_out;
         if (got) buf_put(&G.text, out, got);
-        if (G.text.len > MAX_PAYLOAD) { schedule_retry("слишком большой пакет"); return; }
+        if (G.text.len > MAX_PAYLOAD) { schedule_retry(ui_tr("слишком большой пакет")); return; }
         if (G.z.avail_in == 0 && G.z.avail_out != 0) break;
         if (rc == Z_BUF_ERROR && got == 0) break;
     }
@@ -1430,7 +1430,7 @@ static void inflate_frame(void) {
     if (G.text.len) {
         /* READY / READY_SUPPLEMENTAL: ненужные поля вырезаются из текста до cJSON (пик памяти) */
         size_t n = ready_slim(G.text.p, G.text.len);
-        if (!n) { schedule_retry("READY не разобран"); return; }
+        if (!n) { schedule_retry(ui_tr("READY не разобран")); return; }
         G.text.len = n;
         if (is_ready(G.text.p, n)) handle_ready(G.text.p, n);   /* по одному серверу, без дерева всего пакета */
         else handle_payload(G.text.p, G.text.len);
@@ -1464,7 +1464,7 @@ void gw_service(void) {
         const struct curl_ws_frame *meta = NULL;
         CURLcode rc = curl_ws_recv(G.ws, dst, CHUNK, &got, &meta);
         if (rc == CURLE_AGAIN) break;
-        if (rc != CURLE_OK || !meta) { schedule_retry("связь потеряна"); return; }
+        if (rc != CURLE_OK || !meta) { schedule_retry(ui_tr("связь потеряна")); return; }
         if (meta->flags & CURLWS_CLOSE) {
             int code = got >= 2 ? ((unsigned char)dst[0] << 8 | (unsigned char)dst[1]) : 1000;
             on_close_code(code);
@@ -1472,7 +1472,7 @@ void gw_service(void) {
         }
         if (meta->flags & (CURLWS_PING | CURLWS_PONG)) continue;
         if (got) {
-            if (G.frame.len + got > MAX_FRAME) { schedule_retry("слишком большой кадр"); return; }
+            if (G.frame.len + got > MAX_FRAME) { schedule_retry(ui_tr("слишком большой кадр")); return; }
             G.frame.len += got;
             G.frame.p[G.frame.len] = 0;
         }
@@ -1483,8 +1483,8 @@ void gw_service(void) {
     }
     now = now_ms();
     if (G.next_hb && now >= G.next_hb) {
-        if (!G.hb_interval) { schedule_retry("нет приветствия"); return; }
-        if (!G.acked) { schedule_retry("сервер не отвечает"); return; }
+        if (!G.hb_interval) { schedule_retry(ui_tr("нет приветствия")); return; }
+        if (!G.acked) { schedule_retry(ui_tr("сервер не отвечает")); return; }
         send_heartbeat();
         G.next_hb = now + G.hb_interval;
     }

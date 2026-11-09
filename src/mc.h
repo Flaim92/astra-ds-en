@@ -304,6 +304,18 @@ void rel_add(u64 uid);                          /* PUT relationships {} — за
 bool rel_add_name(const char *username, char *err, size_t errn);   /* «Добавить в друзья» по имени; false — имя неверно */
 /* Один экземпляр программы на аккаунт (живой режим): false — уже запущен (его окно поднято) */
 bool single_instance(void);
+void single_instance_release(void);
+#ifdef ASTRA_VIDEO
+/* «Astra DS Video»: прототип трансляции, только замеры (streamtest.c, скрытый флаг --streamtest) */
+int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps);
+/* Скрыть окна программы (главное — с входом, и окно капчи) из захвата экрана: WDA_EXCLUDEFROMCAPTURE
+ * (Windows 10 2004+), где не поддерживается — WDA_MONITOR (в захвате чёрный прямоугольник). Действует и на окна,
+ * созданные позже. false — не применилось (X11: всегда false). */
+bool term_capture_exclude(bool on);
+void capture_exclude_window(void *hwnd);        /* gui_win.c: новое окно (капча) — по текущему выбору */
+#endif             /* перед перезапуском после обновления: новый процесс не должен увидеть нас */
+void ui_lang_init(int forced);                  /* ui.c: 0 — русский, 1 — английский, -1 — сохранённый/системный */
+int plat_ui_lang(void);                         /* язык системы: 0 — русский (ru/uk/be), 1 — английский (иначе) */
 /* №15 (plat_*.c -> gui_*.c): масштаб окна, шаг 10 %, 0 — сброс; false — консоль или предел 10..28 px */
 bool term_zoom(int step);
 int term_zoom_pct(void);
@@ -455,6 +467,35 @@ bool mod_ban(u64 gid, u64 uid, const char *reason, int delete_hours, char *err, 
 bool mod_role(u64 gid, u64 uid, u64 role_id, bool add, char *err, size_t errn);
 bool mod_voice_move(u64 gid, u64 uid, u64 to_channel, char *err, size_t errn);  /* 0 — отключить от голоса */
 bool mod_voice_mute(u64 gid, u64 uid, bool mute, bool deaf, char *err, size_t errn);   /* серверные заглушка/глухота */
+/* ---- Автообновление (update.c; SECURITY.md «Автообновление») ----
+ * Проверка — при запуске не чаще раза в сутки (если включено; дата — в хранилище секретов) или по кнопке.
+ * Загрузка и замена — только после явного «Обновить» (update_apply). Затем «Перезапустить» (update_restart). */
+#define ASTRA_VERSION "0.1.1"                   /* версия этой сборки: релиз поднимает её (обновление — только на строго большую) */
+enum { UP_IDLE, UP_CHECKING, UP_NONE, UP_AVAILABLE, UP_DOWNLOADING, UP_READY, UP_FAILED };
+typedef struct {
+    int phase;                                  /* UP_* */
+    char version[32];                           /* доступная (из подписанного манифеста) */
+    char notes[4100];                           /* «что нового» — очищено, <= 4 КБ, ссылки не открывать */
+    char err[160];
+    long long size, got;                        /* к загрузке / загружено, байт */
+    i64 checked_at;                             /* unix-с последней проверки этой сессии (0 — не было) */
+    bool shared_dir;                            /* «Обновить» отложено: каталог/exe доступен на запись другим — спросить
+                                                 * «обновить всё равно?» -> update_apply_anyway() или update_apply_cancel();
+                                                 * спрашивать КАЖДЫЙ раз, без «запомнить» (безопасник) */
+    char warn[600];                             /* при shared_dir: готовый текст предупреждения с путём каталога */
+} UpdateState;
+void update_init(void);                         /* при старте: убрать .old и брошенные временные файлы */
+void update_check(bool manual);                 /* manual — по кнопке; иначе не чаще раза в сутки и если включено */
+void update_apply(void);                        /* «Обновить»: только при UP_AVAILABLE (может выставить shared_dir) */
+void update_apply_anyway(void);                 /* «Обновить всё равно» после предупреждения shared_dir */
+void update_apply_cancel(void);                 /* «Отмена»: снять shared_dir */
+bool update_restart(void);                      /* «Перезапустить»: при UP_READY; запускает новый exe и выходит */
+void update_service(void);                      /* главный цикл */
+const UpdateState *update_state(void);
+bool update_demo(const char *phase);            /* --demo-update=available|confirm|downloading|ready|failed (только --demo) */
+void update_auto_set(bool on);                  /* настройка «проверять обновления при запуске» (по умолчанию да) */
+bool update_auto(void);
+int update_selftest(void (*check)(bool ok, const char *what));
 /* ---- Очередь 1 аналитика ---- */
 /* №103/104 свой статус со сроком и текстовый статус. presence_set_for: статус на minutes (0 — бессрочно), по
  * истечении — «в сети». custom_status_set: текст (<= 128 символов, "" — убрать) на minutes (0 — бессрочно):
@@ -661,6 +702,16 @@ typedef struct {
     float mic_level;                            /* 0..1 */
     char error[128];
 } VoiceStatus;
+/* Ревью 17: счётчики приёма для страницы «Производительность» (живая проверка треска). */
+typedef struct { u64 user; u32 underruns, stops, trims, dave_fail, late, plc, fec; } VoiceSrcStats;
+typedef struct {
+    int nsrc; VoiceSrcStats src[8];
+    int min_queued_ms;                          /* наименьший запас в устройстве вывода за звонок */
+    u32 tick_hist[6];                           /* интервал такта: <=22, <=27, <=32, <=40, <=60, >60 мс */
+} VoiceStats;
+void voice_stats(VoiceStats *out);              /* снимок (обновляется раз в секунду), обнуляется при входе в звонок */
+void plat_timer_hires(bool on);                 /* Windows: timeBeginPeriod(1) на время звонка; Linux — ничего */
+extern bool g_audio_busy;                       /* звонок идёт: HeapCompact при закрытии других потоков звука — нет */
 void voice_init(void);
 void voice_join(u64 guild_id, u64 channel_id);
 void voice_leave(void);
@@ -685,6 +736,8 @@ void voice_mic_test(bool on);
 /* №143 фильтр микрофона: срез ниже 90 Гц (гул, стук по столу) — до шумоподавления/порога и Opus; по умолчанию вкл. */
 void voice_hpf(bool on);
 bool voice_hpf_on(void);
+void voice_duck_others(bool on);                /* приглушать другие программы в звонке (по умолчанию нет) */
+bool voice_duck_others_on(void);
 /* №145 звуки звонка — синтез (без файлов): звонок (повторяется до sound_stop), вход/выход, микрофон вкл/выкл,
  * сообщение. Вывод открывается только на время звука. sounds_enable(false) — все выключены. */
 enum { SOUND_RING, SOUND_JOIN, SOUND_LEAVE, SOUND_MUTE, SOUND_UNMUTE, SOUND_MSG };
@@ -718,6 +771,7 @@ int audio_waitables(Audio *a, Waitable *out, int max);
 bool audio_read_frame(Audio *a, int16_t *pcm960);
 /* Сколько стерео-кадров (48 кГц) устройство вывода готово принять, и отдать их. */
 int audio_render_space(Audio *a);
+int audio_render_queued(Audio *a);               /* кадров уже в устройстве (держим ~50 мс по часам устройства) */
 void audio_render_write(Audio *a, const int16_t *stereo, int frames);
 bool audio_lost(Audio *a);                      /* устройство отключили */
 void audio_list_devices(void);
@@ -730,6 +784,9 @@ void ui_dirty(void);
 void ui_notice_clear(void);
 void ui_render_if_dirty(void);
 void ui_notice(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+/* Перевод видимой строки на язык интерфейса (ui.c, таблица ui_en.h); нет перевода — русская как есть.
+ * format_arg: проверки printf-формата сохраняются (snprintf(err, n, ui_tr("... %s"), x)). */
+const char *ui_tr(const char *ru) __attribute__((format_arg(1)));
 void ui_on_ready(void);
 void ui_on_message(u64 channel_id, bool mention);
 void ui_tick(void);
@@ -815,6 +872,7 @@ void cli_open_dm(u64 channel_id);               /* из ui_open_dm при O.cli 
 typedef struct {
     bool no_save, invisible, typing, no_ack, demo, logout, ptt, hq, cli, vless_ask, no_vless, no_images;
     bool tray;                                  /* --tray: свернуть окно — в значок трея (Windows) */
+    bool no_update;                             /* --no-update: не проверять обновления */
     const char *panic;                          /* --panic=КЛАВИША */
     const char *voice;                          /* --voice=low|high */
     const char *mic, *out;
@@ -823,6 +881,8 @@ extern Opts O;
 
 /* ======================= demo.c ======================= */
 void demo_load(void);
+char *demo_en_json(const char *s, size_t n, size_t *out_n);   /* i18n: английский демо-набор (NULL — без подмены) */
+const char *demo_tr(const char *ru);
 void demo_send(u64 channel, const char *text);
 void demo_around(u64 channel, u64 msg_id);      /* переход к сообщению (#флуд — 50 вокруг) */
 void demo_older(u64 channel);                   /* подгрузка старых в демо (ui.c при прокрутке вверх) */

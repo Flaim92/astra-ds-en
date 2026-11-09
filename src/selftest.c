@@ -1774,6 +1774,53 @@ static void t_rv_fwd(void) {
     ui_open_channel(was);
 }
 void chan_remove_test(u64 id);
+/* Очередь 1: статус со сроком, текстовый статус, игнор, заметка, правила сервера (демо) */
+static void t_queue1(void) {
+    bool was_demo = O.demo;
+    O.demo = true;
+    char err[160] = "";
+    /* №103/104 */
+    presence_set_for(PS_DND, 60);
+    bool a1 = presence_until() > wall_ms() / 1000 + 59 * 60;
+    bool a2 = custom_status_set("на \x1b[31mпаре", 30, err, sizeof err) && !strcmp(custom_status(), "на паре") && custom_status_until() > 0;
+    char lng[700]; memset(lng, 'x', sizeof lng - 1); lng[sizeof lng - 1] = 0;
+    bool a3 = !custom_status_set(lng, 0, err, sizeof err);
+    g_clock_skew += 0;
+    custom_status_set("", 0, err, sizeof err);
+    presence_set_for(PS_ONLINE, 0);
+    check(a1 && a2 && a3 && !*custom_status() && !presence_until(), "№103/104: статус на срок, текстовый статус (очищен, <= 128), снятие");
+    /* №108 игнор */
+    ignore_set(1002, true);
+    int m0 = chan_find(4001) ? chan_find(4001)->mentions : 0;
+    ev("MESSAGE_CREATE", "{\"id\":\"885000\",\"channel_id\":\"4001\",\"author\":{\"id\":\"1002\",\"username\":\"bob\"},\"content\":\"эй\",\"timestamp\":\"2026-11-10T10:00:00+00:00\"}");
+    bool g1 = ignored(1002) && (!chan_find(4001) || chan_find(4001)->mentions == m0);
+    ignore_set(1002, false);
+    check(g1 && !ignored(1002), "№108 игнор: только у себя, упоминания игнорируемого не считаются, снятие");
+    /* №100 заметка */
+    note_open(1001);
+    bool n1 = strstr(note_state()->text, "котов") != NULL;
+    bool n2 = note_set(1001, "новая \x1b[2Jзаметка", err, sizeof err) && !strcmp(note_state()->text, "новая заметка") && !note_set(S.me_id, "x", err, sizeof err);
+    char n300[400]; memset(n300, 'z', 300); n300[300] = 0;
+    bool n3 = !note_set(1001, n300, err, sizeof err);
+    note_close();
+    check(n1 && n2 && n3, "№100 заметка: чтение, запись (очищена, <= 256), не о себе");
+    /* №128 правила */
+    Guild *pg = guild_find(2500);
+    bool r1 = pg && pg->pending;
+    u64 was = S.open_ch;
+    ui_open_channel(3500);
+    int nb = S.nmsgs;
+    msg_send(3500, "привет", 0, 0);
+    bool r2 = S.nmsgs == nb;                    /* не ушло: правила не приняты */
+    guild_rules_open(2500);
+    bool r3 = guild_rules_state()->n == 3 && guild_rules_state()->version && guild_rules_state()->version[0];
+    bool r4 = guild_rules_accept(2500, err, sizeof err) && !guild_find(2500)->pending;
+    guild_rules_close();
+    guild_find(2500)->pending = true;           /* вернуть демо как было (для снимков) */
+    ui_open_channel(was);
+    check(r1 && r2 && r3 && r4, "№128 правила сервера: pending из READY, писать нельзя, правила (TERMS), принять — снимает");
+    O.demo = was_demo;
+}
 /* №65/67 отправка файла со спойлером и описанием (демо: в ленту) */
 static void t_send_ex(void) {
     bool was_demo = O.demo;
@@ -2698,6 +2745,63 @@ static void t_file(void) {
     check(!file_sending(NULL), "файл: в демо очередь отправки пуста");
 }
 
+/* ---- тестировщик: щелчок по КАЖДОЙ кнопке экрана входа и стартового VLESS (ошибка 09.11: номера кнопок B_LG_*
+ * совпали с B_LANG — щелчок по галочке переключал язык). Каждая кнопка делает своё, язык меняет только RU|EN. ---- */
+extern bool g_lang_en;
+void ui_vless_begin(const char *err, bool only);   /* ui.c (объявлены в main.c, не в mc.h) */
+void ui_startup_direct_set(bool on);
+static void t_login_buttons(void) {
+    int cw0 = CW, ch0 = CH;
+    CW = 120; CH = 34;
+    /* стартовый экран, вопрос */
+    ui_vless_begin(NULL, true);
+    bool ok = on_screen("Подключение") && scr_has(&cur, "[ ] Больше не спрашивать");
+    check(ok, "старт VLESS: экран вопроса, галочка снята");
+    click("[ ] Больше не спрашивать");
+    check(on_screen("[x] Больше не спрашивать") && !g_lang_en, "старт: щелчок по галочке — ставит её, язык не меняется");
+    click("[x] Больше не спрашивать");
+    check(on_screen("[ ] Больше не спрашивать") && !g_lang_en, "старт: повторный щелчок — снимает, язык не меняется");
+    click_ex("RU|EN", 1, 3, false);
+    check(g_lang_en, "старт: RU|EN переключает на английский");
+    click_ex("RU|EN", 1, 1, false);
+    check(!g_lang_en && on_screen("Подключение"), "старт: RU|EN обратно на русский");
+    click("Подключить");
+    check(ui_login_active() && on_screen("ссылка должна") && !g_lang_en, "старт: «Подключить» с пустой ссылкой — ошибка у поля, окно не закрыто");
+    click("Без VLESS");
+    check(!ui_login_active() && !g_lang_en, "старт: «Без VLESS» закрывает экран (дальше клиент), язык не тронут");
+    ui_startup_direct_set(false);
+    /* стартовый экран, ошибка туннеля */
+    ui_vless_begin("туннель не отвечает (проверка)", true);
+    check(on_screen("VLESS не работает") && scr_has(&cur, "Повторить") && scr_has(&cur, "Выход"), "старт-ошибка: экран с Повторить / Выход");
+    click("Повторить");
+    check(ui_login_active() && !g_lang_en && on_screen("VLESS не работает"), "старт-ошибка: «Повторить» — остаётся на экране, язык не тронут");
+    click("( Подключить");
+    check(ui_login_active() && on_screen("ссылка должна"), "старт-ошибка: «Подключить» с пустой другой ссылкой — ошибка у поля");
+    click("Без VLESS");
+    check(!ui_login_active() && !g_lang_en, "старт-ошибка: «Без VLESS» закрывает экран");
+    ui_vless_begin("туннель не отвечает (проверка)", true);
+    click("Выход");
+    check(g_quit && !g_lang_en, "старт-ошибка: «Выход» — выход из программы");
+    g_quit = false;
+    /* окно входа: шаг VLESS -> форма; кнопки формы делают своё, язык не меняется. only=false — после VLESS форма
+     * (ui_login_begin не сбрасывает LG.vonly от прошлого ui_vless_begin(..., true)) */
+    ui_vless_begin(NULL, false);
+    click("Без VLESS");
+    check(ui_login_active() && on_screen("С возвращением") && !g_lang_en, "вход: «Без VLESS» — форма входа");
+    click("Вход");
+    check(ui_login_active() && on_screen("С возвращением") && !g_lang_en, "вход: «Вход» с пустыми полями — остаётся на форме");
+    click_ex("RU|EN", 1, 3, false);
+    check(g_lang_en, "вход: RU|EN на форме переключает язык");
+    click_ex("RU|EN", 1, 1, false);
+    check(!g_lang_en, "вход: RU|EN обратно");
+    ui_vless_begin(NULL, true);                  /* закрыть окно входа тем же путём, что пользователь */
+    click("Без VLESS");
+    ui_startup_direct_set(false);
+    check(!ui_login_active(), "вход: окно закрыто после проверок");
+    ui_lang_init(0);
+    CW = cw0; CH = ch0;
+}
+
 static void t_voice_life(void) {
     /* жизненный цикл звонка (демо, без звука в динамиках): вход, работа, выход */
     size_t mv0 = plat_private_bytes();
@@ -3070,6 +3174,7 @@ static void t_slim_fuzz(void) {
 
 int selftest(void) {
     term_puts("Astra DS --selftest\n");
+    ui_lang_init(0);                            /* проверки — по русскому интерфейсу, независимо от языка системы */
     { const char *ra = getenv("ST_REALAUDIO"); g_audio_fake = !(ra && !strcmp(ra, "1")); }   /* микрофон не открывать без явной просьбы */
     size_t m0 = plat_private_bytes();
     O.demo = true;
@@ -3116,9 +3221,12 @@ int selftest(void) {
     term_puts("\n  пакет В (часть 2):\n");   t_packv2();
     term_puts("\n  слеш-команды и модерация:\n"); t_slash_mod();
     term_puts("\n  файл со спойлером:\n");  t_send_ex();
+    term_puts("\n  автообновление:\n");     update_selftest(check);
+    term_puts("\n  очередь 1:\n");          t_queue1();
     term_puts("\n  реакции и пересылка (store):\n"); t_rv_fwd();
     term_puts("\n  поиск:\n");               t_search();
     term_puts("\n  отправка файла:\n");      t_file();
+    term_puts("\n  кнопки входа и старта (тестировщик):\n"); t_login_buttons();
 
     term_puts("\n  голосовой тракт:\n");
     voice_selftest(check);

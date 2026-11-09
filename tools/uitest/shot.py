@@ -167,6 +167,32 @@ class Shot:
         return p
 
 
+_lang_ok = {}
+
+
+def lang_flag():
+    """Язык клиента явно: --lang=ru|en (с 09.11 язык — флаг, сохранённый выбор или язык системы; LANG на Windows
+    не действует). UITEST_LANG=en... — английский, иначе русский (ожидания матрицы — русские). Старые сборки
+    (до флага: база, 0.1.1) его не знают и завершаются с кодом 2 — для них флаг не передаётся."""
+    if EXE not in _lang_ok:
+        try:
+            h = subprocess.run([EXE, '--help'], capture_output=True, timeout=20).stdout.decode('utf-8', 'replace')
+        except Exception:
+            h = ''
+        _lang_ok[EXE] = '--lang' in h
+    if not _lang_ok[EXE]:
+        return []
+    return ['--lang=en' if os.environ.get('UITEST_LANG', 'ru').lower().startswith('en') else '--lang=ru']
+
+
+def child_env():
+    """Окружение клиента (для прямых Popen): LANG тоже задаётся — на Linux он ещё может влиять."""
+    e = dict(os.environ)
+    e.pop('LC_ALL', None)
+    e['LANG'] = 'en_US.UTF-8' if lang_flag() == ['--lang=en'] else 'ru_RU.UTF-8'
+    return e
+
+
 def run(keys, name, size=None, extra=None, timeout=60):
     """Один скрытый прогон. size='WxH' добавляется первым шагом. Возвращает Shot (итоговый снимок)."""
     # клиент пишет .txt через fopen (UTF-8 путь на Windows искажается): снимаем под ASCII-именем, потом переименовываем
@@ -179,11 +205,12 @@ def run(keys, name, size=None, extra=None, timeout=60):
         steps.append('size:' + size)
     if keys:
         steps.append(keys)
-    args = [EXE, '--demo', '--shot=' + tpath, '--shot-keys=' + ','.join(steps)] +         ([] if os.environ.get('UITEST_OCR') else ['--shot-text']) + (extra or [])
+    args = [EXE, '--demo'] + lang_flag() + ['--shot=' + tpath, '--shot-keys=' + ','.join(steps)] + \
+        ([] if os.environ.get('UITEST_OCR') else ['--shot-text']) + (extra or [])
     for f in os.listdir(OUT):                       # старые снимки этого имени и временные
         if re.fullmatch('(' + re.escape(name) + '|' + tmp + r')(-\d+)?\.(bmp|png|txt)', f):
             os.remove(os.path.join(OUT, f))
-    r = subprocess.run(args, capture_output=True, timeout=timeout)
+    r = subprocess.run(args, capture_output=True, timeout=timeout, env=child_env())
     out = r.stdout.decode('utf-8', 'replace')
     m = re.search(r'\((\d+)x(\d+) клеток\); событий мыши дошло до интерфейса: (\d+); частная память (\d+) КБ', out)
     if r.returncode != 0 or not m:

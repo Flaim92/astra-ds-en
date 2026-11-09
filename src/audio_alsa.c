@@ -100,6 +100,11 @@ bool audio_read_frame(Audio *a, int16_t *pcm960) {
     return true;
 }
 
+int audio_render_queued(Audio *a) {
+    snd_pcm_sframes_t d = 0;
+    if (snd_pcm_delay(a->pb, &d) < 0 || d < 0) return 0;
+    return (int)d;
+}
 int audio_render_space(Audio *a) {
     snd_pcm_sframes_t av = snd_pcm_avail_update(a->pb);
     if (av < 0) { if (recover(a, a->pb, av)) av = snd_pcm_avail_update(a->pb); else return 0; }

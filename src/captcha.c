@@ -19,7 +19,7 @@
 bool captcha_supported(void) { return false; }
 bool captcha_open(const char *sitekey, const char *rqdata, char *out, size_t cap, bool test, char *err, size_t errn) {
     (void)sitekey; (void)rqdata; (void)out; (void)cap; (void)test;
-    snprintf(err, errn, "проверка hCaptcha в Astra DS на Linux пока не поддерживается: войдите по QR-коду");
+    snprintf(err, errn, ui_tr("проверка hCaptcha в Astra DS на Linux пока не поддерживается: войдите по QR-коду"));
     return false;
 }
 int captcha_result(char *err, size_t errn) { if (errn) err[0] = 0; return -1; }
@@ -329,23 +329,23 @@ static ICoreWebView2NewWindowRequestedEventHandler h_new;
 
 static HRESULT STDMETHODCALLTYPE env_done(ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler *This, HRESULT hr, ICoreWebView2Environment *env) {
     (void)This;
-    if (FAILED(hr) || !env) { fail("WebView2 не запустился", ""); PostMessageW(C.hwnd, WM_MC_CLOSE, 0, 0); return S_OK; }
+    if (FAILED(hr) || !env) { fail(ui_tr("WebView2 не запустился"), ""); PostMessageW(C.hwnd, WM_MC_CLOSE, 0, 0); return S_OK; }
     C.env = env;
     ICoreWebView2Environment_AddRef(env);
     if (FAILED(ICoreWebView2Environment_CreateCoreWebView2Controller(env, C.hwnd, &h_ctrl))) {
-        fail("WebView2: окно не создалось", ""); PostMessageW(C.hwnd, WM_MC_CLOSE, 0, 0);
+        fail(ui_tr("WebView2: окно не создалось"), ""); PostMessageW(C.hwnd, WM_MC_CLOSE, 0, 0);
     }
     return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE ctrl_done(ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *This, HRESULT hr, ICoreWebView2Controller *ctrl) {
     (void)This;
-    if (FAILED(hr) || !ctrl) { fail("WebView2: окно не создалось", ""); PostMessageW(C.hwnd, WM_MC_CLOSE, 0, 0); return S_OK; }
+    if (FAILED(hr) || !ctrl) { fail(ui_tr("WebView2: окно не создалось"), ""); PostMessageW(C.hwnd, WM_MC_CLOSE, 0, 0); return S_OK; }
     C.ctrl = ctrl;
     ICoreWebView2Controller_AddRef(ctrl);
     RECT r;
     GetClientRect(C.hwnd, &r);
     ICoreWebView2Controller_put_Bounds(ctrl, r);
-    if (FAILED(ICoreWebView2Controller_get_CoreWebView2(ctrl, &C.wv)) || !C.wv) { fail("WebView2 не отвечает", ""); PostMessageW(C.hwnd, WM_MC_CLOSE, 0, 0); return S_OK; }
+    if (FAILED(ICoreWebView2Controller_get_CoreWebView2(ctrl, &C.wv)) || !C.wv) { fail(ui_tr("WebView2 не отвечает"), ""); PostMessageW(C.hwnd, WM_MC_CLOSE, 0, 0); return S_OK; }
     ICoreWebView2Settings *st = NULL;
     if (SUCCEEDED(ICoreWebView2_get_Settings(C.wv, &st)) && st) {
         ICoreWebView2Settings_put_AreDevToolsEnabled(st, FALSE);
@@ -401,10 +401,10 @@ static HRESULT STDMETHODCALLTYPE msg_got(ICoreWebView2WebMessageReceivedEventHan
         bool ok = n > 20 && (size_t)n < C.cap;
         for (int i = 0; ok && i < n; i++) { char c = C.out[i]; ok = c > 0x20 && c < 0x7f && c != '"' && c != '\\'; }
         if (ok) { C.out[n] = 0; InterlockedCompareExchange(&C.state, CS_OK, CS_OPEN); }
-        else { wipe(C.out, C.cap); fail("hCaptcha вернула непонятный ответ", ""); }
+        else { wipe(C.out, C.cap); fail(ui_tr("hCaptcha вернула непонятный ответ"), ""); }
         PostMessageW(C.hwnd, WM_MC_CLOSE, 0, 0);
     } else if (!wcscmp(m, L"err:load")) {
-        fail("hCaptcha не загрузилась: нет связи с hcaptcha.com", C.via ? " через VLESS" : "");
+        fail(ui_tr("hCaptcha не загрузилась: нет связи с hcaptcha.com"), C.via ? ui_tr(" через VLESS") : "");
         PostMessageW(C.hwnd, WM_MC_CLOSE, 0, 0);
     }
     wipe(m, wn * sizeof(WCHAR));
@@ -489,18 +489,21 @@ static DWORD WINAPI ui_thread(LPVOID arg) {
     int w = 460, h = 660;
     C.hwnd = CreateWindowExW(WS_EX_TOPMOST, wc.lpszClassName, L"Astra DS: проверка hCaptcha для Discord", WS_OVERLAPPEDWINDOW,
                              (GetSystemMetrics(SM_CXSCREEN) - w) / 2, (GetSystemMetrics(SM_CYSCREEN) - h) / 2, w, h, NULL, NULL, wc.hInstance, NULL);
-    if (!C.hwnd) { fail("окно проверки не создалось", ""); goto done; }
+    if (!C.hwnd) { fail(ui_tr("окно проверки не создалось"), ""); goto done; }
+#ifdef ASTRA_VIDEO
+    capture_exclude_window(C.hwnd);             /* при включённом «скрывать из захвата» — и капча не видна в трансляции */
+#endif
     ShowWindow(C.hwnd, SW_SHOWNORMAL);
     SetForegroundWindow(C.hwnd);
     dll = LoadLibraryExW(C.dll, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     CreateEnvFn create = dll ? (CreateEnvFn)(void *)GetProcAddress(dll, "CreateWebViewEnvironmentWithOptionsInternal") : NULL;
     if (!create || FAILED(create(true, 0, C.udf, (IUnknown *)&opt_obj, &h_env))) {
-        fail("WebView2 Runtime не запустился", "");
+        fail(ui_tr("WebView2 Runtime не запустился"), "");
         DestroyWindow(C.hwnd);
     }
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
-    fail("окно проверки закрыто", "");
+    fail(ui_tr("окно проверки закрыто"), "");
 done:
     C.hwnd = NULL;
     if (C.wv) { ICoreWebView2_Release(C.wv); C.wv = NULL; }
@@ -564,21 +567,21 @@ static void page_build(const char *sitekey, const char *rqdata, bool test) {
 
 bool captcha_open(const char *sitekey, const char *rqdata, char *out, size_t cap, bool test, char *err, size_t errn) {
     err[0] = 0;
-    if (captcha_busy()) { snprintf(err, errn, "окно проверки уже открыто"); return false; }
+    if (captcha_busy()) { snprintf(err, errn, ui_tr("окно проверки уже открыто")); return false; }
     captcha_close();
     if (test) sitekey = TEST_SITEKEY;
     if (!sitekey || !rqdata || !charset(sitekey, "-", 64) || !charset(rqdata, "+/=._-", 4000) || !sitekey[0]) {
-        snprintf(err, errn, "Discord прислал проверку непонятного вида");
+        snprintf(err, errn, ui_tr("Discord прислал проверку непонятного вида"));
         return false;
     }
-    if (!captcha_supported()) { snprintf(err, errn, "нет Microsoft Edge WebView2 Runtime: проверку показать нечем, войдите по QR-коду"); return false; }
-    if (!signed_ok(C.dll)) { snprintf(err, errn, "библиотека WebView2 не прошла проверку подписи"); return false; }
+    if (!captcha_supported()) { snprintf(err, errn, ui_tr("нет Microsoft Edge WebView2 Runtime: проверку показать нечем, войдите по QR-коду")); return false; }
+    if (!signed_ok(C.dll)) { snprintf(err, errn, ui_tr("библиотека WebView2 не прошла проверку подписи")); return false; }
     C.via = vless_state() != VL_OFF;
     if (C.via && !vless_socks(C.sip, sizeof C.sip, &C.sport, C.suser, sizeof C.suser, C.spass, sizeof C.spass)) {
-        snprintf(err, errn, "VLESS не работает: проверку открыть нельзя (напрямую не идём)");
+        snprintf(err, errn, ui_tr("VLESS не работает: проверку открыть нельзя (напрямую не идём)"));
         return false;
     }
-    if (!bridge_start()) { bridge_stop(); snprintf(err, errn, "не удалось открыть локальный мост для проверки"); return false; }
+    if (!bridge_start()) { bridge_stop(); snprintf(err, errn, ui_tr("не удалось открыть локальный мост для проверки")); return false; }
     _snwprintf(g_args, sizeof g_args / sizeof *g_args,
                L"--proxy-server=http://127.0.0.1:%d --proxy-bypass-list=<-loopback> --disable-background-networking "
                L"--no-first-run --disable-sync --disable-features=msSmartScreenProtection "
@@ -587,21 +590,21 @@ bool captcha_open(const char *sitekey, const char *rqdata, char *out, size_t cap
     g_args[sizeof g_args / sizeof *g_args - 1] = 0;
     WCHAR tmp[MAX_PATH];
     unsigned char r[8];
-    if (BCryptGenRandom(NULL, r, sizeof r, BCRYPT_USE_SYSTEM_PREFERRED_RNG)) { bridge_stop(); snprintf(err, errn, "нет случайных чисел"); return false; }
+    if (BCryptGenRandom(NULL, r, sizeof r, BCRYPT_USE_SYSTEM_PREFERRED_RNG)) { bridge_stop(); snprintf(err, errn, ui_tr("нет случайных чисел")); return false; }
     DWORD tn = GetTempPathW(MAX_PATH, tmp);
-    if (!tn || tn > MAX_PATH - 40) { bridge_stop(); snprintf(err, errn, "нет временного каталога"); return false; }
+    if (!tn || tn > MAX_PATH - 40) { bridge_stop(); snprintf(err, errn, ui_tr("нет временного каталога")); return false; }
     _snwprintf(C.udf, MAX_PATH, L"%lsastra-wv-%02x%02x%02x%02x%02x%02x%02x%02x", tmp, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
     C.udf[MAX_PATH - 1] = 0;
-    if (!CreateDirectoryW(C.udf, NULL)) { C.udf[0] = 0; bridge_stop(); snprintf(err, errn, "не создался временный профиль"); return false; }
+    if (!CreateDirectoryW(C.udf, NULL)) { C.udf[0] = 0; bridge_stop(); snprintf(err, errn, ui_tr("не создался временный профиль")); return false; }
     page_build(sitekey, rqdata, test);
-    if (!C.page_len) { rm_tree(C.udf); C.udf[0] = 0; bridge_stop(); snprintf(err, errn, "rqdata слишком длинная"); return false; }
+    if (!C.page_len) { rm_tree(C.udf); C.udf[0] = 0; bridge_stop(); snprintf(err, errn, ui_tr("rqdata слишком длинная")); return false; }
     C.out = out;
     C.cap = cap;
     wipe(out, cap);
     C.err[0] = 0;
     C.state = CS_OPEN;
     C.th = CreateThread(NULL, 0, ui_thread, NULL, 0, &C.tid);
-    if (!C.th) { C.state = CS_IDLE; rm_tree(C.udf); C.udf[0] = 0; bridge_stop(); snprintf(err, errn, "поток проверки не запустился"); return false; }
+    if (!C.th) { C.state = CS_IDLE; rm_tree(C.udf); C.udf[0] = 0; bridge_stop(); snprintf(err, errn, ui_tr("поток проверки не запустился")); return false; }
     return true;
 }
 

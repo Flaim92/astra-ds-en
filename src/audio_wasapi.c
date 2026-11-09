@@ -76,9 +76,30 @@ static IMMDevice *pick(IMMDeviceEnumerator *en, EDataFlow flow, const char *hint
     return dev;
 }
 
+/* IAudioClientDuckingControl (Windows 10 1709+): поток «для связи» не приглушает остальные программы.
+ * Объявлен вручную — в заголовках MinGW его может не быть. Нет интерфейса — молча пропускаем. */
+DEFINE_GUID(MC_IID_IAudioClientDuckingControl, 0xC789D381, 0xA28C, 0x4168, 0xB2, 0x8F, 0xD3, 0xA8, 0x37, 0x92, 0x4D, 0xC3);
+typedef struct McDuckCtl McDuckCtl;
+typedef struct {
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(McDuckCtl *, REFIID, void **);
+    ULONG (STDMETHODCALLTYPE *AddRef)(McDuckCtl *);
+    ULONG (STDMETHODCALLTYPE *Release)(McDuckCtl *);
+    HRESULT (STDMETHODCALLTYPE *SetDuckingOptionsForCurrentStream)(McDuckCtl *, DWORD);
+} McDuckCtlVtbl;
+struct McDuckCtl { const McDuckCtlVtbl *lpVtbl; };
+#define MC_DUCKING_DO_NOT_DUCK_OTHER_STREAMS 0x1
+static void no_ducking(IAudioClient *c) {
+    if (voice_duck_others_on()) return;
+    McDuckCtl *d = NULL;
+    if (SUCCEEDED(IAudioClient_QueryInterface(c, &MC_IID_IAudioClientDuckingControl, (void **)&d)) && d) {
+        d->lpVtbl->SetDuckingOptionsForCurrentStream(d, MC_DUCKING_DO_NOT_DUCK_OTHER_STREAMS);
+        d->lpVtbl->Release(d);
+    }
+}
 static IAudioClient *open_client(IMMDevice *dev, int channels, REFERENCE_TIME buf, HANDLE ev) {
     IAudioClient *c = NULL;
     if (FAILED(IMMDevice_Activate(dev, &MC_IID_IAudioClient, CLSCTX_ALL, NULL, (void **)&c))) return NULL;
+    no_ducking(c);                               /* до Initialize: параметр потока */
     WAVEFORMATEX wf = {0};
     wf.wFormatTag = WAVE_FORMAT_PCM;
     wf.nChannels = (WORD)channels;
@@ -108,7 +129,7 @@ Audio *audio_open(const char *mic_hint, const char *out_hint, char *err, size_t 
     a->cev = CreateEventW(NULL, FALSE, FALSE, NULL);
     IMMDevice *od = pick(a->en, eRender, out_hint);
     if (od) {
-        a->rc = open_client(od, 2, 600000, a->rev);    /* 60 мс буфер вывода: такт 20 мс + запас */
+        a->rc = open_client(od, 2, 1000000, a->rev);   /* 100 мс буфер вывода; держим ~60 мс (такт 20 мс + запас на задержки) */
         IMMDevice_Release(od);
     }
     if (!a->rc || FAILED(IAudioClient_GetService(a->rc, &MC_IID_IAudioRenderClient, (void **)&a->render))) {
@@ -148,7 +169,7 @@ Audio *audio_open_out(const char *out_hint, char *err, size_t errn) {
     a->cev = CreateEventW(NULL, FALSE, FALSE, NULL);
     IMMDevice *od = pick(a->en, eRender, out_hint);
     if (od) {
-        a->rc = open_client(od, 2, 600000, a->rev);
+        a->rc = open_client(od, 2, 1000000, a->rev);
         IMMDevice_Release(od);
     }
     if (!a->rc || FAILED(IAudioClient_GetService(a->rc, &MC_IID_IAudioRenderClient, (void **)&a->render))) {
@@ -177,7 +198,7 @@ void audio_close(Audio *a) {
      * и вернуть системе освободившиеся страницы кучи — иначе после первого звонка остаётся ~0,5 МБ */
     if (a->com) { CoFreeUnusedLibrariesEx(INFINITE, 0); CoUninitialize(); }
     free(a);
-    HeapCompact(GetProcessHeap(), 0);
+    if (!g_audio_busy) HeapCompact(GetProcessHeap(), 0);   /* в звонке не трогаем кучу: пауза потока = треск */
 }
 
 int audio_waitables(Audio *a, Waitable *out, int max) {
@@ -215,6 +236,12 @@ bool audio_read_frame(Audio *a, int16_t *pcm960) {
     return true;
 }
 
+int audio_render_queued(Audio *a) {           /* кадров уже в буфере устройства (ещё не сыграно) */
+    UINT32 pad = 0;
+    HRESULT hr = IAudioClient_GetCurrentPadding(a->rc, &pad);
+    if (hr == AUDCLNT_E_DEVICE_INVALIDATED) { a->lost = true; return 0; }
+    return FAILED(hr) ? 0 : (int)pad;
+}
 int audio_render_space(Audio *a) {
     UINT32 pad = 0;
     HRESULT hr = IAudioClient_GetCurrentPadding(a->rc, &pad);

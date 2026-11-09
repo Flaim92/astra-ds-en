@@ -473,7 +473,7 @@ static void rest_step(void) {
         long status = 0;
         CURLcode rc = msg->data.result;
         if (rc == CURLE_OK) curl_easy_getinfo(L.e, CURLINFO_RESPONSE_CODE, &status);
-        if (L.via) vless_report_failure(status > 0 ? NULL : net_path_error((int)rc) ? "вход" : NULL);
+        if (L.via) vless_report_failure(status > 0 ? NULL : net_path_error((int)rc) ? ui_tr("вход") : NULL);
         int kind = L.kind;
         curl_multi_remove_handle(L.m, L.e);
         curl_easy_cleanup(L.e);
@@ -509,10 +509,10 @@ static void wipe_secrets(void) {
 /* Токен получен (из ответа входа или расшифрованный): в secret.c, в хранилище, конец входа. */
 static bool accept_token(const char *t, size_t n) {
     secret_set(t, n);
-    if (!secret_token()) { set_err(LF_NONE, "Discord вернул токен непонятного вида"); return false; }
+    if (!secret_token()) { set_err(LF_NONE, ui_tr("Discord вернул токен непонятного вида")); return false; }
     L.notice[0] = 0;
     if (!O.no_save && !L.selftest && !cred_save())
-        snprintf(L.notice, sizeof L.notice, "Хранилище секретов недоступно: токен не сохранён, при следующем запуске войдите снова.");
+        snprintf(L.notice, sizeof L.notice, ui_tr("Хранилище секретов недоступно: токен не сохранён, при следующем запуске войдите снова."));
     clear_err();
     L.stage = LG_DONE;
     L.want = 0;
@@ -551,8 +551,8 @@ static void to_undelete(bool scheduled) {
     L.stage = LG_UNDELETE;
     clear_err();
     snprintf(L.notice, sizeof L.notice, scheduled
-        ? "Аккаунт помечен к удалению. Войти - значит отменить удаление и восстановить аккаунт."
-        : "Аккаунт отключён. Войти - значит снова включить его.");
+        ? ui_tr("Аккаунт помечен к удалению. Войти - значит отменить удаление и восстановить аккаунт.")
+        : ui_tr("Аккаунт отключён. Войти - значит снова включить его."));
 }
 static void cap_field(char *dst, size_t cap, const char *v, const char *extra) {
     dst[0] = 0;
@@ -582,17 +582,17 @@ static void to_captcha(const cJSON *j, int kind) {
     bool can = cap_usable() && captcha_supported();
     if (kind == R_RA) {                         /* тикет и ключ RSA остаются: после проверки — повтор обмена */
         Q.st = QR_SCANNED;
-        snprintf(Q.text, sizeof Q.text, "%s", again ? "Discord не принял проверку: пройдите её ещё раз."
-                 : can ? "Discord просит пройти проверку, чтобы завершить вход по QR."
-                       : "Discord просит пройти проверку (hCaptcha), а показать её здесь нечем.");
+        snprintf(Q.text, sizeof Q.text, "%s", again ? ui_tr("Discord не принял проверку: пройдите её ещё раз.")
+                 : can ? ui_tr("Discord просит пройти проверку, чтобы завершить вход по QR.")
+                       : ui_tr("Discord просит пройти проверку (hCaptcha), а показать её здесь нечем."));
         return;
     }
     L.stage = LG_CAPTCHA;
     clear_err();
-    if (again) set_err(LF_NONE, "Discord не принял проверку. Пройдите её ещё раз.");
+    if (again) set_err(LF_NONE, ui_tr("Discord не принял проверку. Пройдите её ещё раз."));
     snprintf(L.notice, sizeof L.notice, "%s", can
-        ? "Discord просит подтвердить, что вы человек (hCaptcha). Проверка откроется в отдельном окне, после неё вход продолжится сам. Или войдите по QR-коду."
-        : "Discord просит пройти капчу (hCaptcha), а показать её здесь нечем. Войдите по QR-коду: мобильное приложение Discord -> Настройки -> Сканировать QR-код.");
+        ? ui_tr("Discord просит подтвердить, что вы человек (hCaptcha). Проверка откроется в отдельном окне, после неё вход продолжится сам. Или войдите по QR-коду.")
+        : ui_tr("Discord просит пройти капчу (hCaptcha), а показать её здесь нечем. Войдите по QR-коду: мобильное приложение Discord -> Настройки -> Сканировать QR-код."));
     if (Q.st == QR_OFF || Q.st == QR_EXPIRED || Q.st == QR_ERROR) login_qr_start();
 }
 
@@ -602,7 +602,7 @@ static void handle_auth(const cJSON *j, long status, int kind) {
     if (status == 200 && tok && kind != R_PHONEV) { if (!accept_token(tok, strlen(tok))) L.stage = L.back; return; }
     if (status == 200 && jbool(j, "mfa")) {
         const char *t = jstr(j, "ticket"), *lii = jstr(j, "login_instance_id");
-        if (!t || strlen(t) >= sizeof L.k->ticket) { back_with(LF_NONE, "Discord прислал непонятный ответ на вход"); return; }
+        if (!t || strlen(t) >= sizeof L.k->ticket) { back_with(LF_NONE, ui_tr("Discord прислал непонятный ответ на вход")); return; }
         snprintf(L.k->ticket, sizeof L.k->ticket, "%s", t);
         wipe(L.k->lii, sizeof L.k->lii);
         if (lii && strlen(lii) < sizeof L.k->lii && charset_ok(lii, strlen(lii), "-_.")) snprintf(L.k->lii, sizeof L.k->lii, "%s", lii);
@@ -617,13 +617,13 @@ static void handle_auth(const cJSON *j, long status, int kind) {
         L.stage = LG_MFA;
         clear_err();
         snprintf(L.notice, sizeof L.notice, "%s", L.mfa_methods == (LM_WEBAUTHN | LM_BACKUP)
-            ? "Ключи безопасности (WebAuthn) Astra DS не поддерживает: введите резервный код или войдите по QR-коду."
-            : "Введите код из приложения-аутентификатора, из SMS или резервный код.");
+            ? ui_tr("Ключи безопасности (WebAuthn) Astra DS не поддерживает: введите резервный код или войдите по QR-коду.")
+            : ui_tr("Введите код из приложения-аутентификатора, из SMS или резервный код."));
         return;
     }
     if (status == 403 && jget(j, "suspended_user_token")) {
         L.stage = LG_FORM;
-        set_err(LF_NONE, "Аккаунт заблокирован Discord: войти нельзя (подробности - на discord.com)");
+        set_err(LF_NONE, ui_tr("Аккаунт заблокирован Discord: войти нельзя (подробности - на discord.com)"));
         return;
     }
     i64 code = jint(j, "code", 0);
@@ -641,20 +641,20 @@ static void handle_auth(const cJSON *j, long status, int kind) {
         return;
     }
     if (code == 20013 || code == 20011 || !strcmp(ecode, "ACCOUNT_DISABLED") || !strcmp(ecode, "ACCOUNT_SCHEDULED_FOR_DELETION")) {
-        if (L.undelete) { back_with(LF_NONE, "Discord не дал восстановить аккаунт"); return; }
+        if (L.undelete) { back_with(LF_NONE, ui_tr("Discord не дал восстановить аккаунт")); return; }
         to_undelete(code == 20011 || !strcmp(ecode, "ACCOUNT_SCHEDULED_FOR_DELETION"));
         return;
     }
     if (code == 70007) {
         L.stage = LG_PHONE;
         clear_err();
-        snprintf(L.notice, sizeof L.notice, "Discord увидел вход из нового места и отправил код в SMS на ваш телефон. Введите его.");
+        snprintf(L.notice, sizeof L.notice, ui_tr("Discord увидел вход из нового места и отправил код в SMS на ваш телефон. Введите его."));
         return;
     }
     if (kind == R_MFA && (code == 60008 || status == 401 || field_of(field) == LF_CODE)) {
         wipe(L.k->code, sizeof L.k->code);
         L.stage = LG_MFA;
-        set_err(LF_CODE, "%s", code == 60008 || !fe ? "Неверный код. Попробуйте ещё раз." : "Код не принят Discord");
+        set_err(LF_CODE, "%s", code == 60008 || !fe ? ui_tr("Неверный код. Попробуйте ещё раз.") : ui_tr("Код не принят Discord"));
         return;
     }
     if (!strcmp(ecode, "INVALID_LOGIN") || !strcmp(ecode, "PASSWORD_DOES_NOT_MATCH") || (code == 50035 && field_of(field) == LF_PASSWORD)) {
@@ -662,15 +662,15 @@ static void handle_auth(const cJSON *j, long status, int kind) {
         L.stage = LG_FORM;
         bool pw = !strcmp(ecode, "PASSWORD_DOES_NOT_MATCH");
         set_err(pw ? LF_PASSWORD : field_of(field) == LF_NONE ? LF_LOGIN : field_of(field),
-                "%s", pw ? "Неверный пароль." : "Неверный email/телефон или пароль.");
+                "%s", pw ? ui_tr("Неверный пароль.") : ui_tr("Неверный email/телефон или пароль."));
         L.err_both = !pw && !strcmp(ecode, "INVALID_LOGIN");
         return;
     }
-    if (!strcmp(ecode, "BASE_TYPE_REQUIRED")) { back_with(field_of(field), "Это поле нужно заполнить."); return; }
+    if (!strcmp(ecode, "BASE_TYPE_REQUIRED")) { back_with(field_of(field), ui_tr("Это поле нужно заполнить.")); return; }
     /* Прочее — текст Discord (очищенный) у поля или общий. */
     char m[160];
     copy_san(m, sizeof m, emsg ? emsg : "");
-    if (status == 401 && kind == R_TOKEN) snprintf(m, sizeof m, "токен не принят");
+    if (status == 401 && kind == R_TOKEN) snprintf(m, sizeof m, ui_tr("токен не принят"));
     if (!m[0]) snprintf(m, sizeof m, "HTTP %ld", status);
     char full[200];
     snprintf(full, sizeof full, "Discord: %s", m);
@@ -681,9 +681,9 @@ static void on_resp(int kind, long status) {
     L.route_wait = false;
     if (status <= 0) {                          /* сеть или не собрали запрос */
         if (kind == R_FP) return;               /* без отпечатка — тоже можно */
-        if (kind == R_RA) { Q.st = QR_ERROR; snprintf(Q.text, sizeof Q.text, "нет связи с Discord: войти по QR не удалось"); wipe(L.k->ra_ticket, sizeof L.k->ra_ticket); return; }
+        if (kind == R_RA) { Q.st = QR_ERROR; snprintf(Q.text, sizeof Q.text, ui_tr("нет связи с Discord: войти по QR не удалось")); wipe(L.k->ra_ticket, sizeof L.k->ra_ticket); return; }
         if (kind == R_TOKEN) secret_set("", 0);
-        back_with(LF_NONE, status < 0 ? "Слишком длинные данные" : "Нет связи с Discord. Проверьте сеть и повторите.");
+        back_with(LF_NONE, status < 0 ? ui_tr("Слишком длинные данные") : ui_tr("Нет связи с Discord. Проверьте сеть и повторите."));
         return;
     }
     const char *body = L.k->resp;
@@ -704,10 +704,10 @@ static void on_resp(int kind, long status) {
         if (after > 3600) after = 3600;
         jdone(j);
         L.wait_until = now() + (i64)(after * 1000);
-        if (kind == R_RA) { Q.st = QR_ERROR; snprintf(Q.text, sizeof Q.text, "лимит запросов Discord: обновите QR через %.0f с", after); return; }
+        if (kind == R_RA) { Q.st = QR_ERROR; snprintf(Q.text, sizeof Q.text, ui_tr("лимит запросов Discord: обновите QR через %.0f с"), after); return; }
         if (kind == R_TOKEN) secret_set("", 0);
         L.stage = L.back == LG_BUSY ? LG_FORM : L.back;
-        set_err(LF_NONE, "Слишком много попыток. Подождите %.0f с.", after);
+        set_err(LF_NONE, ui_tr("Слишком много попыток. Подождите %.0f с."), after);
         return;
     }
     if (status == 400 && (jget(j, "captcha_key") || jget(j, "captcha_sitekey"))) {
@@ -725,7 +725,7 @@ static void on_resp(int kind, long status) {
             L.sms_sent = true;
             L.stage = LG_MFA;
             clear_err();
-            snprintf(L.notice, sizeof L.notice, "Код отправлен в SMS%s%s.", L.phone[0] ? " на " : "", L.phone);
+            snprintf(L.notice, sizeof L.notice, ui_tr("Код отправлен в SMS%s%s."), L.phone[0] ? ui_tr(" на ") : "", L.phone);
         } else {
             handle_auth(j, status, kind);
             if (L.stage != LG_CAPTCHA) L.stage = LG_MFA;
@@ -741,19 +741,19 @@ static void on_resp(int kind, long status) {
         char m[128];
         copy_san(m, sizeof m, jstr(j, "message"));
         Q.st = QR_ERROR;
-        snprintf(Q.text, sizeof Q.text, "Вход по QR не удался%s%s. Обновите QR-код.", m[0] ? ": " : "", m);
+        snprintf(Q.text, sizeof Q.text, ui_tr("Вход по QR не удался%s%s. Обновите QR-код."), m[0] ? ": " : "", m);
         if (Q.key) { EVP_PKEY_free(Q.key); Q.key = NULL; }
         break;
     }
     case R_AUTHIP:
         wipe(L.k->ipt, sizeof L.k->ipt);
         if (status == 204 || status == 200) {   /* место входа подтверждено: снова вход с тем же паролем */
-            if (L.k->pass[0]) { L.want |= R_LOGIN; L.stage = LG_BUSY; snprintf(L.busy, sizeof L.busy, "Вход..."); }
-            else { L.stage = LG_FORM; set_err(LF_PASSWORD, "Вход подтверждён. Введите пароль ещё раз."); }
+            if (L.k->pass[0]) { L.want |= R_LOGIN; L.stage = LG_BUSY; snprintf(L.busy, sizeof L.busy, ui_tr("Вход...")); }
+            else { L.stage = LG_FORM; set_err(LF_PASSWORD, ui_tr("Вход подтверждён. Введите пароль ещё раз.")); }
             clear_err();
         } else {
             wipe(L.k->code, sizeof L.k->code);
-            back_with(LF_CODE, "Ссылка не подошла (устарела или не та). Откройте её в браузере или повторите вход.");
+            back_with(LF_CODE, ui_tr("Ссылка не подошла (устарела или не та). Откройте её в браузере или повторите вход."));
         }
         break;
     case R_PHONEV: {
@@ -763,7 +763,7 @@ static void on_resp(int kind, long status) {
             snprintf(L.k->ipt, sizeof L.k->ipt, "%s", t);
             L.want |= R_AUTHIP;
             L.stage = LG_BUSY;
-        } else back_with(LF_CODE, "Код из SMS не подошёл.");
+        } else back_with(LF_CODE, ui_tr("Код из SMS не подошёл."));
         break;
     }
     case R_TOKEN:
@@ -771,7 +771,7 @@ static void on_resp(int kind, long status) {
             if (secret_token()) {                            /* токен уже в secret.c: сохранить и закончить */
                 L.notice[0] = 0;
                 if (!O.no_save && !L.selftest && !cred_save())
-                    snprintf(L.notice, sizeof L.notice, "Хранилище секретов недоступно: токен не сохранён.");
+                    snprintf(L.notice, sizeof L.notice, ui_tr("Хранилище секретов недоступно: токен не сохранён."));
                 L.stage = LG_DONE;
                 L.want = 0;
                 clear_err();
@@ -781,7 +781,7 @@ static void on_resp(int kind, long status) {
         } else {
             secret_set("", 0);
             L.stage = LG_TOKEN;
-            set_err(LF_TOKEN, "%s", status == 401 ? "Discord не принял токен." : "Токен не удалось проверить.");
+            set_err(LF_TOKEN, "%s", status == 401 ? ui_tr("Discord не принял токен.") : ui_tr("Токен не удалось проверить."));
         }
         break;
     default:                                    /* R_LOGIN, R_MFA */
@@ -832,7 +832,7 @@ static void qr_renew(void) {                    /* новый ключ и нов
     Q.uid = 0;
     Q.uname[0] = Q.avatar[0] = Q.discrim[0] = 0;
     Q.got_login = false;
-    snprintf(Q.text, sizeof Q.text, "Подготовка QR-кода...");
+    snprintf(Q.text, sizeof Q.text, ui_tr("Подготовка QR-кода..."));
     kick();
 }
 
@@ -854,11 +854,11 @@ static void qr_connect(void) {
     if (!route_ok()) { Q.need = true; return; }
     if (!Q.key) {
         Q.key = rsa_new();
-        if (!Q.key) { qr_fail(QR_ERROR, "не удалось создать ключ RSA"); return; }
+        if (!Q.key) { qr_fail(QR_ERROR, ui_tr("не удалось создать ключ RSA")); return; }
     }
     if (!Q.wm) Q.wm = curl_multi_init();
     Q.ws = Q.wm ? curl_easy_init() : NULL;
-    if (!Q.ws) { qr_fail(QR_ERROR, "нет памяти"); return; }
+    if (!Q.ws) { qr_fail(QR_ERROR, ui_tr("нет памяти")); return; }
     net_curl_common(Q.ws);
     if (!net_route(Q.ws, &Q.via)) { curl_easy_cleanup(Q.ws); Q.ws = NULL; Q.need = true; return; }
     static struct curl_slist o = { "Origin: https://discord.com", NULL };
@@ -866,8 +866,8 @@ static void qr_connect(void) {
     curl_easy_setopt(Q.ws, CURLOPT_HTTPHEADER, &o);
     curl_easy_setopt(Q.ws, CURLOPT_CONNECT_ONLY, 2L);
     curl_easy_setopt(Q.ws, CURLOPT_TIMEOUT, 20L);
-    if (curl_multi_add_handle(Q.wm, Q.ws) != CURLM_OK) { qr_fail(QR_ERROR, "нет памяти"); return; }
-    snprintf(Q.text, sizeof Q.text, "Подключение к Discord...");
+    if (curl_multi_add_handle(Q.wm, Q.ws) != CURLM_OK) { qr_fail(QR_ERROR, ui_tr("нет памяти")); return; }
+    snprintf(Q.text, sizeof Q.text, ui_tr("Подключение к Discord..."));
 }
 
 static void qr_connecting(void) {
@@ -881,14 +881,14 @@ static void qr_connecting(void) {
     if (rc == CURLE_AGAIN) return;
     if (rc != CURLE_OK) {
         if (Q.via && net_path_error((int)rc)) vless_report_failure("QR");
-        qr_fail(QR_ERROR, "Нет связи со шлюзом QR Discord.");
+        qr_fail(QR_ERROR, ui_tr("Нет связи со шлюзом QR Discord."));
         return;
     }
     if (Q.via) vless_report_failure(NULL);
     curl_easy_setopt(Q.ws, CURLOPT_TIMEOUT, 0L);
     curl_socket_t sock = CURL_SOCKET_BAD;
     curl_easy_getinfo(Q.ws, CURLINFO_ACTIVESOCKET, &sock);
-    if (sock == CURL_SOCKET_BAD) { qr_fail(QR_ERROR, "нет сокета"); return; }
+    if (sock == CURL_SOCKET_BAD) { qr_fail(QR_ERROR, ui_tr("нет сокета")); return; }
     Q.sw = sockwait_new((intptr_t)sock);
     Q.live = true;
     Q.drain = true;                             /* hello мог прийти вместе с ответом на рукопожатие */
@@ -899,7 +899,7 @@ static void qr_connecting(void) {
 
 static void qr_heartbeat(void) {
     Q.acked = false;
-    if (!ws_send("{\"op\":\"heartbeat\"}")) qr_fail(QR_ERROR, "Связь со шлюзом QR потеряна.");
+    if (!ws_send("{\"op\":\"heartbeat\"}")) qr_fail(QR_ERROR, ui_tr("Связь со шлюзом QR потеряна."));
 }
 
 /* Одно сообщение шлюза (текст JSON в L.k->ws). */
@@ -919,38 +919,38 @@ static void qr_message(const char *text, size_t len) {
         Q.acked = true;
         char pub[600], fpr[48];
         Buf b = {0};
-        if (!key_spki(Q.key, pub, sizeof pub, fpr, sizeof fpr)) { qr_fail(QR_ERROR, "ключ RSA не выгрузился"); return; }
+        if (!key_spki(Q.key, pub, sizeof pub, fpr, sizeof fpr)) { qr_fail(QR_ERROR, ui_tr("ключ RSA не выгрузился")); return; }
         memcpy(Q.fpr, fpr, sizeof fpr);
         buf_printf(&b, "{\"op\":\"init\",\"encoded_public_key\":\"%s\"}", pub);
         bool ok = ws_send(b.p);
         buf_free(&b);
-        if (!ok) qr_fail(QR_ERROR, "Связь со шлюзом QR потеряна (init).");
+        if (!ok) qr_fail(QR_ERROR, ui_tr("Связь со шлюзом QR потеряна (init)."));
         return;
     }
     if (!strcmp(op, "heartbeat_ack")) { Q.acked = true; jdone(j); return; }
     if (!strcmp(op, "nonce_proof")) {
         int n = rsa_dec_b64(Q.key, jstr(j, "encrypted_nonce"));
         jdone(j);
-        if (n <= 0) { qr_fail(QR_ERROR, "Шлюз QR прислал непонятные данные."); return; }
+        if (n <= 0) { qr_fail(QR_ERROR, ui_tr("Шлюз QR прислал непонятные данные.")); return; }
         char msg[800], nb[700];                 /* nonce до 256 байт (ключ 2048 бит) */
         size_t m = b64_enc(L.k->pt, (size_t)n, nb, sizeof nb, true);
         wipe(L.k->pt, sizeof L.k->pt);
-        if (!m) { qr_fail(QR_ERROR, "Шлюз QR прислал слишком длинный nonce."); return; }
+        if (!m) { qr_fail(QR_ERROR, ui_tr("Шлюз QR прислал слишком длинный nonce.")); return; }
         snprintf(msg, sizeof msg, "{\"op\":\"nonce_proof\",\"nonce\":\"%s\"}", nb);
         bool ok = ws_send(msg);
         wipe(nb, sizeof nb);
         wipe(msg, sizeof msg);
-        if (!ok) qr_fail(QR_ERROR, "Связь со шлюзом QR потеряна (nonce).");
+        if (!ok) qr_fail(QR_ERROR, ui_tr("Связь со шлюзом QR потеряна (nonce)."));
         return;
     }
     if (!strcmp(op, "pending_remote_init")) {
         const char *f = jstr(j, "fingerprint");
         bool same = f && !strcmp(f, Q.fpr);
         jdone(j);
-        if (!same) { qr_fail(QR_ERROR, "Отпечаток ключа не совпал: QR-код не показан."); return; }
+        if (!same) { qr_fail(QR_ERROR, ui_tr("Отпечаток ключа не совпал: QR-код не показан.")); return; }
         snprintf(Q.url, sizeof Q.url, RA_PREFIX "%s", Q.fpr);
         Q.st = QR_SHOW;
-        snprintf(Q.text, sizeof Q.text, "Отсканируйте QR-код в мобильном приложении Discord, чтобы войти сразу.");
+        snprintf(Q.text, sizeof Q.text, ui_tr("Отсканируйте QR-код в мобильном приложении Discord, чтобы войти сразу."));
         kick();
         return;
     }
@@ -959,12 +959,12 @@ static void qr_message(const char *text, size_t len) {
         jdone(j);
         if (n <= 0 || !parse_user((const char *)L.k->pt, &Q.uid, Q.discrim, sizeof Q.discrim, Q.avatar, sizeof Q.avatar, Q.uname, sizeof Q.uname)) {
             wipe(L.k->pt, sizeof L.k->pt);
-            qr_fail(QR_ERROR, "Шлюз QR прислал непонятные данные.");
+            qr_fail(QR_ERROR, ui_tr("Шлюз QR прислал непонятные данные."));
             return;
         }
         wipe(L.k->pt, sizeof L.k->pt);
         Q.st = QR_SCANNED;
-        snprintf(Q.text, sizeof Q.text, "Подтвердите вход на телефоне.");
+        snprintf(Q.text, sizeof Q.text, ui_tr("Подтвердите вход на телефоне."));
         kick();
         return;
     }
@@ -973,10 +973,10 @@ static void qr_message(const char *text, size_t len) {
         bool ok = t && strlen(t) < sizeof L.k->ra_ticket && charset_ok(t, strlen(t), "._-+/=");
         if (ok) snprintf(L.k->ra_ticket, sizeof L.k->ra_ticket, "%s", t);
         jdone(j);
-        if (!ok) { qr_fail(QR_ERROR, "Шлюз QR прислал непонятный тикет."); return; }
+        if (!ok) { qr_fail(QR_ERROR, ui_tr("Шлюз QR прислал непонятный тикет.")); return; }
         Q.got_login = true;
         L.want |= R_RA;
-        snprintf(Q.text, sizeof Q.text, "Вход...");
+        snprintf(Q.text, sizeof Q.text, ui_tr("Вход..."));
         qr_close_ws();                          /* шлюз больше не нужен, ключ ещё нужен для токена */
         kick();
         return;
@@ -989,11 +989,11 @@ static void qr_closed(int code) {
     if (Q.got_login) { qr_close_ws(); return; }
     if (code == 4003 || code == 1000) {          /* сессия истекла: новый QR (сам — до 3 раз подряд) */
         if (++Q.renew <= QR_AUTO_RENEW) { qr_renew(); return; }
-        qr_fail(QR_EXPIRED, "QR-код устарел. Нажмите, чтобы получить новый.");
+        qr_fail(QR_EXPIRED, ui_tr("QR-код устарел. Нажмите, чтобы получить новый."));
         return;
     }
     char t[160];
-    snprintf(t, sizeof t, "Шлюз QR закрыл соединение (%d). Обновите QR-код.", code);
+    snprintf(t, sizeof t, ui_tr("Шлюз QR закрыл соединение (%d). Обновите QR-код."), code);
     qr_fail(QR_ERROR, t);
 }
 
@@ -1011,7 +1011,7 @@ static void qr_live(void) {
             wipe(tmp, sizeof tmp);
             if (Q.got_login) { qr_close_ws(); return; }
             char t[128];
-            snprintf(t, sizeof t, "Связь со шлюзом QR потеряна (%d).", (int)rc);
+            snprintf(t, sizeof t, ui_tr("Связь со шлюзом QR потеряна (%d)."), (int)rc);
             qr_fail(QR_ERROR, t);
             return;
         }
@@ -1022,7 +1022,7 @@ static void qr_live(void) {
             return;
         }
         if (meta->flags & (CURLWS_PING | CURLWS_PONG)) continue;
-        if (Q.flen + got >= sizeof k->ws) { wipe(tmp, sizeof tmp); qr_fail(QR_ERROR, "Шлюз QR прислал слишком большой кадр."); return; }
+        if (Q.flen + got >= sizeof k->ws) { wipe(tmp, sizeof tmp); qr_fail(QR_ERROR, ui_tr("Шлюз QR прислал слишком большой кадр.")); return; }
         memcpy(k->ws + Q.flen, tmp, got);
         wipe(tmp, sizeof tmp);
         Q.flen += got;
@@ -1037,8 +1037,8 @@ static void qr_live(void) {
     if (!Q.live) return;
     i64 t = now();
     if (Q.next_hb && t >= Q.next_hb) {
-        if (!Q.hb_iv) { qr_fail(QR_ERROR, "Шлюз QR не ответил."); return; }
-        if (!Q.acked) { qr_fail(QR_ERROR, "Шлюз QR не отвечает."); return; }
+        if (!Q.hb_iv) { qr_fail(QR_ERROR, ui_tr("Шлюз QR не ответил.")); return; }
+        if (!Q.acked) { qr_fail(QR_ERROR, ui_tr("Шлюз QR не отвечает.")); return; }
         qr_heartbeat();
         Q.next_hb = t + Q.hb_iv;
     }
@@ -1134,18 +1134,18 @@ static void norm_code(char *s) {
 
 static bool can_send(void) {
     if (L.wait_until > now()) {
-        set_err(LF_NONE, "Слишком много попыток. Подождите %lld с.", (long long)((L.wait_until - now() + 999) / 1000));
+        set_err(LF_NONE, ui_tr("Слишком много попыток. Подождите %lld с."), (long long)((L.wait_until - now() + 999) / 1000));
         return false;
     }
     return L.stage != LG_BUSY && L.stage != LG_DONE && L.on;
 }
 
 static void start_login(void) {
-    if (!L.k->login[0]) { L.stage = LG_FORM; set_err(LF_LOGIN, "Введите email или номер телефона."); return; }
-    if (!L.k->pass[0]) { L.stage = LG_FORM; set_err(LF_PASSWORD, "Введите пароль."); return; }
+    if (!L.k->login[0]) { L.stage = LG_FORM; set_err(LF_LOGIN, ui_tr("Введите email или номер телефона.")); return; }
+    if (!L.k->pass[0]) { L.stage = LG_FORM; set_err(LF_PASSWORD, ui_tr("Введите пароль.")); return; }
     L.back = LG_FORM;
     L.stage = LG_FORM;
-    go_busy(R_LOGIN, "Вход...");
+    go_busy(R_LOGIN, ui_tr("Вход..."));
 }
 
 void login_submit(void) {
@@ -1158,21 +1158,21 @@ void login_submit(void) {
         break;
     case LG_MFA:
         norm_code(k->code);
-        if (!k->code[0]) { set_err(LF_CODE, "Введите код."); break; }
-        go_busy(R_MFA, "Проверка кода...");
+        if (!k->code[0]) { set_err(LF_CODE, ui_tr("Введите код.")); break; }
+        go_busy(R_MFA, ui_tr("Проверка кода..."));
         break;
     case LG_EMAIL:
         if (k->code[0]) {
             bool ok = ip_token_from(k->code, k->ipt, sizeof k->ipt);
             wipe(k->code, sizeof k->code);
-            if (!ok) { set_err(LF_CODE, "Это не похоже на ссылку из письма Discord."); break; }
-            go_busy(R_AUTHIP, "Подтверждение входа...");
+            if (!ok) { set_err(LF_CODE, ui_tr("Это не похоже на ссылку из письма Discord.")); break; }
+            go_busy(R_AUTHIP, ui_tr("Подтверждение входа..."));
         } else login_retry();
         break;
     case LG_PHONE:
         norm_code(k->code);
-        if (!k->code[0]) { set_err(LF_CODE, "Введите код из SMS."); break; }
-        go_busy(R_PHONEV, "Проверка кода...");
+        if (!k->code[0]) { set_err(LF_CODE, ui_tr("Введите код из SMS.")); break; }
+        go_busy(R_PHONEV, ui_tr("Проверка кода..."));
         break;
     case LG_TOKEN: {
         size_t n = strlen(k->token), a = 0;
@@ -1180,8 +1180,8 @@ void login_submit(void) {
         while (n > a && (k->token[n - 1] == ' ' || k->token[n - 1] == '"' || k->token[n - 1] == '\r' || k->token[n - 1] == '\n')) n--;
         secret_set(k->token + a, n - a);
         wipe(k->token, sizeof k->token);
-        if (!secret_token()) { set_err(LF_TOKEN, "Токен не похож на настоящий."); break; }
-        go_busy(R_TOKEN, "Проверка токена...");
+        if (!secret_token()) { set_err(LF_TOKEN, ui_tr("Токен не похож на настоящий.")); break; }
+        go_busy(R_TOKEN, ui_tr("Проверка токена..."));
         break;
     }
     case LG_CAPTCHA: login_retry(); break;
@@ -1228,7 +1228,7 @@ void login_mfa_method(unsigned m) {
 void login_sms_send(void) {
     if (L.stage != LG_MFA || !(L.mfa_methods & LM_SMS) || !can_send()) { kick(); return; }
     L.mfa_method = LM_SMS;
-    go_busy(R_SMS, "Отправка SMS...");
+    go_busy(R_SMS, ui_tr("Отправка SMS..."));
 }
 void login_retry(void) {
     if (!L.on || !can_send()) { kick(); return; }
@@ -1247,16 +1247,16 @@ void login_use_token(void) {
     if (!L.on || L.stage == LG_BUSY || L.stage == LG_DONE) return;
     L.stage = LG_TOKEN;
     clear_err();
-    snprintf(L.notice, sizeof L.notice, "Токен уходит только в Discord и хранится в системном хранилище секретов.");
+    snprintf(L.notice, sizeof L.notice, ui_tr("Токен уходит только в Discord и хранится в системном хранилище секретов."));
     kick();
 }
 void login_captcha_open(void) {
     if (!L.on || !L.cap_kind || L.cap_open || L.stage == LG_DONE) return;
     char err[200];
-    if (!cap_usable()) snprintf(err, sizeof err, "эту проверку (%s) Astra DS показать не может", L.csvc);
+    if (!cap_usable()) snprintf(err, sizeof err, ui_tr("эту проверку (%s) Astra DS показать не может"), L.csvc);
     else if (captcha_open(L.csite, L.crqdata, L.k->ckey, sizeof L.k->ckey, false, err, sizeof err)) { L.cap_open = true; clear_err(); kick(); return; }
-    if (L.cap_kind == R_RA) snprintf(Q.text, sizeof Q.text, "Проверка не открылась: %s", err);
-    else set_err(LF_NONE, "Проверка не открылась: %s", err);
+    if (L.cap_kind == R_RA) snprintf(Q.text, sizeof Q.text, ui_tr("Проверка не открылась: %s"), err);
+    else set_err(LF_NONE, ui_tr("Проверка не открылась: %s"), err);
     kick();
 }
 void login_captcha_cancel(void) {
@@ -1276,12 +1276,12 @@ static void captcha_step(void) {
     if (r == 1 && L.k->ckey[0]) {
         L.cap_key = true;
         L.want |= (unsigned)L.cap_kind;
-        if (L.cap_kind == R_RA) snprintf(Q.text, sizeof Q.text, "Вход...");
-        else { L.stage = LG_BUSY; snprintf(L.busy, sizeof L.busy, "Вход..."); clear_err(); }
+        if (L.cap_kind == R_RA) snprintf(Q.text, sizeof Q.text, ui_tr("Вход..."));
+        else { L.stage = LG_BUSY; snprintf(L.busy, sizeof L.busy, ui_tr("Вход...")); clear_err(); }
     } else {
         wipe(L.k->ckey, sizeof L.k->ckey);
-        if (L.cap_kind == R_RA) snprintf(Q.text, sizeof Q.text, "Проверка не пройдена: %s", err[0] ? err : "окно закрыто");
-        else set_err(LF_NONE, "Проверка не пройдена: %s", err[0] ? err : "окно закрыто");
+        if (L.cap_kind == R_RA) snprintf(Q.text, sizeof Q.text, ui_tr("Проверка не пройдена: %s"), err[0] ? err : ui_tr("окно закрыто"));
+        else set_err(LF_NONE, ui_tr("Проверка не пройдена: %s"), err[0] ? err : ui_tr("окно закрыто"));
     }
     kick();
 }

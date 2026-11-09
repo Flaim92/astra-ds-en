@@ -1,0 +1,8 @@
+minih264 — однофайловый кодер H.264 (C, CC0 1.0, см. LICENSE).
+Источник: https://github.com/lieff/minih264
+Коммит:   b0baea7a80ef9d12da97301dd1099b8791b5ba43 (2020-12-10)
+Файлы без изменений:
+  minih264e.h  SHA-256 661afe7802b4e1174e8389632f3ee437b903e036a9c91a7f035830947c6a7aae
+  LICENSE      SHA-256 6a1ee543e5282cd9061881edf462e6fdab181f328da71fc2c9a6950a80e94d01
+Использование: прототип трансляции экрана (src/streamtest.c, скрытый --streamtest=N), только замеры.
+Собирается с H264E_SVC_API=0, H264E_MAX_THREADS=0 (один поток).

@@ -292,7 +292,14 @@ cJSON *json_parse(const char *text, size_t len) {
         hooks_set = true;
     }
     json_done();
+    size_t en_n = 0;
+    char *en = O.demo ? demo_en_json(text, len, &en_n) : NULL;   /* английский демо-набор (только --demo) */
     t_in_arena = true;
+    if (en) {
+        cJSON *r = cJSON_ParseWithLength(en, en_n);   /* строки копируются в арену — текст больше не нужен */
+        free(en);
+        return r;
+    }
     return cJSON_ParseWithLength(text, len);
 }
 void json_done(void) {

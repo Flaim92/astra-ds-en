@@ -786,4 +786,8 @@ int gb_waitables(Waitable *out, int max) {
     if (n < max && kick >= 0) out[n++] = (Waitable){ kick, POLLIN };
     return n;
 }
+#ifdef ASTRA_VIDEO
+/* X11: исключить окно из захвата нельзя (у композитора нет такого запроса) */
+bool term_capture_exclude(bool on) { (void)on; return false; }
+#endif
 #endif

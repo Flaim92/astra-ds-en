@@ -13,6 +13,8 @@
 #include <unistd.h>
 #include <stddef.h>
 /* Один экземпляр на пользователя Linux: абстрактный сокет (без файла на диске), держится до выхода. */
+static int g_single = -1;
+void single_instance_release(void) { if (g_single >= 0) { close(g_single); g_single = -1; } }
 bool single_instance(void) {
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) return true;
@@ -21,7 +23,11 @@ bool single_instance(void) {
     a.sun_family = AF_UNIX;
     int n = snprintf(a.sun_path + 1, sizeof a.sun_path - 1, "astra-ds-single-%u", (unsigned)getuid());
     socklen_t al = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + (size_t)n);
-    if (bind(fd, (struct sockaddr *)&a, al) == 0) { listen(fd, 1); return true; }   /* держим до выхода */
+    if (bind(fd, (struct sockaddr *)&a, al) == 0) {   /* держим до выхода */
+        listen(fd, 1);
+        if (g_single < 0) g_single = fd; else close(fd);
+        return true;
+    }
     close(fd);
     /* SECURITY Н3: имя занято — проверить, что держит его наш пользователь (SO_PEERCRED); иначе это чужое
      * занятие имени (абстрактные сокеты общие для всех пользователей) — не считаем, что mincord запущен. */
@@ -57,8 +63,15 @@ bool term_read_line(const char *prompt, char *out, size_t cap);   /* видим�
 
 Opts O;
 
+#ifdef ASTRA_VIDEO
+#define PRODUCT_NAME "Astra DS Video"
+#define PRODUCT_NOTE " (демонстрация экрана и камера)"
+#else
+#define PRODUCT_NAME "Astra DS"
+#define PRODUCT_NOTE ""
+#endif
 static const char USAGE[] =
-    "Astra DS - минимальный клиент Discord\n"
+    PRODUCT_NAME PRODUCT_NOTE " - минимальный клиент Discord\n"
     "\n"
     "  (без флагов)      в отдельном окне (сетка символов, мышь); вход - тоже в окне\n"
     "  --tui             полноэкранный режим в этом терминале (мышь - если терминал умеет)\n"
@@ -78,6 +91,9 @@ static const char USAGE[] =
     "  --no-ack          не отмечать сообщения прочитанными\n"
     "  --ptt             рация: передача только по F8 вместо активации голосом\n"
     "  --tray            окно: свернуть — в значок в трее (Windows)\n"
+    "  --lang=ru|en      язык интерфейса (по умолчанию — сохранённый выбор или язык системы)\n"
+    "  --no-update       не проверять обновления (проверка: раз в сутки, установка — только по «Обновить»)\n"
+    "  --version         версия программы\n"
     "  --hq              качество голоса выше (Opus 64 кбит/с, сложность 8) ценой процессора\n"
     "  --mic=ИМЯ         микрофон (часть имени устройства)\n"
     "  --out=ИМЯ         устройство вывода (часть имени)\n"
@@ -126,11 +142,12 @@ void ui_vless_begin(const char *err, bool only);
 bool ui_startup_direct(void);
 void ui_startup_direct_set(bool on);
 static int demo_start;                          /* --demo-start: 1 — стартовый экран, 2 — экран ошибки VLESS */
+static const char *demo_update;                 /* --demo-update=available|downloading|ready|failed */
 /* Нужен ли вопрос о VLESS при запуске: 0 — нет, 1 — спросить, 2 — сохранённая ссылка не работает (err).
  * Сохранённая ссылка важнее «больше не спрашивать»: флаг действует, только если ссылки нет. */
 static int vless_plan(char *err, size_t n) {
     if (O.no_vless) return 0;
-    if (O.demo) { if (demo_start == 2) snprintf(err, n, "%s", "туннель не отвечает: проверьте сервер VLESS (демо)"); return demo_start; }
+    if (O.demo) { if (demo_start == 2) snprintf(err, n, "%s", ui_tr("туннель не отвечает: проверьте сервер VLESS (демо)")); return demo_start; }
     if (O.vless_ask || O.no_save) return 1;
     if (vless_load_saved()) return 0;
     if (vless_state() != VL_OFF) { snprintf(err, n, "%s", vless_error()); return 2; }
@@ -165,13 +182,13 @@ static bool vless_login(void) {
             ask = false;
             size_t cap;
             char *buf = secret_scratch(&cap);
-            term_puts("Весь трафик можно пустить через свой сервер VLESS (Xray: Reality или TLS).\n");
-            bool rd = term_read_secret("Ссылка vless:// (ввод скрыт; Enter - без VLESS): ", buf, cap);
+            term_puts(ui_tr("Весь трафик можно пустить через свой сервер VLESS (Xray: Reality или TLS).\n"));
+            bool rd = term_read_secret(ui_tr("Ссылка vless:// (ввод скрыт; Enter - без VLESS): "), buf, cap);
             if (rd && !buf[0]) {
                 plat_wipe(buf, cap);
-                term_puts("Без VLESS.\n");
+                term_puts(ui_tr("Без VLESS.\n"));
                 if (!O.no_save && term_interactive()) {
-                    term_puts("Больше не спрашивать при запуске (всегда напрямую; вернуть: --vless)? y/N: ");
+                    term_puts(ui_tr("Больше не спрашивать при запуске (всегда напрямую; вернуть: --vless)? y/N: "));
                     char yn[8];
                     if (term_read_line("", yn, sizeof yn) && (yn[0] == 'y' || yn[0] == 'Y' || !strncmp(yn, "\xd0\xbd", 2))) ui_startup_direct_set(true);
                 }
@@ -179,9 +196,9 @@ static bool vless_login(void) {
             }
             if (!rd) {
                 ok = false;
-                snprintf(err, sizeof err, "ссылку не удалось прочитать (нет консоли или длиннее %zu символов)", cap - 1);
+                snprintf(err, sizeof err, ui_tr("ссылку не удалось прочитать (нет консоли или длиннее %zu символов)"), cap - 1);
             } else {
-                term_puts("Проверка: запуск Xray и запрос к Discord через туннель...\n");
+                term_puts(ui_tr("Проверка: запуск Xray и запрос к Discord через туннель...\n"));
                 ok = vless_set_link(buf, err, sizeof err, &lat);
             }
             plat_wipe(buf, cap);
@@ -198,7 +215,7 @@ static bool vless_login(void) {
         say("%s2 - другая ссылка, 3 - без VLESS (напрямую), Enter - выход: ", have ? "1 - повторить, " : "");
         int c = read_choice();
         if (c == 1 && have) {
-            term_puts("Повтор...\n");
+            term_puts(ui_tr("Повтор...\n"));
             ok = vless_restart();
             lat = vless_latency_ms();
             snprintf(err, sizeof err, "%s", ok ? "" : vless_error());
@@ -206,7 +223,7 @@ static bool vless_login(void) {
             ask = true;
         } else if (c == 3) {
             vless_disable();
-            term_puts("Без VLESS: трафик идёт напрямую.\n");
+            term_puts(ui_tr("Без VLESS: трафик идёт напрямую.\n"));
             return true;
         } else if (c <= 0) {
             return false;
@@ -366,12 +383,13 @@ static void loop_once(i64 deadline) {
     gw_service();
     http_service();
     store_tick();
+    update_service();
     img_service();
     login_service();
     if (O.cli) cli_tick(); else ui_tick();
     relogin_step();                             /* токен отозван — окно входа, без выхода (окно/терминал) */
     if (g_auth_failed && O.cli) {               /* --cli: прежнее поведение строкой */
-        ui_notice("Discord не принял токен. Удалить сохранённый: Astra DS --logout, затем войти заново");
+        ui_notice(ui_tr("Discord не принял токен. Удалить сохранённый: Astra DS --logout, затем войти заново"));
         g_quit = true;
     }
     /* окно/терминал: сессию снова откроет relogin() в main — без выхода */
@@ -389,7 +407,7 @@ static void relogin_start(void) {
     g_auth_failed = false;
     if (!login_init()) { g_quit = true; return; }
     ui_login_begin(false);
-    ui_notice("Сессия завершена Discord - войдите заново");
+    ui_notice(ui_tr("Сессия завершена Discord - войдите заново"));
     relog_on = true;
 }
 static void relogin_step(void) {
@@ -674,7 +692,7 @@ int main(int argc, char **argv) {
 #endif
     bool list_devices = false, tui = false;
     const char *vlesstest = NULL, *shot = NULL, *shot_keys = NULL;
-    int hold = 0;
+    int hold = 0, lang_force = -1;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = NULL;
         if (arg_is(a, "--demo", NULL)) O.demo = true;
@@ -687,6 +705,7 @@ int main(int argc, char **argv) {
         else if (arg_is(a, "--no-images", NULL)) O.no_images = true;
         else if (arg_is(a, "--logout", NULL)) O.logout = true;
         else if (arg_is(a, "--demo-start", &v)) demo_start = v && !strcmp(v, "err") ? 2 : 1;   /* с --demo: стартовый экран */
+        else if (arg_is(a, "--demo-update", &v) && v) demo_update = v;   /* с --demo: состояние окна обновления */
         else if (arg_is(a, "--vless", NULL)) O.vless_ask = true;
         else if (arg_is(a, "--no-vless", NULL)) O.no_vless = true;
         else if (arg_is(a, "--panic", &v) && v && *v) O.panic = v;
@@ -696,6 +715,31 @@ int main(int argc, char **argv) {
         else if (arg_is(a, "--no-ack", NULL)) O.no_ack = true;
         else if (arg_is(a, "--ptt", NULL)) O.ptt = true;
         else if (arg_is(a, "--tray", NULL)) O.tray = true;
+        else if (arg_is(a, "--no-update", NULL)) O.no_update = true;
+        else if (arg_is(a, "--lang", &v) && v) { if (!strcmp(v, "ru")) lang_force = 0; else if (!strcmp(v, "en")) lang_force = 1; else { term_puts(ui_tr("--lang=ru или --lang=en\n")); return 2; } }
+        else if (arg_is(a, "--version", NULL)) { term_puts(PRODUCT_NAME " " ASTRA_VERSION PRODUCT_NOTE "\n"); return 0; }
+#ifdef ASTRA_VIDEO
+        /* скрытый: --streamtest=N[,сцена[,ширина,высота,к/с,кбит/с]] — замер трансляции, без сети и файлов */
+        else if (arg_is(a, "--streamtest", &v) && v && *v) {
+            int p[6] = { 10, 0, 1280, 720, 24, 2000 };
+            char sc[16] = "";
+            const char *c = strchr(v, ',');
+            p[0] = atoi(v);
+            if (c) {
+                size_t k = strcspn(c + 1, ",");
+                snprintf(sc, sizeof sc, "%.*s", (int)(k < 15 ? k : 15), c + 1);
+                p[1] = !strcmp(sc, "desk") ? 0 : !strcmp(sc, "scroll") ? 1 : !strcmp(sc, "video") ? 2 : atoi(sc);
+                c = strchr(c + 1, ',');
+                if (c && sscanf(c + 1, "%d,%d,%d,%d", &p[2], &p[3], &p[4], &p[5]) != 4) c = NULL, p[0] = 0;
+            }
+            if (p[0] < 1 || p[0] > 3600 || p[1] < 0 || p[1] > 2 || p[2] < 64 || p[2] > 3840 || p[3] < 64 || p[3] > 2160
+                || (p[2] & 1) || (p[3] & 1) || p[4] < 1 || p[4] > 60 || p[5] < 100 || p[5] > 50000) {
+                term_puts(ui_tr("--streamtest=СЕКУНД[,desk|scroll|video[,ширина,высота,к/с,кбит/с]] (чётные 64..3840 x 64..2160, 1..60 к/с, 100..50000 кбит/с)\n"));
+                return 2;
+            }
+            return streamtest_run(p[0], p[2], p[3], p[4], p[1], p[5]);
+        }
+#endif
         else if (arg_is(a, "--hq", NULL)) O.hq = true;
         else if (arg_is(a, "--mic", &v) && v) O.mic = v;
         else if (arg_is(a, "--out", &v) && v) O.out = v;
@@ -708,25 +752,26 @@ int main(int argc, char **argv) {
         else if (arg_is(a, "--livetest", NULL)) { g_wake = wake_new(); voice_init(); return selftest_live(); }
         else { term_puts(USAGE); return strcmp(a, "--help") && strcmp(a, "-h") ? 2 : 0; }
     }
-    if (O.vless_ask && O.no_vless) { term_puts("--vless и --no-vless вместе не имеют смысла\n"); return 2; }
+    if (O.vless_ask && O.no_vless) { term_puts(ui_tr("--vless и --no-vless вместе не имеют смысла\n")); return 2; }
+    ui_lang_init(lang_force);                   /* язык — до окна входа (--lang, иначе сохранённый или системный) */
     if ((shot || shot_keys) && (!shot || O.cli || tui || O.vless_ask)) {
-        term_puts("--shot=ФАЙЛ.bmp - без --cli/--tui/--vless; --shot-keys - только с --shot\n");
+        term_puts(ui_tr("--shot=ФАЙЛ.bmp - без --cli/--tui/--vless; --shot-keys - только с --shot\n"));
         return 2;
     }
     if (shot && !O.demo) {
         /* SECURITY М6: снимок живого аккаунта записал бы переписку на диск — только с --demo.
          * Живые проверки разработчика — --livetest (ничего не пишет на диск). */
-        term_puts("--shot только с --demo: снимок живого аккаунта записал бы переписку на диск\n");
+        term_puts(ui_tr("--shot только с --demo: снимок живого аккаунта записал бы переписку на диск\n"));
         return 2;
     }
     if (list_devices) { audio_list_devices(); return 0; }
     if (O.voice) {
         if (!strcmp(O.voice, "low")) voicefx_set(VFX_LOW);
         else if (!strcmp(O.voice, "high")) voicefx_set(VFX_HIGH);
-        else { term_puts("--voice: допустимо low или high\n"); return 2; }
+        else { term_puts(ui_tr("--voice: допустимо low или high\n")); return 2; }
     }
     if (O.panic && !panic_init(O.panic)) {
-        term_puts("--panic: неизвестная клавиша (примеры: F12, Ctrl+X)\n");
+        term_puts(ui_tr("--panic: неизвестная клавиша (примеры: F12, Ctrl+X)\n"));
         return 2;
     }
     if (vlesstest) return vless_selftest(vlesstest, hold);
@@ -735,46 +780,48 @@ int main(int argc, char **argv) {
 #endif
     /* Живой аккаунт — только один клиент (демо и проверки не мешают друг другу) */
     if (O.no_save) keyring_readonly(true);       /* --no-save: ничего не записывать в хранилище, в т. ч. миграцию */
-    if (!O.demo && !O.logout && !single_instance()) { term_puts("Astra DS уже запущен: открыто его окно\n"); return 1; }
-    if (!secret_init()) { term_puts("не удалось выделить защищённую память\n"); return 1; }
+    if (!O.demo && !O.logout && !single_instance()) { term_puts(ui_tr("Astra DS уже запущен: открыто его окно\n")); return 1; }
+    if (!secret_init()) { term_puts(ui_tr("не удалось выделить защищённую память\n")); return 1; }
     if (O.logout) {
         cred_delete();
         vless_forget();
         keyring_delete("startup");               /* «больше не спрашивать» — тоже */
+        keyring_delete("update-checked");        /* дата проверки обновлений (АО-5) */
+        keyring_delete("upd_told");              /* разовое уведомление об автопроверке */
         secret_destroy();
-        term_puts("Сохранённые токен, ссылка VLESS и выбор «напрямую» удалены.\n");
+        term_puts(ui_tr("Сохранённые токен, ссылка VLESS и выбор «напрямую» удалены.\n"));
         return 0;
     }
-    if (O.cli && tui) { term_puts("--cli и --tui вместе не имеют смысла\n"); secret_destroy(); return 2; }
+    if (O.cli && tui) { term_puts(ui_tr("--cli и --tui вместе не имеют смысла\n")); secret_destroy(); return 2; }
     /* По умолчанию — окно, и вход (токен, VLESS) тоже в нём: все term_* дальше идут в окно. */
     if (!O.cli && !tui && !shot) {
-        if (term_open_window(false)) { if (!O.demo && (O.cli || tui)) term_puts("\x1b[1mAstra DS\x1b[0m - вход\n\n"); }
-        else term_puts("Окно недоступно (нет $DISPLAY / X-сервера): полноэкранный режим в терминале.\n");
+        if (term_open_window(false)) { if (!O.demo && (O.cli || tui)) term_puts(ui_tr("\x1b[1mAstra DS\x1b[0m - вход\n\n")); }
+        else term_puts(ui_tr("Окно недоступно (нет $DISPLAY / X-сервера): полноэкранный режим в терминале.\n"));
     }
     plat_net_init();
     bool win_login = false;                     /* вход в окне (или --tui): почта/пароль, 2FA, QR — экран ui.c, движок login.c */
     if (!O.demo) {
         bool have = !O.no_save && cred_load();
         if (!have && shot) {
-            term_puts("--shot без --demo: нужен сохранённый токен (сначала войдите обычным запуском)\n");
+            term_puts(ui_tr("--shot без --demo: нужен сохранённый токен (сначала войдите обычным запуском)\n"));
             secret_destroy();
             return 1;
         }
         if (!have && !O.cli) win_login = true;
         else if (!have) {                       /* --cli: токен скрытым вводом в консоли, как раньше */
-            term_puts("Astra DS: нужен токен Discord (запасного аккаунта). Он хранится только в\n");
-            term_puts(O.no_save ? "памяти и нигде не сохраняется.\n" : keyring_name());
+            term_puts(ui_tr("Astra DS: нужен токен Discord (запасного аккаунта). Он хранится только в\n"));
+            term_puts(O.no_save ? ui_tr("памяти и нигде не сохраняется.\n") : keyring_name());
             if (!O.no_save) term_puts(".\n");
-            if (!read_hidden("Токен (ввод скрыт): ")) {
-                term_puts("Токен не похож на настоящий.\n");
+            if (!read_hidden(ui_tr("Токен (ввод скрыт): "))) {
+                term_puts(ui_tr("Токен не похож на настоящий.\n"));
                 secret_destroy();
                 return 1;
             }
             if (!O.no_save && !cred_save())
-                term_puts("Хранилище секретов недоступно: токен не сохранён, при следующем запуске введите снова.\n");
+                term_puts(ui_tr("Хранилище секретов недоступно: токен не сохранён, при следующем запуске введите снова.\n"));
         }
     }
-    if (!net_init()) { term_puts("не удалось запустить сеть\n"); secret_destroy(); return 1; }
+    if (!net_init()) { term_puts(ui_tr("не удалось запустить сеть\n")); secret_destroy(); return 1; }
     /* VLESS — до любых запросов к Discord. Вход в окне: сохранённая ссылка поднимается здесь, иначе
      * (нет ссылки, не поднялась, --vless, --no-save) — первым шагом окна входа. Иначе — как раньше, в консоли. */
     bool vless_step = false, gui = !O.cli && !tui;
@@ -784,7 +831,7 @@ int main(int argc, char **argv) {
         vplan = vless_plan(verr, sizeof verr);  /* окно: вопрос и ошибки VLESS — карточкой (ui.c), не консолью */
         vless_step = vplan > 0;
     } else if (!vless_login()) {
-        term_puts("Выход: VLESS не работает, а работа напрямую не выбрана.\n");
+        term_puts(ui_tr("Выход: VLESS не работает, а работа напрямую не выбрана.\n"));
         vless_stop();
         net_cleanup();
         secret_destroy();
@@ -795,13 +842,15 @@ int main(int argc, char **argv) {
     /* --cli: ни сырого режима, ни альтернативного экрана — обычные строки (и конвейер) */
     if (O.cli) cli_init();
     else {
-        if (shot && !term_open_window(true)) { term_puts("--shot: окно не создалось\n"); vless_stop(); secret_destroy(); return 1; }
-        if (!term_init()) { term_puts("нужен интерактивный терминал\n"); vless_stop(); secret_destroy(); return 1; }
+        if (shot && !term_open_window(true)) { term_puts(ui_tr("--shot: окно не создалось\n")); vless_stop(); secret_destroy(); return 1; }
+        if (!term_init()) { term_puts(ui_tr("нужен интерактивный терминал\n")); vless_stop(); secret_destroy(); return 1; }
         ui_init();
     }
     if (O.demo) { demo_load(); ui_on_ready(); }
     if (O.demo && getenv("MC_TEST_RELOGIN")) g_auth_failed = true;   /* проверка повторного входа без сети */
     img_enable(!O.cli && !O.no_images && !O.demo);
+    if (!O.demo && !shot) { update_init(); update_check(false); }
+    if (demo_update && !update_demo(demo_update)) term_console_puts(ui_tr("--demo-update: только с --demo, значения available|downloading|ready|failed\n"));   /* уборка после прошлого обновления; проверка раз в сутки */
     if (!win_login && vless_step && !O.cli) {      /* стартовый экран: только VLESS (токен уже есть) */
         ui_vless_begin(verr, true);
         if (shot) { exit_rc = shot_run(shot, shot_keys); g_quit = true; shot = NULL; }   /* --demo-start: снимок экрана */
@@ -809,7 +858,7 @@ int main(int argc, char **argv) {
         if (!g_quit && vless_state() == VL_DOWN) g_quit = true;   /* не выбрано ни «работает», ни «напрямую» */
     }
     if (win_login) {                            /* окно входа: до получения токена или Ctrl+Q */
-        if (!login_init()) { term_shutdown(); term_puts("не удалось выделить защищённую память\n"); vless_stop(); net_cleanup(); secret_destroy(); return 1; }
+        if (!login_init()) { term_shutdown(); term_puts(ui_tr("не удалось выделить защищённую память\n")); vless_stop(); net_cleanup(); secret_destroy(); return 1; }
         if (vless_step) ui_vless_begin(verr, false); else ui_login_begin(false);
         while (!g_quit && ui_login_active()) loop_once(INT64_MAX);
         login_finish();                         /* пароль, коды, тикеты, ключ RSA затёрты */
@@ -830,6 +879,6 @@ int main(int argc, char **argv) {
     store_reset();
     secret_destroy();
     wake_free(g_wake);
-    if (g_auth_failed && O.cli) term_puts("Токен не принят Discord. Удалить сохранённый: Astra DS --logout\n");
+    if (g_auth_failed && O.cli) term_puts(ui_tr("Токен не принят Discord. Удалить сохранённый: Astra DS --logout\n"));
     return exit_rc;
 }

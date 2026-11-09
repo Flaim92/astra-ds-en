@@ -191,6 +191,16 @@ To check that everything works: `build/astra-ds --selftest`. That's over 400 che
 | `tools/sec/` | fuzzers and security test rigs |
 | `tools/uitest/` | checks every window through hidden snapshots |
 
+## Support the project
+
+If Astra DS is useful to you and you'd like to help it grow, you can send a donation in USDT (TRON network, TRC-20):
+
+```
+TXxTPQ14xbxrr2D6HeG3d27K3fm8kaKWus
+```
+
+Send only USDT on TRC-20: other coins or networks sent to this address will be lost. Thank you!
+
 ## Author
 
 Hi! I'm Flaim92, and I'm looking for a job as a **Go developer**. If you need someone who loves squeezing the most out of code and isn't afraid of low-level work, write to me: [flaim922@gmail.com](mailto:flaim922@gmail.com).

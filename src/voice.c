@@ -935,6 +935,14 @@ static void publish(VW *w) {
     V.st.mic_live = w->au && !atomic_load(&V.mute) && !atomic_load(&V.deaf) && (w->dave_on || w->demo);
     V.st.dave = w->dave_on;
     if (w->dave_on && V.st.phase == VS_DAVE) V.st.phase = VS_CONNECTED;
+    /* Один в канале: группе DAVE не с кем согласовывать ключи, Discord пришлёт их, когда кто-то зайдёт.
+     * Считаем себя подключёнными (голос всё равно не уходит без dave_on), а при появлении собеседника
+     * до установки шифрования снова показываем «Шифрование». */
+    else if (w->dave && !w->dave_on && w->session_ready) {
+        bool alone = w->nusers <= 1;
+        if (alone && V.st.phase == VS_DAVE) V.st.phase = VS_CONNECTED;
+        else if (!alone && V.st.phase == VS_CONNECTED) V.st.phase = VS_DAVE;
+    }
     u32 h = (u32)V.st.phase * 31u + (u32)V.st.nspeaking * 7u + (V.st.mic_live ? 1u : 0u) + (V.st.dave ? 2u : 0u) + (u32)V.st.ping / 10u * 131u;
     for (int i = 0; i < V.st.nspeaking; i++) h = h * 33u + (u32)V.st.speaking[i];
     mutex_unlock(V.mu);

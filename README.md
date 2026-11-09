@@ -193,7 +193,9 @@ To check that everything works: `build/astra-ds --selftest`. That's over 400 che
 
 ## Support the project
 
-If Astra DS is useful to you and you'd like to help it grow, you can send a donation in USDT (TRON network, TRC-20):
+A bit about me. I worked as a Java developer for three years and then lost my job. I tried to start my own business twice, both attempts failed, and I ended up in debt: right now it is about 240 thousand. At the same time I'm retraining for a new profession, Go developer, and Astra DS is partly a part of that journey.
+
+That's why any help matters to me, even a very small one. If Astra DS is useful to you and you'd like to support me and the project, you can send a donation in USDT (TRON network, TRC-20):
 
 ```
 TXxTPQ14xbxrr2D6HeG3d27K3fm8kaKWus

@@ -745,7 +745,7 @@ static const struct { const char *ru, *en; } TR_EN[] = {
     { "Повтор...\n", "Retrying...\n" },
     { "Повторить", "Retry" },
     { "Повторить отправку", "Retry sending" },
-    { "Подавление шума: нет в Astra DS", "Noise suppression: not in Astra DS" },
+    { "Подавление шума: в настройках - Голос и видео", "Noise suppression: in settings - Voice & Video" },
     { "Подарок: нет в Astra DS", "Gift: not in Astra DS" },
     { "Подготовка QR-кода...", "Preparing the QR code..." },
     { "Подключаться", "Connect" },

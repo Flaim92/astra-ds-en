@@ -133,11 +133,16 @@ typedef struct { short x, y, w, h; u8 act, sub, hv, tip; int arg; } Hit;
 enum { T_NONE, T_INVITE, T_EVENTS, T_BOOST, T_MIC, T_DEAF, T_SET, T_LEAVE, T_CAM, T_SCREEN, T_FX, T_SOUNDB,
        T_NOISE, T_ADDSRV, T_MEMBERS, T_HELP, T_CALL, T_GIFT, T_GIF, T_STICKER, T_EMOJI, T_HOME, T_ATTACH,
        T_CHATX, T_SEARCH, T_E2EE, T_ADDDM, T_FRTAB, T_NITRO, T_VSTAT, T_CHSET, T_FIND, T_MORE, T_WRITE, T_MB_REACT, T_MB_REPLY, T_MB_EDIT, T_PING, T_PINS, T_INBOX, T_STATUS, T_NEWMSG, T_DATE };
+#ifdef ASTRA_VIDEO
+#define TIP_SCREEN "Демонстрация экрана"     /* в Video-сборке работает (в обычной — «нет в Astra DS») */
+#else
+#define TIP_SCREEN "Демонстрация экрана: нет в Astra DS"
+#endif
 static const char *const TIPS[] = {
     "", "Пригласить: нет в Astra DS", "Мероприятия: нет в Astra DS", "Бусты сервера: нет в Astra DS",
     "Микрофон (F5)", "Звук (F6)", "Настройки пользователя", "Отключиться (F7)", "Камера: нет в Astra DS",
-    "Демонстрация экрана: нет в Astra DS", "Смена голоса (F11, Alt+V)", "Звуковая панель: нет в Astra DS",
-    "Подавление шума: нет в Astra DS", "Добавить сервер: нет в Astra DS", "Список участников",
+    TIP_SCREEN, "Смена голоса (F11, Alt+V)", "Звуковая панель: нет в Astra DS",
+    "Подавление шума: в настройках - Голос и видео", "Добавить сервер: нет в Astra DS", "Список участников",
     "Справка (F1)", "Позвонить (F4)", "Подарок: нет в Astra DS", "GIF: нет в Astra DS", "Стикеры: нет в Astra DS",
     "Эмодзи: пишите :код: или вставьте эмодзи", "Личные сообщения", "Отправить файл (Ctrl+O), до 10 МБ",
     "Скрыть чат", "Поиск (Ctrl+F)", "Сквозное шифрование голоса", "Новая личная беседа",

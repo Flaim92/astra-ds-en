@@ -37,7 +37,7 @@ Discord disables an account or forces a password reset when it thinks the accoun
 - opening DMs with people you don't know;
 - changing your friends list.
 
-**Log in with the QR code.** Open the QR code on the Astra DS login screen and scan it with the Discord app on your phone. In our experience, after this kind of login Discord asks for a password reset or logs you out noticeably less often than after logging in with email and password or with a token.
+**Log in with email and password.** If two-factor authentication is on, enter the code from your authenticator app after the password. QR code login is unreliable right now: Discord may ask for a captcha and then refuse to accept it. It behaves the same way in a browser, so this is not an Astra DS bug.
 
 Do these in the official client. Astra DS sends you to the browser to join a server from an invite anyway, because Discord requires the official client for that. If your account gets locked, reset your password on discord.com, and if that doesn't help, [contact support](https://support.discord.com/hc/en-us/requests/new?ticket_form_id=360000029731).
 

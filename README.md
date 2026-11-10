@@ -85,7 +85,7 @@ Against an inventory of 162 Discord screens and features, **86%** is done (84% n
 
 **Video** is in a separate build, **Astra DS Video**. The regular build has none of this code, so it stays just as light.
 
-- **Screen sharing.** The whole screen or one window, 1280x720 at 30 frames per second. On Windows it includes the program's sound. On Linux it works on both X11 and Wayland (GNOME, KDE, sway and others, through the system source picker), picture only for now.
+- **Screen sharing.** The whole screen or one window, 1280x720 at 30 frames per second. With sound: a single window is shared with its program's sound, the whole screen with all system sound except Astra DS itself (call voices do not go into the stream). On Linux it works on both X11 and Wayland (GNOME, KDE, sway and others, through the system source picker). On Wayland a single window is shared without sound for now: the system does not say which program it belongs to.
 - **Watching other people's streams** in voice channels and calls.
 - **Camera**: your own and other people's, as tiles or large (Alt+arrows, Alt+F). Turn it on with the `[]/` button, F12 or Alt+C.
 - **Eye hiding on your camera.** The program finds your face in every frame and covers the eyes with a block of noise and random characters. If no face is found or the program is not sure, others see the Astra DS logo instead of the frame, and your preview says "Face not found". On by default, turn it off with Alt+E or the checkbox in the Camera dialog. Everything runs on your computer; frames go nowhere except the call.

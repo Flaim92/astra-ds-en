@@ -26,7 +26,7 @@ C11 · Windows and Linux · no Electron, no browser, no GPU
 > To just look around, run `astra-ds --demo`: fake data and no network.
 
 > [!NOTE]
-> The interface is in **Russian** for now. The code, build and this page are the same as the [Russian repository](https://github.com/Flaim92/astra-ds).
+> The interface is available in **English**: use the RU | EN switch on the start screen or run with `--lang=en`. The code and build are the same as the [Russian repository](https://github.com/Flaim92/astra-ds).
 
 ### If Discord locks your account
 
@@ -53,7 +53,7 @@ The official Discord app is a whole browser inside a program. For comparison:
 |---|---|---|---|
 | Discord (Electron) | usually 300-600 MB¹ | noticeably above zero | hundreds of MB |
 | [larperCord](https://github.com/RshaCuDeVidro/larperCord) (Zig, SDL3) | ~130 MB² | 0-0.4%² | ~14 MB |
-| **Astra DS** | **~2.9 MB**³ | **0%** | **~10 MB** |
+| **Astra DS** | **~2.9 MB**³ | **0%** | **~16 MB** |
 
 <sub>¹ Estimate from Task Manager, depends on how many servers you're in. Not measured side by side.
 ² From the larperCord README, not our measurement.
@@ -83,7 +83,9 @@ Against an inventory of 162 Discord screens and features, **86%** is done (84% n
 - **Comfort.** Zoom with Ctrl+= and Ctrl+-, full screen with Alt+Enter, resizable columns, notifications and a tray icon, focus mode, keyword alerts, word filter.
 - **Three modes.** A window with mouse support, a full-screen terminal mode (`--tui`) and a line-based IRC-like mode (`--cli`).
 
-**Not included, and not planned:** video, camera and screen sharing, animated GIFs, plugins. They either cost too many resources or put the account at risk.
+**Screen sharing** is in a separate build, **Astra DS Video**: the whole screen or one window, 1280x720 at 30 frames per second. On Windows it includes the program's sound, on Linux (X11) it is picture only for now. The regular build has none of this code, so it stays just as light.
+
+**Not included:** camera, animated GIFs, plugins.
 
 ## Privacy and security
 
@@ -133,7 +135,7 @@ Against an inventory of 162 Discord screens and features, **86%** is done (84% n
 
 ## Download
 
-Ready-made builds for Windows 10/11 and Linux are in [Releases](../../releases/latest). On Windows it's a single exe with no installer. On Linux you need glibc 2.36+, `libasound2` and `libx11-6`. You can also build it yourself, see below.
+Ready-made builds for Windows 10/11 and Linux are in [Releases](../../releases/latest): the regular one and Astra DS Video. On Windows it's a single exe with no installer. On Linux you need glibc 2.36+, `libasound2` and `libx11-6`. For the captcha window on Linux, install `libwebkit2gtk-4.1-0`. You can also build it yourself, see below.
 
 ## Useful flags
 
@@ -172,7 +174,7 @@ bash deps/build-deps.sh
 bash build.sh               # result: build/astra-ds
 ```
 
-Dependencies (zlib, OpenSSL, curl, opus, libdave and others) are built from source with checksum verification. The program is linked statically, so there are no libraries next to it that could be swapped out.
+Dependencies (zlib, OpenSSL, curl, opus, libdave and others) are built from source with checksum verification and linked statically. There is one exception: the prebuilt libcurl-impersonate library in `third_party/impcurl/`, used only for login requests. It is embedded in the program and is not a separate file next to it. To build with screen sharing: `VIDEO=1 bash build.sh`.
 
 To check that everything works: `build/astra-ds --selftest`. That's over 400 checks of the interface, data parsing, voice and security, with no network access.
 

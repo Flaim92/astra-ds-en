@@ -117,6 +117,23 @@ bool gb_vk_key(unsigned vk, bool ctrl, bool alt, Key *out);           /* Ctrl+к
 bool gb_ks_key(unsigned long base, unsigned long ks, bool alt, Key *out);   /* то же для X11 keysym (с Ctrl) */
 #endif                         /* №15: масштаб шрифта, шаг 10 %; 0 — сброс; false — без изменений */
 int gb_zoom_pct(void);
+#ifdef ASTRA_VIDEO
+/* ---------- видео просмотра трансляции (gui_grid.c; договор g_video_area/g_video_supported — golive.h) ---------- */
+typedef struct { int x, y, w, h; const u32 *buf; int bw, bh; } GvPaint;   /* область, пиксели; картинка bw x bh (BGRA) */
+void gvid_frame_begin(void);                    /* gui_size: начало render() */
+void gvid_commit(void);                         /* ESC[?2026l: зафиксировать прямоугольник */
+bool gvid_paint_lock(GvPaint *o);               /* бэкенд при рисовании: true — кадр есть, держит мьютекс */
+void gvid_paint_unlock(void);
+int gcam_paint_lock(GvPaint *o, int max);       /* плитки камер с кадром (cam.h); мьютекс — до gcam_paint_unlock всегда */
+void gcam_paint_unlock(void);
+/* бэкенд */
+bool gb_video_ok(void);                         /* окно с растром (не --tui/--cli) */
+void gb_cell_px(int *cw, int *ch);              /* размер клетки, пиксели */
+void gb_video_inval(int x, int y, int w, int h);   /* перерисовать область (пиксели); из любого потока */
+bool gb_video_shown(void);                      /* окно видно (не свёрнуто/не скрыто); из любого потока */
+void *gb_vbuf_alloc(size_t n);                  /* растр кадра (X11: сегмент MIT-SHM, если можно); из любого потока */
+void gb_vbuf_free(void *p, size_t n);
+#endif
 
 /* Для plat.h (координатору): 0 — терминал или окно не умеет; иначе наибольший масштаб K. */
 int term_subcell_scale(void);

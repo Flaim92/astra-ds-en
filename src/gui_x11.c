@@ -20,6 +20,12 @@
 #include <sys/eventfd.h>
 #include "gui.h"
 #include "astra_icon.h"
+#ifdef ASTRA_VIDEO
+#include <stdatomic.h>
+#include <dlfcn.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#endif
 
 static Display *dpy;
 static Window win;
@@ -262,20 +268,169 @@ static void draw_margins(Drawable d, int W, int H, int y0, int y1) {
     if (H > G.rows * chh && y1 > G.rows * chh) fill(d, 0, G.rows * chh, W, H - G.rows * chh, G.def_bg);
 }
 static int win_w, win_h;
+#ifdef ASTRA_VIDEO
+/* ---------- видео просмотра трансляции: XPutImage кадра поверх клеток (буфер — gui_grid.c) ----------
+ * Буфер BGRA (0x00RRGGBB) кладётся как есть — только при раскладке TrueColor 8:8:8 в 32-битном пикселе
+ * (иначе g_video_supported = false). Поток зрителя будит главный через eventfd kick; рисует только главный. */
+static bool vid_fmt;                            /* раскладка пикселя подходит для прямого XPutImage */
+static atomic_bool vid_dirty;
+static int vid_last[4];                         /* где кадр рисовался последний раз (главный поток) */
+static atomic_bool vid_mapped, vid_obscured;    /* окно отображено / закрыто другими целиком */
+static atomic_int x_errs;                       /* счёт ошибок протокола (проверка XShmAttach) */
+/* MIT-SHM: растр кадра — в разделяемом сегменте, XShmPutImage без копирования через сокет. libXext — через dlopen
+ * (как share_x11.c), только для локального дисплея; не вышло — обычный XPutImage. Сегмент один (растр один). */
+typedef struct { unsigned long shmseg; int shmid; char *shmaddr; Bool readOnly; } VShm;   /* = XShmSegmentInfo */
+static struct {
+    bool ok, used;
+    Bool (*q)(Display *);
+    XImage *(*create)(Display *, Visual *, unsigned, int, char *, VShm *, unsigned, unsigned);
+    Bool (*attach)(Display *, VShm *);
+    Bool (*detach)(Display *, VShm *);
+    Bool (*put)(Display *, Drawable, GC, XImage *, int, int, int, int, unsigned, unsigned, Bool);
+    VShm si;
+} XS;
+static void xs_init(void) {
+    const char *d = getenv("DISPLAY");
+    if (!vid_fmt || !d || !(d[0] == ':' || !strncmp(d, "unix:", 5))) return;   /* удалённый X — сегмент не разделить */
+    void *lib = dlopen("libXext.so.6", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) return;
+    *(void **)(&XS.q) = dlsym(lib, "XShmQueryExtension");
+    *(void **)(&XS.create) = dlsym(lib, "XShmCreateImage");
+    *(void **)(&XS.attach) = dlsym(lib, "XShmAttach");
+    *(void **)(&XS.detach) = dlsym(lib, "XShmDetach");
+    *(void **)(&XS.put) = dlsym(lib, "XShmPutImage");
+    XS.ok = XS.q && XS.create && XS.attach && XS.detach && XS.put && XS.q(dpy);
+}
+void *gb_vbuf_alloc(size_t n) {                  /* поток декодера: Xlib с XInitThreads */
+    if (XS.ok && !XS.used && dpy) {
+        memset(&XS.si, 0, sizeof XS.si);
+        XS.si.shmid = shmget(IPC_PRIVATE, n, IPC_CREAT | 0600);
+        if (XS.si.shmid >= 0) {
+            XS.si.shmaddr = shmat(XS.si.shmid, NULL, 0);
+            if (XS.si.shmaddr != (char *)-1) {
+                int e0 = atomic_load(&x_errs);
+                Bool ok = XS.attach(dpy, &XS.si);
+                XSync(dpy, False);
+                shmctl(XS.si.shmid, IPC_RMID, NULL);   /* сегмент исчезнет сам после отсоединения обеих сторон */
+                if (ok && atomic_load(&x_errs) == e0) { XS.used = true; return XS.si.shmaddr; }
+                shmdt(XS.si.shmaddr);
+            } else shmctl(XS.si.shmid, IPC_RMID, NULL);
+        }
+        XS.ok = false;                           /* не вышло — дальше без SHM */
+    }
+    return malloc(n);
+}
+void gb_vbuf_free(void *p, size_t n) {
+    (void)n;
+    if (p && XS.used && p == XS.si.shmaddr) {
+        XS.detach(dpy, &XS.si);
+        XSync(dpy, False);
+        shmdt(XS.si.shmaddr);
+        XS.used = false;
+        return;
+    }
+    free(p);
+}
+bool gb_video_ok(void) { return dpy && vid_fmt; }
+bool gb_video_shown(void) { return dpy && (hidden || (atomic_load(&vid_mapped) && !atomic_load(&vid_obscured))); }
+void gb_cell_px(int *w, int *h) { *w = cw; *h = chh; }
+void gb_video_inval(int x, int y, int w, int h) {
+    (void)x; (void)y; (void)w; (void)h;
+    if (!dpy || hidden) return;
+    atomic_store(&vid_dirty, true);
+    if (kick >= 0) { uint64_t one = 1; ssize_t r = write(kick, &one, 8); (void)r; }
+}
+static void vid_put(const GvPaint *g);
+#define CAM_RECTS 8                              /* CAM_TILES */
+static int cam_last[CAM_RECTS][4], cam_nlast;    /* где плитки камер рисовались последний раз (главный поток) */
+static void cam_paint(void) {
+    GvPaint t[CAM_RECTS];
+    int k = gcam_paint_lock(t, CAM_RECTS);
+    int old[CAM_RECTS][4], no = cam_nlast;
+    memcpy(old, cam_last, sizeof old);
+    for (int i = 0; i < k; i++) { vid_put(&t[i]); cam_last[i][0] = t[i].x; cam_last[i][1] = t[i].y; cam_last[i][2] = t[i].w; cam_last[i][3] = t[i].h; }
+    cam_nlast = k;
+    gcam_paint_unlock();
+    for (int j = 0; j < no; j++) {               /* плитки больше нет — вернуть клетки под ней */
+        bool still = false;
+        for (int i = 0; i < k; i++) if (!memcmp(old[j], cam_last[i], sizeof old[j])) still = true;
+        if (still) continue;
+        int y0 = old[j][1] / chh, y1 = (old[j][1] + old[j][3] + chh - 1) / chh;
+        for (int y = y0; y < y1 && y < G.rows; y++) draw_line(win, y);
+    }
+    if (no > 0 && k < no) {                      /* строки перерисованы текстом — оставшиеся плитки поверх снова */
+        k = gcam_paint_lock(t, CAM_RECTS);
+        for (int i = 0; i < k; i++) vid_put(&t[i]);
+        gcam_paint_unlock();
+    }
+}
+static void gv_paint_one(void);
+static void vid_paint(void) { gv_paint_one(); cam_paint(); }
+static void gv_paint_one(void) {
+    GvPaint g;
+    if (!gvid_paint_lock(&g)) {                 /* кадра нет (скрыто/конец): вернуть клетки под прежним кадром */
+        if (vid_last[2] > 0) {
+            int y0 = vid_last[1] / chh, y1 = (vid_last[1] + vid_last[3] + chh - 1) / chh;
+            for (int y = y0; y < y1 && y < G.rows; y++) draw_line(win, y);
+            vid_last[2] = 0;
+        }
+        return;
+    }
+    vid_put(&g);
+    vid_last[0] = g.x; vid_last[1] = g.y; vid_last[2] = g.w; vid_last[3] = g.h;
+    gvid_paint_unlock();
+}
+static void vid_put(const GvPaint *gp) {        /* картинка по центру области, поля чёрные */
+    GvPaint g = *gp;
+    int dx = g.x + (g.w - g.bw) / 2, dy = g.y + (g.h - g.bh) / 2;   /* без увеличения: по центру, поля чёрные */
+    if (dy > g.y) fill(win, g.x, g.y, g.w, dy - g.y, 0);
+    if (dy + g.bh < g.y + g.h) fill(win, g.x, dy + g.bh, g.w, g.y + g.h - dy - g.bh, 0);
+    if (dx > g.x) fill(win, g.x, dy, dx - g.x, g.bh, 0);
+    if (dx + g.bw < g.x + g.w) fill(win, dx + g.bw, dy, g.x + g.w - dx - g.bw, g.bh, 0);
+    int scr = DefaultScreen(dpy);
+    bool shm = XS.used && (const char *)g.buf == XS.si.shmaddr;
+    XImage *im = shm ? XS.create(dpy, DefaultVisual(dpy, scr), (unsigned)DefaultDepth(dpy, scr), ZPixmap, (char *)g.buf, &XS.si, (unsigned)g.bw, (unsigned)g.bh)
+                     : XCreateImage(dpy, DefaultVisual(dpy, scr), (unsigned)DefaultDepth(dpy, scr), ZPixmap, 0, (char *)g.buf,
+                                    (unsigned)g.bw, (unsigned)g.bh, 32, g.bw * 4);
+    if (im) {
+        if (shm) XS.put(dpy, win, gc, im, 0, 0, dx, dy, (unsigned)g.bw, (unsigned)g.bh, False);
+        else XPutImage(dpy, win, gc, im, 0, 0, dx, dy, (unsigned)g.bw, (unsigned)g.bh);
+        im->data = NULL;                         /* буфер наш — XDestroyImage его не освобождает */
+        XDestroyImage(im);
+    }
+}
+static bool vid_rows(int y0, int y1) {          /* строки [y0, y1) задевают кадр (трансляция или плитка камеры) */
+    if (vid_last[2] > 0 && y1 * chh > vid_last[1] && y0 * chh < vid_last[1] + vid_last[3]) return true;
+    for (int i = 0; i < cam_nlast; i++) if (y1 * chh > cam_last[i][1] && y0 * chh < cam_last[i][1] + cam_last[i][3]) return true;
+    return false;
+}
+#endif
 static void expose(int ey, int eh) {
     int y0 = ey / chh, y1 = (ey + eh + chh - 1) / chh;
     if (y1 > G.rows) y1 = G.rows;
     for (int y = y0 < 0 ? 0 : y0; y < y1; y++) draw_line(win, y);
     draw_margins(win, win_w, win_h, ey, ey + eh);
+#ifdef ASTRA_VIDEO
+    if (vid_rows(y0, y1)) vid_paint();
+#endif
 }
 
 void gb_flush(void) {
     if (!dpy || !G.dirty) return;
+#ifdef ASTRA_VIDEO
+    bool over = false;
+#endif
     for (int y = 0; y < G.rows; y++) {
         if (!G.dirty[y]) continue;
         G.dirty[y] = 0;
         if (!hidden) draw_line(win, y);
+#ifdef ASTRA_VIDEO
+        if (!hidden && vid_rows(y, y + 1)) over = true;
+#endif
     }
+#ifdef ASTRA_VIDEO
+    if (over) vid_paint();                      /* строки под кадром перерисованы текстом — кадр поверх снова */
+#endif
     XFlush(dpy);
 }
 void gb_bell(void) { if (dpy && !hidden) { XBell(dpy, 0); XFlush(dpy); } }
@@ -605,6 +760,11 @@ static void on_event(XEvent *e) {
     if (XFilterEvent(e, None)) return;
     switch (e->type) {
     case Expose: if (G.ch && !hidden) expose(e->xexpose.y, e->xexpose.height); break;
+#ifdef ASTRA_VIDEO
+    case MapNotify: atomic_store(&vid_mapped, true); break;   /* свёрнуто/скрыто — декодер просмотра стоит */
+    case UnmapNotify: atomic_store(&vid_mapped, false); break;
+    case VisibilityNotify: atomic_store(&vid_obscured, e->xvisibility.state == VisibilityFullyObscured); break;
+#endif
     case ConfigureNotify: {
         win_w = e->xconfigure.width;
         win_h = e->xconfigure.height;
@@ -662,7 +822,13 @@ static void on_event(XEvent *e) {
 
 /* Ошибки протокола (окно уже уничтожено и т. п.) не роняют программу; потеря X-сервера — выход
  * без попыток рисовать дальше (Xlib после этого обработчика завершает процесс сам). */
-static int x_error(Display *d, XErrorEvent *e) { (void)d; (void)e; return 0; }
+static int x_error(Display *d, XErrorEvent *e) {
+    (void)d; (void)e;
+#ifdef ASTRA_VIDEO
+    atomic_fetch_add(&x_errs, 1);
+#endif
+    return 0;
+}
 static int x_io_error(Display *d) { (void)d; G.closed = true; return 0; }
 
 bool gb_open(bool hide) {
@@ -686,6 +852,18 @@ bool gb_open(bool hide) {
         if (gbits > 8) gbits = 8;
         if (bbits > 8) bbits = 8;
     }
+#ifdef ASTRA_VIDEO
+    {   /* видео: 0x00RRGGBB в 32-битном пикселе, младший байт первым */
+        int nf = 0, dep = DefaultDepth(dpy, scr);
+        XPixmapFormatValues *pf = XListPixmapFormats(dpy, &nf);
+        bool bpp32 = false;
+        for (int i = 0; pf && i < nf; i++) if (pf[i].depth == dep && pf[i].bits_per_pixel == 32) bpp32 = true;
+        if (pf) XFree(pf);
+        vid_fmt = truecolor && bpp32 && (dep == 24 || dep == 32) && rmask == 0xFF0000 && gmask == 0xFF00 && bmask == 0xFF &&
+                  ImageByteOrder(dpy) == LSBFirst;
+        xs_init();
+    }
+#endif
     /* Цвета как у Discord (тёмная тема): в X11 нет общей настройки темы. */
     G.def_bg = 0x313338;
     G.def_fg = 0xDBDEE1;
@@ -698,6 +876,9 @@ bool gb_open(bool hide) {
     wa.background_pixel = pix(G.def_bg);
     wa.bit_gravity = NorthWestGravity;
     wa.event_mask = KeyPressMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | StructureNotifyMask | ExposureMask;
+#ifdef ASTRA_VIDEO
+    wa.event_mask |= VisibilityChangeMask;
+#endif
     win = XCreateWindow(dpy, RootWindow(dpy, scr), 0, 0, (unsigned)W, (unsigned)H, 0, CopyFromParent, InputOutput,
                         CopyFromParent, CWBackPixel | CWBitGravity | CWEventMask, &wa);
     win_w = W;
@@ -771,6 +952,9 @@ void gb_pump(int timeout_ms) {
         XNextEvent(dpy, &e);
         on_event(&e);
     }
+#ifdef ASTRA_VIDEO
+    if (atomic_exchange(&vid_dirty, false) && !hidden) { vid_paint(); XFlush(dpy); }
+#endif
 }
 
 int gb_waitables(Waitable *out, int max) {

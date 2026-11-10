@@ -22,7 +22,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <math.h>
 #include "share.h"
+#include "share_conv.h"
 
 #define H264E_SVC_API 0
 #define H264E_MAX_THREADS 0
@@ -128,6 +130,7 @@ static double thread_cpu_ms(void) {
     return (double)(a.QuadPart + b.QuadPart) / 10000.0;
 }
 
+static double psnr_y(const uint8_t *a, const uint8_t *b, size_t n);
 typedef struct {
     int ow, oh, fps, scene, kbps;                /* scene: 0 desk, 1 scroll, 2 video */
     int sw, sh, sx, sy;                          /* источник: размер и левый верхний угол на экране */
@@ -138,8 +141,10 @@ typedef struct {
     HWND pw;                                     /* источник «окно»: снимается, только пока его ничто не перекрывает */
     int stretch, bandw, band_oy;                 /* stretch: StretchBlt сразу в ширину кадра — полоса в ow, не в sw */                      /* полос по 16 строк кадра на один BitBlt; SRCCOPY [| CAPTUREBLT] */
     int *xmap;
+    bool xident;                                 /* xmap[x] == x: источник без масштаба — точки подряд */
+    bool refit;                                  /* место картинки изменилось: захват целиком, блоки «неизвестны» */
     uint8_t *y, *u, *v;
-    uint32_t *mbsig;                             /* отпечаток каждого блока 16x16 прошлого кадра (яркость) */
+    ShMb mb;                                     /* отпечатки (Y+U+V) и возраст блоков 16x16, карта для кодера */
     int dx, dy, dw, dh;                          /* место картинки в кадре ow x oh (вокруг — чёрные поля); dw 0 — весь кадр */
     int fit_w, fit_h, band_sh;                   /* для какого размера источника посчитаны dx..dh и полоса */
     HDC pdc; HBITMAP pbm; HGDIOBJ pold; uint32_t *ppix;   /* PrintWindow: DIB размером с окно (GetWindowRect), 32 бит */
@@ -159,6 +164,15 @@ static void scene_step(ST *st, int frame) {
             RECT tr = { 20, st->sh - 18, st->sw, st->sh };
             FillRect(st->vdc, &tr, (HBRUSH)GetStockObject(WHITE_BRUSH));
             TextOutA(st->vdc, 20, st->sh - 18, t, n);
+        }
+    } else if (st->scene == 3) {                 /* панорама: картинка st->ppix сдвигается на (3,2) за кадр */
+        int ox = frame * 3, oy = frame * 2;
+        for (int yy = 0; yy < st->sh; yy++) {
+            const uint32_t *srow = st->ppix + (size_t)((yy + oy) % st->sh) * st->sw;
+            uint32_t *row = st->vpix + (size_t)yy * st->sw;
+            int k = ox % st->sw;
+            memcpy(row, srow + k, (size_t)(st->sw - k) * 4);
+            memcpy(row + (st->sw - k), srow, (size_t)k * 4);
         }
     } else if (st->scene == 2) {
         uint32_t seed = (uint32_t)frame * 2654435761u;
@@ -268,71 +282,72 @@ static bool win_covered(HWND w, const RECT *wr) {
     return guard >= 4096;
 }
 
-/* Одна строка картинки (dw точек, источник по xmap) -> строка oy кадра YUV420 BT.601, со сдвигом dx (чётный). */
-static void conv_row(ST *st, const uint32_t *s32, const uint16_t *s16, int oy) {
+/* Строка i картинки, точки [j0,j1) (j0 чётный): источник по xmap (или подряд) -> YUV420 BT.601 в кадр со сдвигом dx,dy. */
+static bool sh_test_scalar;                      /* замер: скалярная конверсия вместо SSE2 (ST_SCALAR) */
+static void conv_row(ST *st, const uint32_t *s32, const uint16_t *s16, int i, int j0, int j1) {
+    int oy = st->dy + i;
     uint8_t *yrow = st->y + (size_t)oy * st->ow + st->dx;
-    bool crow = !(oy & 1);
-    uint8_t *ur = st->u + (size_t)(oy / 2) * (st->ow / 2) + st->dx / 2, *vr = st->v + (size_t)(oy / 2) * (st->ow / 2) + st->dx / 2;
-    for (int i = 0; i < st->dw; i++) {
-        int R, G, B;
-        if (s16) {                               /* 5-5-5: вдвое меньше памяти полосы */
-            unsigned px = s16[st->xmap[i]];
-            R = (int)(px >> 7 & 0xF8); G = (int)(px >> 2 & 0xF8); B = (int)(px << 3 & 0xF8);
-        } else {
-            uint32_t px = s32[st->xmap[i]];
-            R = px >> 16 & 255; G = px >> 8 & 255; B = px & 255;
-        }
-        yrow[i] = (uint8_t)(((66 * R + 129 * G + 25 * B + 128) >> 8) + 16);
-        if (crow && !(i & 1)) {
-            ur[i / 2] = (uint8_t)(((-38 * R - 74 * G + 112 * B + 128) >> 8) + 128);
-            vr[i / 2] = (uint8_t)(((112 * R - 94 * G - 18 * B + 128) >> 8) + 128);
-        }
-    }
+    uint8_t *ur = NULL, *vr = NULL;
+    if (!(oy & 1)) { ur = st->u + (size_t)(oy / 2) * (st->ow / 2) + st->dx / 2; vr = st->v + (size_t)(oy / 2) * (st->ow / 2) + st->dx / 2; }
+    const int *xm = st->xident ? NULL : st->xmap;
+    if (sh_test_scalar) { if (s16) shc_row16_c(s16, xm, j0, j1, yrow, ur, vr); else shc_row32_c(s32, xm, j0, j1, yrow, ur, vr, 0); }
+    else if (s16) shc_row16(s16, xm, j0, j1, yrow, ur, vr);
+    else shc_row32(s32, xm, j0, j1, yrow, ur, vr);
 }
-/* Захват (полосами с экрана или из готового DIB окна) + масштаб (ближайший) + YUV420 в место dx,dy,dw,dh кадра;
- * вернуть число изменившихся блоков 16x16 всего кадра. */
-static int grab_convert(ST *st, double *t_cap, double *t_conv) {
-    int changed = 0, mbw = st->ow / 16, r0 = 0, bh = 0;
+static void st_xmap(ST *st, int n) {             /* тождественный ли выбор точек (тогда без косвенной адресации) */
+    st->xident = true;
+    for (int x = 0; x < n && st->xident; x++) st->xident = st->xmap[x] == x;
+}
+/* Захват (полосами с экрана или из готового DIB окна) + масштаб (ближайший) + YUV420 части кадра: блоки
+ * [mx0,mx1) x [my0,my1) сетки кадра (весь кадр — 0,0,mbw,mbh); с экрана берётся только прямоугольник источника под
+ * этими блоками. Отпечатки снятых блоков обновляются в том же проходе (пока строки в кэше); вернуть число изменившихся. */
+static int grab_convert(ST *st, int mx0, int my0, int mx1, int my1, double *t_cap, double *t_conv) {
     if (!st->dw) { st->dx = st->dy = 0; st->dw = st->ow; st->dh = st->oh; }
     if (!st->bandw) st->bandw = st->stretch ? st->ow : st->sw;
+    if (st->refit) { mx0 = my0 = 0; mx1 = st->mb.mbw; my1 = st->mb.mbh; st->refit = false; }
+    shc_scan_begin(&st->mb);
+    int ox0 = mx0 * 16 > st->dx ? mx0 * 16 : st->dx, ox1 = mx1 * 16 < st->dx + st->dw ? mx1 * 16 : st->dx + st->dw;
+    int oy0 = my0 * 16 > st->dy ? my0 * 16 : st->dy, oy1 = my1 * 16 < st->dy + st->dh ? my1 * 16 : st->dy + st->dh;
+    if (ox0 >= ox1 || oy0 >= oy1) return 0;
+    int j0 = ox0 - st->dx, j1 = ox1 - st->dx, i0 = oy0 - st->dy, i1 = oy1 - st->dy, hx0 = ox0 >> 4, hx1 = (ox1 + 15) >> 4;
+    int changed = 0;
     double t0 = qpc_ms(), cap = 0;
+#define ST_HASH(k) do { int oy_ = st->dy + (k); if ((oy_ & 15) == 15 || (k) == i1 - 1) \
+        changed += shc_hash_row(&st->mb, st->y, st->u, st->v, st->ow, st->ow / 2, oy_ >> 4, hx0, hx1, ox0, ox1, oy0, oy1); } while (0)
     if (st->from_dib) {                          /* окно уже целиком в памяти (PrintWindow) */
-        for (int i = 0; i < st->dh; i++)
-            conv_row(st, st->ppix + (size_t)(st->pcy + i * st->sh / st->dh) * st->pdw + st->pcx, NULL, st->dy + i);
+        for (int i = i0; i < i1; i++) {
+            conv_row(st, st->ppix + (size_t)(st->pcy + i * st->sh / st->dh) * st->pdw + st->pcx, NULL, i, j0, j1);
+            ST_HASH(i);
+        }
     } else {
         int rows = 16 * st->kstrips;
-        for (int i = 0; i < st->dh; i++) {
-            if (i % rows == 0) {                 /* новая полоса: rows строк картинки одним BitBlt */
-                double a = qpc_ms();
-                int ie = i + rows > st->dh ? st->dh : i + rows;
-                r0 = i * st->sh / st->dh;
+        size_t bstride = st->bpp == 16 ? (size_t)((st->bandw + 1) & ~1) : (size_t)st->bandw;
+        for (int i = i0; i < i1;) {              /* полоса: rows строк картинки одним BitBlt, только нужные столбцы */
+            int ie = i + rows > i1 ? i1 : i + rows, r0 = i * st->sh / st->dh, bh;
+            double a = qpc_ms();
+            if (st->stretch) {                   /* масштаб делает GDI: в полосе уже строки кадра (только весь кадр) */
+                int r1 = ie * st->sh / st->dh;
+                StretchBlt(st->bdc, 0, 0, st->dw, ie - i, st->src, st->sx, st->sy + r0, st->sw, r1 - r0, st->rop);
+                bh = ie - i;
+            } else {
                 bh = (ie - 1) * st->sh / st->dh - r0 + 1;
                 if (r0 + bh > st->sh) bh = st->sh - r0;
                 if (bh > st->bandh) bh = st->bandh;
-                if (st->stretch) {               /* масштаб делает GDI: в полосе уже строки кадра */
-                    int r1 = ie * st->sh / st->dh;
-                    StretchBlt(st->bdc, 0, 0, st->dw, ie - i, st->src, st->sx, st->sy + r0, st->sw, r1 - r0, st->rop);
-                    st->band_oy = i;
-                } else BitBlt(st->bdc, 0, 0, st->sw, bh, st->src, st->sx, st->sy + r0, st->rop);
-                cap += qpc_ms() - a;
+                int xs0 = st->xmap[j0], xs1 = st->xmap[j1 - 1] + 1;   /* столбцы источника; в полосе — на своих местах */
+                BitBlt(st->bdc, xs0, 0, xs1 - xs0, bh, st->src, st->sx + xs0, st->sy + r0, st->rop);
             }
-            int sy = st->stretch ? i - st->band_oy : i * st->sh / st->dh - r0;
-            if (!st->stretch && sy >= bh) sy = bh - 1;
-            if (st->bpp == 16) conv_row(st, NULL, (const uint16_t *)st->band + (size_t)sy * (size_t)((st->bandw + 1) & ~1), st->dy + i);
-            else conv_row(st, st->band + (size_t)sy * st->bandw, NULL, st->dy + i);
+            cap += qpc_ms() - a;
+            for (int k = i; k < ie; k++) {
+                int sy = st->stretch ? k - i : k * st->sh / st->dh - r0;
+                if (sy >= bh) sy = bh - 1;
+                if (st->bpp == 16) conv_row(st, NULL, (const uint16_t *)st->band + (size_t)sy * bstride, k, j0, j1);
+                else conv_row(st, st->band + (size_t)sy * bstride, NULL, k, j0, j1);
+                ST_HASH(k);
+            }
+            i = ie;
         }
     }
-    /* блоки 16x16: изменились ли (отпечаток яркости FNV-1a по 4 байта); поля не меняются — дёшево */
-    for (int s = 0; s < st->oh / 16; s++)
-        for (int mx = 0; mx < mbw; mx++) {
-            uint32_t h = 2166136261u;
-            for (int yy = 0; yy < 16; yy++) {
-                const uint8_t *p = st->y + (size_t)(s * 16 + yy) * st->ow + (size_t)mx * 16;
-                for (int k = 0; k < 16; k += 4) { uint32_t w4; memcpy(&w4, p + k, 4); h = (h ^ w4) * 16777619u; }
-            }
-            uint32_t *sig = &st->mbsig[(size_t)s * mbw + mx];
-            if (*sig != h) { changed++; *sig = h; }
-        }
+#undef ST_HASH
     *t_cap += cap;
     *t_conv += qpc_ms() - t0 - cap;
     return changed;
@@ -384,6 +399,27 @@ int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
         RECT r = { 0, 0, st.sw, st.sh };
         FillRect(st.vdc, &r, (HBRUSH)GetStockObject(WHITE_BRUSH));
         st.src = st.vdc;
+        if (scene == 2 && getenv("ST_PAN")) {    /* панорама по снимку экрана (копия в памяти; только замер) */
+            st.ppix = malloc((size_t)st.sw * st.sh * 4);
+            if (st.ppix) {
+                /* картинка без зависимости от экрана: плавные пятна + цветные надписи + рамки (как сцена игры/сайта) */
+                for (int yy = 0; yy < st.sh; yy++) for (int xx = 0; xx < st.sw; xx++) {
+                    int cr = (int)(128 + 100 * sin(xx * 0.011 + yy * 0.004)), cg = (int)(128 + 90 * sin(yy * 0.013 - xx * 0.002)), cb = (int)(128 + 80 * cos((xx + yy) * 0.007));
+                    st.vpix[(size_t)yy * st.sw + xx] = (uint32_t)(cr << 16 | cg << 8 | cb);
+                }
+                SetBkMode(st.vdc, TRANSPARENT);
+                for (int k = 0; k < 400; k++) {
+                    char t[64];
+                    int tn = snprintf(t, sizeof t, "Astra %d score %05d HP %d", k, k * 37 % 99999, k % 100);
+                    SetTextColor(st.vdc, RGB(k * 53 % 256, k * 97 % 256, k * 31 % 256));
+                    TextOutA(st.vdc, (k * 211) % st.sw, (k * 137) % st.sh, t, tn);
+                    if (k % 4 == 0) { RECT q = { (k * 89) % st.sw, (k * 59) % st.sh, (k * 89) % st.sw + 40 + k % 90, (k * 59) % st.sh + 20 + k % 60 }; FrameRect(st.vdc, &q, (HBRUSH)GetStockObject(BLACK_BRUSH)); }
+                }
+                GdiFlush();
+                memcpy(st.ppix, st.vpix, (size_t)st.sw * st.sh * 4);
+                st.scene = 3;
+            }
+        }
     } else st.src = screen;
     /* полоса ~360 строк источника: 3 BitBlt на кадр 1080p (каждый вызов ~5 мс накладных DWM), 1,33 МБ в 16 бит */
     st.kstrips = getenv("ST_BAND") ? atoi(getenv("ST_BAND")) : 360 * oh / (st.sh * 16);
@@ -403,14 +439,18 @@ int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
     SetStretchBltMode(st.bdc, COLORONCOLOR);
     st.xmap = malloc(sizeof(int) * (size_t)ow);
     for (int x = 0; x < ow; x++) st.xmap[x] = st.stretch ? x : x * st.sw / ow;
+    st_xmap(&st, ow);
     st.y = calloc((size_t)ow * oh, 1);
-    st.mbsig = calloc((size_t)(ow / 16) * (oh / 16), sizeof(uint32_t));   /* 0 — «ещё не было»: первый кадр весь новый */
+    st.mb.mbw = ow / 16; st.mb.mbh = oh / 16;    /* отпечаток 0 — «ещё не было»: первый кадр весь новый */
+    st.mb.sig = calloc((size_t)st.mb.mbw * st.mb.mbh, sizeof(uint32_t));
+    st.mb.age = calloc((size_t)st.mb.mbw * st.mb.mbh, 1); st.mb.map = calloc((size_t)st.mb.mbw * st.mb.mbh, 1);
     st.u = calloc((size_t)ow * oh / 4, 1); st.v = calloc((size_t)ow * oh / 4, 1);
 
     H264E_create_param_t cp;
     memset(&cp, 0, sizeof cp);
     cp.width = ow; cp.height = oh; cp.gop = fps * 4;
     cp.vbv_size_bytes = kbps * 1000 / 8;         /* буфер ~1 с */
+    if (getenv("ST_FAST")) { cp.gop = fps * 2; cp.vbv_size_bytes = (kbps * 35 / 18) * 1000 / 8; }
     cp.fine_rate_control_flag = 0;
     cp.const_input_flag = getenv("ST_CONSTIN") ? 1 : 0;   /* 0: кодер пишет во вход (экономит кадр); сравнение — по своей копии Y */
     int szp = 0, szs = 0;
@@ -423,7 +463,12 @@ int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
 
     H264E_run_param_t rp;
     memset(&rp, 0, sizeof rp);
-    rp.encode_speed = 8;
+    rp.encode_speed = getenv("ST_SPEED") ? atoi(getenv("ST_SPEED")) : 8;
+    /* ST_FAST: без пауз, кадр = шаг сцены, ведро и кодер — как в эфире (sh_main): детерминированное сравнение качества */
+    bool fast = getenv("ST_FAST") != NULL, noskip = getenv("ST_NOSKIP") != NULL;
+    uint8_t *pbuf = fast ? malloc((size_t)ow * oh) : NULL;
+    double psum = 0; int pn = 0, keys = 0;
+    (void)noskip;
     rp.desired_frame_bytes = kbps * 1000 / 8 / fps;
     rp.qp_min = 18; rp.qp_max = 51;
     H264E_io_yuv_t io;
@@ -435,7 +480,7 @@ int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
     double bucket = 0, per_frame = kbps * 1000.0 / 8 / fps, cap = kbps * 1000.0 / 8;   /* запас — не больше 1 с потока */
     bool pending = false;                        /* были изменения, но кадр пропущен по битрейту */
     long long bytes = 0;
-    double t_cap = 0, t_conv = 0, t_enc = 0, t_gen = 0, max_frame = 0;
+    double t_cap = 0, t_conv = 0, t_enc = 0, t_gen = 0, max_frame = 0, t_enc_only = 0;
     size_t mem_peak = 0; double mem_sum = 0;
     double cpu0 = thread_cpu_ms(), w0 = qpc_ms(), next = w0;
     for (int f = 0; f < nf; f++) {
@@ -448,7 +493,7 @@ int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
         double k0 = qpc_ms();
         bool cov = st.pw && win_covered(st.pw, &wr);
         t_cov += qpc_ms() - k0;
-        int ch = grab_convert(&st, &t_cap, &t_conv);
+        int ch = grab_convert(&st, 0, 0, st.mb.mbw, st.mb.mbh, &t_cap, &t_conv);
         k0 = qpc_ms();
         if (st.pw && (cov || win_covered(st.pw, &wr))) blank++;
         t_cov += qpc_ms() - k0;
@@ -456,11 +501,30 @@ int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
         bucket += per_frame;
         if (bucket > cap) bucket = cap;
         if (ch || pending) {
-            if (bucket < 0) { dropped++; pending = true; }   /* поток впереди бюджета — этот кадр не кодируем */
+            if (bucket < (fast ? -2 * cap : 0)) { dropped++; pending = true; }   /* поток впереди бюджета — этот кадр не кодируем */
             else {
                 unsigned char *out; int n = 0;
                 rp.desired_frame_bytes = (int)(per_frame + bucket / 4);
-                if (!H264E_encode(enc, scr, &rp, &io, &out, &n)) { bytes += n; bucket -= n; }
+                if (fast) {                      /* как sh_main: постоянная цель, долг -> нижняя граница qp; IDR раз в 4 с */
+                    double debt = bucket < 0 ? -bucket / per_frame : 0;
+                    rp.qp_min = 18 + (debt > 33 ? 33 : (int)debt);
+                    rp.desired_frame_bytes = (int)per_frame;
+                    rp.frame_type = f % (fps * 4) == 0 ? H264E_FRAME_TYPE_KEY : H264E_FRAME_TYPE_DEFAULT;
+                }
+                bool allst = false;
+                if (fast && !noskip && rp.frame_type != H264E_FRAME_TYPE_KEY) { allst = shc_build_map(&st.mb); rp.mb_static = st.mb.map; rp.skip_frame = allst; }
+                else { rp.mb_static = NULL; rp.skip_frame = 0; }
+                if (pbuf) memcpy(pbuf, st.y, (size_t)ow * oh);
+                double ee0 = qpc_ms();
+                if (!H264E_encode(enc, scr, &rp, &io, &out, &n)) {
+                    bytes += n; bucket -= n;
+                    bool key = false;
+                    for (int i = 0; i + 3 < n && !key; i++) if (out[i] == 0 && out[i + 1] == 0 && out[i + 2] == 1 && (out[i + 3] & 31) == 5) key = true;
+                    keys += key;
+                    if (fast) shc_encoded(&st.mb, key);
+                    if (pbuf && !allst) { psum += psnr_y(pbuf, st.y, (size_t)ow * oh); pn++; }
+                }
+                t_enc_only += qpc_ms() - ee0;
                 coded++;
                 pending = false;
             }
@@ -475,7 +539,8 @@ int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
         mem_sum += (double)m;
         next += 1000.0 / fps;
         double now = qpc_ms();
-        if (next > now) Sleep((DWORD)(next - now));
+        if (fast) next = now;
+        else if (next > now) Sleep((DWORD)(next - now));
         else if (now - next > 1000.0) next = now;   /* сильно отстали — не догонять */
     }
     double wall = qpc_ms() - w0, cpu = thread_cpu_ms() - cpu0;
@@ -509,14 +574,17 @@ int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
     printf("  на кадр, мс: захват %.2f, конверсия %.2f, кодирование %.2f (на закодированный %.2f), худший кадр %.1f%s\n",
            t_cap / frames, t_conv / frames, t_enc / frames, coded ? t_enc / coded : 0.0, max_frame, scene ? "" : "");
     if (scene) printf("  (генерация синтетики %.2f мс/кадр — в замер не входит)\n", t_gen / frames);
+    if (fast) printf("  ST_FAST: PSNR Y %.2f дБ (%d кадров), ключевых %d, кодер %.2f мс/кадр, поток %.2f Мбит/с при 30 к/с\n", pn ? psum / pn : 0.0, pn, keys,
+                     coded ? t_enc_only / coded : 0.0, bytes * 8.0 / (frames / (double)fps) / 1e6);
     printf("  CPU потока %.1f%% одного ядра (%.0f мс за %.0f мс)\n", cpu * 100.0 / wall, cpu, wall);
     printf("  частная память: до %.2f МБ, после создания %.2f МБ, пик %.2f МБ, средняя %.2f МБ\n",
            mem0 / 1048576.0, mem_init / 1048576.0, mem_peak / 1048576.0, mem_sum / frames / 1048576.0);
     printf("  кодер: persist %.2f МБ, scratch %.2f МБ (выделено %.2f МБ%s); буфер YUV %.2f МБ (+отпечатки %.0f КБ), полоса %.2f МБ\n",
            szp / 1048576.0, szs / 1048576.0, (lazy ? lz_committed() : (size_t)szs) / 1048576.0, lazy ? ", по требованию" : "", ow * oh * 1.5 / 1048576.0, (ow / 16) * (oh / 16) * 4 / 1024.0, (double)st.bandw * st.bandh * st.bpp / 8 / 1048576.0);
     st_wipe(&st);
+    free(pbuf); free(st.ppix); st.ppix = NULL;
     if (lazy) lz_free(scr); else free(scr);
-    free(enc); free(st.xmap); free(st.y); free(st.mbsig); free(st.u); free(st.v);
+    free(enc); free(st.xmap); free(st.y); free(st.mb.sig); free(st.mb.age); free(st.mb.map); free(st.u); free(st.v);
     DeleteObject(st.bbm); DeleteDC(st.bdc);
     if (st.vdc) { DeleteObject(st.vbm); DeleteDC(st.vdc); }
     ReleaseDC(NULL, screen);
@@ -580,7 +648,7 @@ static void sh_finish(const char *why) {
     sh_unlock();
 }
 static int sh_band_rows = 1088;                   /* полоса: строк источника на один BitBlt (ST_BANDROWS — замер) */
-static int sh_speed = 8, sh_gop_ms = 4000, sh_nodrop = 1, sh_hrt = 1;   /* замер: ST_SPEED, ST_GOP, ST_NODROP, ST_HRT */                        /* замер (share_loop, ST_NOPW=1): окно только BitBlt, как при чёрном PrintWindow */
+static int sh_speed = 10, sh_gop_ms = 4000, sh_nodrop = 1, sh_hrt = 1;   /* замер: ST_SPEED, ST_GOP, ST_NODROP, ST_HRT */                        /* замер (share_loop, ST_NOPW=1): окно только BitBlt, как при чёрном PrintWindow */
 /* ======================= Звук трансляции (как в Discord) =======================
  * Окно — звук процесса окна и всех его дочерних; весь экран — весь звук системы, кроме нашего процесса (голоса
  * звонка в эфир не попадают, эха нет). WASAPI process loopback (Windows 10 2004+, ActivateAudioInterfaceAsync);
@@ -763,9 +831,11 @@ static void sh_fit(ST *st) {
     st->dx = ((st->ow - st->dw) / 2) & ~1; st->dy = ((st->oh - st->dh) / 2) & ~1;
     size_t n = (size_t)st->ow * st->oh;
     memset(st->y, 16, n); memset(st->u, 128, n / 4); memset(st->v, 128, n / 4);
-    memset(st->mbsig, 0, sizeof(uint32_t) * (size_t)(st->ow / 16) * (st->oh / 16));
+    shc_reset(&st->mb);
     for (int x = 0; x < st->dw; x++) st->xmap[x] = x * st->sw / st->dw;
+    st_xmap(st, st->dw);
     st->fit_w = st->sw; st->fit_h = st->sh;
+    st->refit = true;
 }
 static HGDIOBJ sh_bold;                          /* исходный 1x1 в DC полосы — вернуть перед DeleteObject */
 static void sh_band_free(ST *st) {               /* полоса экрана: затереть и освободить */
@@ -848,8 +918,22 @@ static struct {                                  /* замер (share_loop): в�
     double cap, conv, enc, enc_max, gap_max, late_max, key_bytes;
     int n, coded, keys, drop, drop_idr, gaps40, late5, np, pmax, frozen, nband, npw, rcov, rpost, rmove, roff;
     double pbytes;
+    double thr_cpu, thr_cyc, thr_wall;           /* поток трансляции целиком: CPU (мс), циклы, стена (мс) */
+    double psnr_sum, psnr_cyc; int psnr_n;                /* ST_PSNR: средний PSNR яркости закодированных кадров */
+    int nfull, nroi, nskipf, nskipenc;           /* такты: захват целиком / только область / без захвата; кадров из одних пропусков */
+    long long chsum;                             /* изменившихся блоков всего */
+    int nhi, nlo, nstill;                        /* такты 30 / 20 к/с / 10 Гц */
 } sh_stat;
-static bool sh_test_nopw;
+static bool sh_test_nopw, sh_test_psnr, sh_test_noroi, sh_test_noskip, sh_test_noadapt;
+static double thr_cycles(void) { ULONG64 c = 0; QueryThreadCycleTime(GetCurrentThread(), &c); return (double)c; }
+/* PSNR яркости: копия входа до кодирования против восстановленного кадра (кодер пишет его во вход) — только замер */
+static double psnr_y(const uint8_t *a, const uint8_t *b, size_t n) {
+    double se = 0;
+    for (size_t i = 0; i < n; i++) { int d = (int)a[i] - (int)b[i]; se += (double)(d * d); }
+    if (se <= 0) return 99.0;
+    double mse = se / (double)n;
+    return 10.0 * log10(255.0 * 255.0 / mse);
+}
 static DWORD WINAPI sh_main(LPVOID arg) {
     (void)arg;
     ST st;
@@ -857,6 +941,7 @@ static DWORD WINAPI sh_main(LPVOID arg) {
     /* физические точки: иначе при масштабе Windows 125-150% GetWindowRect и рамки DWM в разных единицах */
     SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);   /* игра грузит ядра: такт эфира не должен ждать */
+    double thr_c0 = thread_cpu_ms(), thr_y0 = thr_cycles(), thr_w0 = qpc_ms();   /* замер (share_loop) */
     HDC screen = GetDC(NULL);
     if (sh_hwnd && !IsWindow(sh_hwnd)) { ReleaseDC(NULL, screen); sh_finish("окно источника закрыто"); return 0; }
     st.pw = sh_hwnd;
@@ -871,15 +956,17 @@ static DWORD WINAPI sh_main(LPVOID arg) {
     size_t ysz = (size_t)st.ow * st.oh, csz = ysz / 4;
     st.y = vm_alloc(ysz);
     st.u = vm_alloc(csz); st.v = vm_alloc(csz);
-    st.mbsig = calloc((size_t)(st.ow / 16) * (st.oh / 16), sizeof(uint32_t));
+    st.mb.mbw = st.ow / 16; st.mb.mbh = st.oh / 16;
+    size_t nmb = (size_t)st.mb.mbw * st.mb.mbh;
+    st.mb.sig = calloc(nmb, sizeof(uint32_t)); st.mb.age = calloc(nmb, 1); st.mb.map = calloc(nmb, 1);
     if (st.y && st.u && st.v) { memset(st.y, 16, ysz); memset(st.u, 128, csz); memset(st.v, 128, csz); }   /* чёрный, не зелёный */
     H264E_create_param_t cp;
     memset(&cp, 0, sizeof cp);
-    cp.width = st.ow; cp.height = st.oh; cp.gop = fps * 2; cp.vbv_size_bytes = kbps_max * 1000 / 8;
+    cp.width = st.ow; cp.height = st.oh; cp.gop = fps * 8;   /* ключевые — только по таймеру sh_gop_ms и по PLI зрителя: два несогласованных источника давали IDR раз в ~2 с */ cp.vbv_size_bytes = kbps_max * 1000 / 8;
     int szp = 0, szs = 0;
     H264E_persist_t *enc = NULL;
     H264E_scratch_t *scr = NULL;
-    bool ok = st.xmap && st.y && st.u && st.v && st.mbsig && !H264E_sizeof(&cp, &szp, &szs);
+    bool ok = st.xmap && st.y && st.u && st.v && st.mb.sig && st.mb.age && st.mb.map && !H264E_sizeof(&cp, &szp, &szs);
     bool lazy = false;
     if (ok) {
         enc = vm_alloc((size_t)szp);
@@ -910,11 +997,21 @@ static DWORD WINAPI sh_main(LPVOID arg) {
         double last_idr = -1e9, last_out = -1e9;
         const char *why = "трансляция остановлена";
         memset(&sh_stat, 0, sizeof sh_stat);
+        uint8_t *psnr_buf = sh_test_psnr ? malloc(ysz) : NULL;   /* только замер ST_PSNR */
         double last_sent = 0;
+        double last_change = t0;                 /* когда в кадре последний раз что-то менялось */
+        /* темп и захват (share_conv.h): 30 к/с при движении, 20 при малом, 10 Гц при покое; целиком не реже 100 мс,
+         * между — только область изменений; блоки без изменений кодер не ищет, кадр без изменений — одни пропуски */
+        ShPace pace;
+        memset(&pace, 0, sizeof pace);
+        pace.force_full = true; pace.last_change = t0; pace.last_full = -1e9; pace.hi_until = t0 + 1000;
+        double tick_ms = 1000.0 / fps, last_chk = -1e9;
+        int enc_since_key = 0;
         while (!sh_stop) {
             { double lt = qpc_ms() - next; if (frames && lt > sh_stat.late_max) sh_stat.late_max = lt; if (frames && lt > 5) sh_stat.late5++; }
             double c_cap = tcap, c_conv = tconv;
-            if (frames % fps == 0) {             /* раз в секунду: окно живо? экран не заблокирован? */
+            if (qpc_ms() - last_chk >= 1000) {   /* раз в секунду: окно живо? экран не заблокирован? */
+                last_chk = qpc_ms();
                 if (sh_hwnd && !IsWindow(sh_hwnd)) { why = "окно источника закрыто"; break; }
                 if (desk_locked()) { why = "экран заблокирован"; break; }
             }
@@ -927,8 +1024,16 @@ static DWORD WINAPI sh_main(LPVOID arg) {
             int ch = 0;
             double tq = qpc_ms();
             st.from_dib = false;
+            /* что снимать: ключевой кадр скоро (по времени, по запросу, по GOP кодера) — целиком */
+            bool key_due = sh_want_idr || tq - last_idr >= sh_gop_ms - 2 * tick_ms || enc_since_key >= cp.gop - 1;
+            int kind = sh_test_noroi ? 2 : shc_grab_kind(&pace, &st.mb, tq, key_due);
+            int gx0 = 0, gy0 = 0, gx1 = st.mb.mbw, gy1 = st.mb.mbh;
+            if (kind == 1) {                     /* область изменений прошлого захвата и 2 блока вокруг */
+                gx0 = st.mb.cx0 - 2 < 0 ? 0 : st.mb.cx0 - 2; gy0 = st.mb.cy0 - 2 < 0 ? 0 : st.mb.cy0 - 2;
+                gx1 = st.mb.cx1 + 2 > st.mb.mbw ? st.mb.mbw : st.mb.cx1 + 2; gy1 = st.mb.cy1 + 2 > st.mb.mbh ? st.mb.mbh : st.mb.cy1 + 2;
+            }
             if (st.pw && IsIconic(st.pw)) { blank = mini = true; pwhy = "окно свёрнуто"; }
-            else if (st.pw) {
+            else if (st.pw && kind) {
                 RECT ext;
                 bool onscr = win_rect(st.pw, &wr) && SUCCEEDED(DwmGetWindowAttribute(st.pw, DWMWA_EXTENDED_FRAME_BOUNDS, &ext, sizeof ext))
                              && EqualRect(&ext, &wr), done = false;
@@ -937,14 +1042,14 @@ static DWORD WINAPI sh_main(LPVOID arg) {
                     st.sw = wr.right - wr.left; st.sh = wr.bottom - wr.top;
                     sh_fit(&st);
                     if (!sh_band(&st, screen)) { why = "не хватило памяти под новый размер окна"; break; }
-                    ch = grab_convert(&st, &tcap, &tconv);
+                    ch = grab_convert(&st, gx0, gy0, gx1, gy1, &tcap, &tconv);
                     RECT w2;                     /* после захвата: перекрыли или сдвинули — в кадре может быть чужое */
                     if (win_covered(st.pw, &wr)) { pwhy = "перекрыто во время захвата"; sh_stat.rpost++; }
                     else if (!win_rect(st.pw, &w2) || !EqualRect(&w2, &wr)) { pwhy = "окно сдвинули во время захвата"; sh_stat.rmove++; }
                     else { done = true; last_band = tq; sh_stat.nband++; }
                 } else { pwhy = onscr ? "перекрыто" : "окно за краем экрана"; if (onscr) sh_stat.rcov++; else sh_stat.roff++; }
                 if (!done && !sh_test_nopw && tq >= pw_retry) {
-                    if (sh_printwin(&st, screen, &tcap)) { ch = grab_convert(&st, &tcap, &tconv); done = true; pwhy = ""; last_pw = tq; sh_stat.npw++; }
+                    if (sh_printwin(&st, screen, &tcap)) { ch = grab_convert(&st, gx0, gy0, gx1, gy1, &tcap, &tconv); done = true; pwhy = ""; last_pw = tq; sh_stat.npw++; }
                     else pw_retry = tq + 2000;   /* велико / чёрное / не вышло: снова через 2 с */
                 }
                 if (!done) blank = true;
@@ -952,11 +1057,16 @@ static DWORD WINAPI sh_main(LPVOID arg) {
                  * перекрывают, то открывают) */
                 if (st.pbm && tq - last_pw > 3000) sh_pdib_free(&st);
                 if (st.bbm && tq - last_band > 3000) sh_band_free(&st);
-            } else {                             /* весь экран */
+            } else if (!st.pw && kind) {         /* весь экран */
                 sh_fit(&st);
                 if (!sh_band(&st, screen)) { why = "не хватило памяти под полосу захвата"; break; }
-                ch = grab_convert(&st, &tcap, &tconv);
-            }
+                ch = grab_convert(&st, gx0, gy0, gx1, gy1, &tcap, &tconv);
+            }                                    /* kind 0: ничего не менялось — не снимаем, повтор кадра ниже */
+            if (kind == 2) sh_stat.nfull++; else if (kind) sh_stat.nroi++; else sh_stat.nskipf++;
+            sh_stat.chsum += ch;
+            /* пауза или кадр с чужим содержимым: следующий захват — только целиком (иначе чужое останется вне области) */
+            if (blank) pace.force_full = true;
+            else if (kind == 2) { pace.force_full = false; pace.last_full = tq; }
             if (blank && st.pw) {                /* кто перекрыл — для индикатора */
                 char nm[64] = "";
                 if (strstr(pwhy, "перекрыто")) { if (cov_last && IsWindow(cov_last)) cover_name(cov_last, nm, sizeof nm); }
@@ -975,8 +1085,10 @@ static DWORD WINAPI sh_main(LPVOID arg) {
             if (blank && pwhy[0] && strstr(pwhy, "во время захвата")) tainted = true;
             else if (!blank) tainted = false;
             if (blank) { ch = 0; pending = false; }
+            if (ch) last_change = tq;
             if (blank != paused) { paused = blank; sh_lock(); sh.paused = blank; sh_unlock(); }
-            bucket += per;
+            double fr = tick_ms * fps / 1000.0;  /* доля «кадра 30 к/с» в этом такте: бюджет по времени, не по кадрам */
+            bucket += per * fr;
             if (bucket > cap) bucket = cap;
             double tn = qpc_ms();
             bool want_key = InterlockedExchange(&sh_want_idr, 0) || tn - last_idr >= sh_gop_ms;
@@ -995,13 +1107,22 @@ static DWORD WINAPI sh_main(LPVOID arg) {
                 else {
                     unsigned char *out; int n = 0;
                     /* постоянная цель: у minih264 своя модель буфера (учитывает и ключевые); качели цели сбивали её */
-                    rp.desired_frame_bytes = sh_nodrop ? (int)per : (int)(per + bucket / 4);
+                    rp.desired_frame_bytes = sh_nodrop ? (int)(per * fr) : (int)(per * fr + bucket / 4);
+                    /* блоки без изменений — без поиска; кадр целиком без изменений — одни пропуски (почти даром) */
+                    bool allst = !want_key && !sh_test_noskip && shc_build_map(&st.mb);
+                    rp.mb_static = want_key || sh_test_noskip ? NULL : st.mb.map;
+                    rp.skip_frame = allst;
+                    if (allst) sh_stat.nskipenc++;
                     rp.frame_type = want_key ? H264E_FRAME_TYPE_KEY : H264E_FRAME_TYPE_DEFAULT;
                     if (want_key) last_idr = tn;
                     last_out = tn;
+                    double py0 = psnr_buf ? thr_cycles() : 0;
+                    if (psnr_buf) memcpy(psnr_buf, st.y, ysz);
+                    if (psnr_buf) sh_stat.psnr_cyc += thr_cycles() - py0;
                     double e0 = qpc_ms();
                     int er = H264E_encode(enc, scr, &rp, &io, &out, &n);
                     double e1 = qpc_ms();
+                    if (psnr_buf && !er && !allst) { py0 = thr_cycles(); sh_stat.psnr_sum += psnr_y(psnr_buf, st.y, ysz); sh_stat.psnr_n++; sh_stat.psnr_cyc += thr_cycles() - py0; }
                     sh_stat.enc += e1 - e0; sh_stat.coded++;
                     if (e1 - e0 > sh_stat.enc_max) sh_stat.enc_max = e1 - e0;
                     if (last_sent > 0 && !blank) { double g = e1 - last_sent; if (g > sh_stat.gap_max) sh_stat.gap_max = g; if (g > 40) sh_stat.gaps40++; }
@@ -1013,6 +1134,8 @@ static DWORD WINAPI sh_main(LPVOID arg) {
                         bool key = false;            /* ключевой кадр: есть NAL IDR (тип 5) */
                         for (int i = 0; i + 3 < n && !key; i++)
                             if (out[i] == 0 && out[i + 1] == 0 && out[i + 2] == 1 && (out[i + 3] & 31) == 5) key = true;
+                        shc_encoded(&st.mb, key);
+                        enc_since_key = key ? 0 : enc_since_key + 1;
                         golive_frame(out, (size_t)n, key, (u32)((qpc_ms() - t0) * 90.0));
                     }
                     sent++; win_sent++;
@@ -1031,7 +1154,13 @@ static DWORD WINAPI sh_main(LPVOID arg) {
                 sh_unlock();
                 win0 = now; win_sent = 0; win_bytes = 0;
             }
-            next += 1000.0 / fps;
+            /* картинка стоит больше 1 с — захват 10 Гц (столько же, сколько повтор кадра для зрителей), первое
+             * изменение — снова fps: экран без движения не стоит 30 захватов BitBlt в секунду */
+            int pmb = ((st.dx + st.dw + 15) / 16 - st.dx / 16) * ((st.dy + st.dh + 15) / 16 - st.dy / 16);
+            tick_ms = shc_tick(&pace, tq, ch, pmb > 0 ? pmb : 1, pending || blank);
+            if (sh_test_noadapt) tick_ms = !pending && !blank && now - last_change > 1000.0 ? 100.0 : 1000.0 / fps;   /* как было */
+            if (tick_ms < 40) sh_stat.nhi++; else if (tick_ms < 80) sh_stat.nlo++; else sh_stat.nstill++;
+            next += tick_ms;
             now = qpc_ms();
             if (next > now) {
                 LARGE_INTEGER due;
@@ -1041,6 +1170,12 @@ static DWORD WINAPI sh_main(LPVOID arg) {
             } else if (now - next > 1000.0) next = now;
         }
         if (tmr) CloseHandle(tmr);
+        if (psnr_buf) { SecureZeroMemory(psnr_buf, ysz); free(psnr_buf); }
+        sh_stat.thr_cpu = thread_cpu_ms() - thr_c0; sh_stat.thr_cyc = thr_cycles() - thr_y0; sh_stat.thr_wall = qpc_ms() - thr_w0;
+        if (sh_stat.thr_cyc > sh_stat.psnr_cyc && sh_stat.psnr_cyc > 0) {   /* замер качества — не в счёт CPU */
+            sh_stat.thr_cpu *= 1.0 - sh_stat.psnr_cyc / sh_stat.thr_cyc;
+            sh_stat.thr_cyc -= sh_stat.psnr_cyc;
+        }
         InterlockedExchange(&sa_stop, 1);        /* звук: до конца, его буферы затираются в его потоке */
         if (sa_thr) { WaitForSingleObject(sa_thr, INFINITE); CloseHandle(sa_thr); }
         sh_finish(sh_stop ? "трансляция остановлена" : why);
@@ -1053,7 +1188,7 @@ static DWORD WINAPI sh_main(LPVOID arg) {
     else { if (scr) SecureZeroMemory(scr, (size_t)szs); free(scr); }   /* в scratch кодера — куски кадра */
     vm_free(enc, (size_t)szp); vm_free(st.y, ysz); vm_free(st.u, csz); vm_free(st.v, csz);
     st.y = st.u = st.v = NULL;
-    free(st.xmap); free(st.mbsig);
+    free(st.xmap); free(st.mb.sig); free(st.mb.age); free(st.mb.map);
     if (st.bdc) DeleteDC(st.bdc);
     if (st.pdc) DeleteDC(st.pdc);
     sh_bold = NULL;
@@ -1103,6 +1238,122 @@ void share_state(ShareState *out) {
     *out = sh;
     sh_unlock();
 }
+/* Стенд share_loop: тестовое окно со сценой (ST_SCENE=static|scroll|video), рисуется в главном потоке ~30 к/с —
+ * одинаковая картинка для замеров «до/после». ST_SRC=win — источник это окно (1280x900), иначе весь экран, а окно
+ * поверх всего на весь основной монитор. Только замер: ничего не пишется на диск. */
+static struct { HWND w; HDC dc; HBITMAP bm; HGDIOBJ old; uint32_t *pix; int w_, h_, scene, f; double next, per; HANDLE tmr; } tw;
+static LRESULT CALLBACK tw_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    if (m == WM_ERASEBKGND) return 1;
+    if (m == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC d = BeginPaint(h, &ps);
+        if (tw.dc) BitBlt(d, 0, 0, tw.w_, tw.h_, tw.dc, 0, 0, SRCCOPY);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    return DefWindowProcW(h, m, wp, lp);
+}
+static void tw_text(int y0, int line) {          /* строка «документа»: тёмный текст на светлом */
+    char t[200];
+    int n = snprintf(t, sizeof t, "%05d  The quick brown fox jumps over the lazy dog; %d  съешь же ещё этих мягких булок, да выпей чаю  %08x", line, line * 7, (unsigned)line * 2654435761u);
+    RECT r = { 0, y0, tw.w_, y0 + 20 };
+    FillRect(tw.dc, &r, (HBRUSH)GetStockObject(WHITE_BRUSH));
+    SetBkMode(tw.dc, TRANSPARENT);
+    TextOutA(tw.dc, 24 + (line % 5) * 8, y0 + 2, t, n);
+}
+static void tw_step(void) {
+    int f = tw.f++;
+    if (tw.scene == 0 && f) return;              /* статика: нарисовали один раз */
+    if (tw.scene == 3 && f) {                    /* набор текста: буква каждые 4 кадра 30 Гц, 3 с набора — 2 с пауза */
+        if (f % 150 >= 90 || f % 4) return;
+        int k = f / 4, line = 30 + (k / 60) % 20, col = k % 60;
+        char c = (char)('a' + k % 26);
+        SetBkMode(tw.dc, OPAQUE);
+        TextOutA(tw.dc, 24 + col * 8, line * 20 + 2, &c, 1);
+    } else if (tw.scene == 0 || tw.scene == 3 || (tw.scene == 1 && !f)) {
+        RECT r = { 0, 0, tw.w_, tw.h_ };
+        FillRect(tw.dc, &r, (HBRUSH)GetStockObject(WHITE_BRUSH));
+        for (int y = 0, l = 0; y < tw.h_; y += 20, l++) tw_text(y, l);
+    } else if (tw.scene == 1) {                  /* прокрутка: 3 точки за кадр 60 Гц, внизу новые строки */
+        BitBlt(tw.dc, 0, 0, tw.w_, tw.h_ - 3, tw.dc, 0, 3, SRCCOPY);
+        int sc = f * 3, line = (tw.h_ + sc) / 20;
+        tw_text(tw.h_ - ((tw.h_ + sc) % 20) - 20, line);
+        tw_text(tw.h_ - ((tw.h_ + sc) % 20), line + 1);
+    } else {                                     /* «видео»: движение и шум по всему окну */
+        GdiFlush();
+        uint32_t seed = (uint32_t)f * 2654435761u;
+        for (int yy = 0; yy < tw.h_; yy++) {
+            uint32_t *row = tw.pix + (size_t)yy * tw.w_;
+            for (int xx = 0; xx < tw.w_; xx++) {
+                seed = seed * 1103515245u + 12345u;
+                int r = (xx + f * 6) & 255, g = (yy + f * 3) & 255, b = ((xx ^ yy) + f * 4) & 255, nse = (int)(seed >> 28);
+                row[xx] = (uint32_t)(((r + nse) & 255) << 16 | ((g + nse) & 255) << 8 | ((b + nse) & 255));
+            }
+        }
+    }
+    HDC d = GetDC(tw.w);
+    BitBlt(d, 0, 0, tw.w_, tw.h_, tw.dc, 0, 0, SRCCOPY);
+    ReleaseDC(tw.w, d);
+}
+static HWND tw_open(const char *scene, bool win) {
+    tw.scene = !strcmp(scene, "scroll") ? 1 : !strcmp(scene, "video") ? 2 : !strcmp(scene, "type") ? 3 : 0;
+    int sw = GetSystemMetrics(SM_CXSCREEN), shh = GetSystemMetrics(SM_CYSCREEN);
+    tw.w_ = win ? 1280 : sw; tw.h_ = win ? 900 : shh;
+    if (tw.w_ > sw) tw.w_ = sw;
+    if (tw.h_ > shh) tw.h_ = shh;
+    WNDCLASSW wc;
+    memset(&wc, 0, sizeof wc);
+    wc.lpfnWndProc = tw_proc; wc.hInstance = GetModuleHandleW(NULL); wc.lpszClassName = L"AstraStTest";
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    RegisterClassW(&wc);
+    tw.w = CreateWindowExW(WS_EX_TOPMOST, L"AstraStTest", L"Astra ST test", WS_POPUP, win ? (sw - tw.w_) / 2 : 0, win ? (shh - tw.h_) / 2 : 0,
+                           tw.w_, tw.h_, NULL, NULL, wc.hInstance, NULL);
+    if (!tw.w) return NULL;
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biCompression = BI_RGB;
+    bi.bmiHeader.biWidth = tw.w_; bi.bmiHeader.biHeight = -tw.h_; bi.bmiHeader.biBitCount = 32;
+    HDC sd = GetDC(NULL);
+    tw.dc = CreateCompatibleDC(sd);
+    ReleaseDC(NULL, sd);
+    tw.bm = CreateDIBSection(tw.dc, &bi, DIB_RGB_COLORS, (void **)&tw.pix, NULL, 0);
+    tw.old = SelectObject(tw.dc, tw.bm);
+    SelectObject(tw.dc, GetStockObject(ANSI_FIXED_FONT));
+    tw.f = 0;
+    tw_step();
+    ShowWindow(tw.w, SW_SHOW);
+    SetForegroundWindow(tw.w);                   /* источник «окно» снимается BitBlt, только если он на переднем плане */
+    UpdateWindow(tw.w);
+    tw.next = qpc_ms();
+    tw.per = tw.scene == 1 ? 1000.0 / 60 : 1000.0 / 30;
+    tw.tmr = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    return tw.w;
+}
+static void tw_close(void) {
+    if (!tw.w) return;
+    DestroyWindow(tw.w);
+    SelectObject(tw.dc, tw.old); DeleteObject(tw.bm); DeleteDC(tw.dc);
+    if (tw.tmr) CloseHandle(tw.tmr);
+    memset(&tw, 0, sizeof tw);
+}
+/* ждать ms, перерисовывая сцену ~30 к/с и разбирая сообщения окна */
+static void tw_pump(double ms) {
+    double end = qpc_ms() + ms;
+    for (;;) {
+        MSG m;
+        while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageW(&m); }
+        double now = qpc_ms();
+        if (now >= end) return;
+        if (tw.w && now >= tw.next) { tw_step(); tw.next += tw.per; if (now - tw.next > 200) tw.next = now; }
+        double wake = tw.w && tw.next < end ? tw.next : end;
+        wake -= qpc_ms();
+        if (wake <= 0) continue;
+        LARGE_INTEGER due;
+        due.QuadPart = -(LONGLONG)(wake * 10000.0);
+        if (tw.tmr && SetWaitableTimer(tw.tmr, &due, 0, NULL, NULL, FALSE)) MsgWaitForMultipleObjects(1, &tw.tmr, FALSE, 1000, QS_ALLINPUT);
+        else MsgWaitForMultipleObjects(0, NULL, FALSE, (DWORD)wake + 1, QS_ALLINPUT);
+    }
+}
 /* Замер для тестировщика: N раз подряд старт/стоп движка трансляции (весь экран), память после каждой остановки. */
 static int share_loop(int n, int mode, int secs) {
     size_t m0 = priv_bytes();
@@ -1114,10 +1365,27 @@ static int share_loop(int n, int mode, int secs) {
     if (getenv("ST_GOP")) sh_gop_ms = atoi(getenv("ST_GOP"));
     if (getenv("ST_NODROP")) sh_nodrop = atoi(getenv("ST_NODROP"));
     if (getenv("ST_HRT")) sh_hrt = atoi(getenv("ST_HRT"));
+    sh_test_psnr = getenv("ST_PSNR") != NULL;
+    sh_test_noroi = getenv("ST_NOROI") != NULL;      /* замер по пунктам: без области изменений (всегда целиком) */
+    sh_test_noskip = getenv("ST_NOSKIP") != NULL;    /* без пропуска блоков без изменений в кодере */
+    sh_test_noadapt = getenv("ST_NOADAPT") != NULL;  /* темп как раньше: 30 к/с, 10 Гц при покое > 1 с */
+    sh_test_scalar = getenv("ST_SCALAR") != NULL;    /* скалярная конверсия */
+    bool twin = getenv("ST_SRC") && !strcmp(getenv("ST_SRC"), "win");
+    if (getenv("ST_SCENE")) {
+        SetProcessDPIAware();
+        if (!tw_open(getenv("ST_SCENE"), twin)) { printf("  тестовое окно не создано\n"); return 1; }
+        tw_pump(500);
+    }
+    m0 = priv_bytes();                           /* без DIB тестового окна */
     for (int i = 1; i <= n; i++) {
         char err[128] = "";
         uintptr_t src = 0;                       /* ST_WINDOW — источник «окно» по части заголовка */
-        if (getenv("ST_WINDOW")) {
+        if (tw.w && twin) {                      /* своё тестовое окно: в списке источников его нет — добавить вручную */
+            sh_known[0].h = tw.w; GetWindowThreadProcessId(tw.w, &sh_known[0].pid);
+            GetWindowTextW(tw.w, sh_known[0].t, 80);
+            sh_nknown = 1;
+            src = (uintptr_t)tw.w;
+        } else if (getenv("ST_WINDOW")) {
             char t[24][80]; uintptr_t id[24];
             int nw = share_windows(t, id, 24);
             for (int k = 0; k < nw && !src; k++) if (strstr(t[k], getenv("ST_WINDOW"))) src = id[k];
@@ -1130,7 +1398,7 @@ static int share_loop(int n, int mode, int secs) {
         double w0 = qpc_ms();
         int npause = 0, nmini = 0, ndib = 0, nt = 0;
         for (int t = 0; t < secs * 10; t++) {
-            Sleep(100);
+            tw_pump(100);
             size_t m = priv_bytes();
             if (m > mpk) mpk = m;
             ShareState q;
@@ -1157,6 +1425,11 @@ static int share_loop(int n, int mode, int secs) {
         printf("  %d: пик памяти %.2f МБ (%+.0f КБ к началу), CPU процесса %.1f%% ядра; доля времени: PrintWindow %d%%, пауза %d%%, свёрнуто %d%%\n", i,
                mpk / 1048576.0, ((double)mpk - (double)m0) / 1024.0, cpu * 100.0 / (qpc_ms() - w0), ndib * 100 / (nt ? nt : 1), npause * 100 / (nt ? nt : 1), nmini * 100 / (nt ? nt : 1));
         share_stop();
+        if (sh_stat.thr_wall > 0) printf("  %d: поток трансляции: CPU %.1f%% ядра (%.2f мс/кадр), циклов %.1f М/с (%.2f М/кадр); тактов %d: захват целиком %d, по области %d, без захвата %d; кадров из пропусков %d; изменений %.0f блоков/такт; PSNR Y %.2f дБ (%d кадров); в среднем %.1f к/с, %.2f Мбит/с; такты 30/20/10 Гц: %d/%d/%d\n", i,
+               sh_stat.thr_cpu * 100.0 / sh_stat.thr_wall, sh_stat.thr_cpu / (sh_stat.n ? sh_stat.n : 1), sh_stat.thr_cyc / sh_stat.thr_wall / 1000.0,
+               sh_stat.thr_cyc / 1e6 / (sh_stat.n ? sh_stat.n : 1), sh_stat.n, sh_stat.nfull, sh_stat.nroi, sh_stat.nskipf, sh_stat.nskipenc,
+               (double)sh_stat.chsum / (sh_stat.n ? sh_stat.n : 1), sh_stat.psnr_n ? sh_stat.psnr_sum / sh_stat.psnr_n : 0.0, sh_stat.psnr_n,
+               ss.sent * 1000.0 / sh_stat.thr_wall, ss.bytes * 8.0 / sh_stat.thr_wall / 1000.0, sh_stat.nhi, sh_stat.nlo, sh_stat.nstill);
         if (sa_stat.wall_ms > 0) printf("  %d: звук [%s%s]: кадров Opus %lld (тишина %lld), пик %d, %.0f кбит/с, CPU потока звука %.1f%% ядра\n", i, ss.audio ? "идёт" : "нет", ss.audio_err,
                sa_stat.frames, sa_stat.silent, sa_stat.peak, sa_stat.bytes * 8.0 / sa_stat.wall_ms, sa_stat.cpu_ms * 100.0 / sa_stat.wall_ms);
         ShareState s2;
@@ -1165,6 +1438,7 @@ static int share_loop(int n, int mode, int secs) {
                ss.sent, mr / 1048576.0, priv_bytes() / 1048576.0, ((double)priv_bytes() - (double)m0) / 1024.0, s2.active ? " — НЕ ОСТАНОВЛЕН" : "");
         if (!ss.active || s2.active) bad++;
     }
+    tw_close();
     printf("share_loop: %d циклов, сбоев %d\n", n, bad);
     return bad ? 1 : 0;
 }
@@ -1178,13 +1452,82 @@ int main(int argc, char **argv) {
 #endif
 #else
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "share.h"
-int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
-    (void)secs; (void)ow; (void)oh; (void)fps; (void)scene; (void)kbps;
-    printf("streamtest: пока только Windows (Linux — XShmGetImage полосами, позже)\n");
-    return 1;
+/* Linux: стенд ST_SHARELOOP=N --streamtest=СЕКУНД — N запусков настоящего share_start (X11: весь экран; Wayland —
+ * через портал и PipeWire) по СЕКУНД, без Discord и сети: Go Live не запущен, кадры кодера только считаются
+ * (golive_frame). ST_NOAUDIO=1 — без звука; ST_STOPCHOOSE=МС — стоп, пока открыто окно выбора. Вывод — только в консоль и только по этому явному ключу; файлов нет. */
+static double st_clock(clockid_t id) { struct timespec t; clock_gettime(id, &t); return (double)t.tv_sec * 1e3 + (double)t.tv_nsec / 1e6; }
+static long st_status_kb(const char *key) {     /* поле /proc/self/status в КБ (чтение; -1 — нет) */
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) return -1;
+    char ln[128];
+    long v = -1;
+    size_t k = strlen(key);
+    while (fgets(ln, sizeof ln, f)) if (!strncmp(ln, key, k) && ln[k] == ':') { v = atol(ln + k + 1); break; }
+    fclose(f);
+    return v;
 }
-/* share_* для Linux — в share_x11.c (захват X11) */
+static void st_sleep_ms(int ms) { struct timespec t = { ms / 1000, (long)(ms % 1000) * 1000000L }; nanosleep(&t, NULL); }
+int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
+    (void)oh; (void)fps; (void)scene; (void)kbps;
+    const char *lp = getenv("ST_SHARELOOP");
+    if (!lp) { printf("streamtest: на Linux — только стенд ST_SHARELOOP=N (настоящий захват, без Discord)\n"); return 1; }
+    int n = atoi(lp) < 1 ? 1 : atoi(lp), bad = 0;
+    if (getenv("ST_NOAUDIO")) share_audio_enable(false);
+    printf("share_loop (Linux, %s): %d циклов по %d с\n", share_wayland() ? "Wayland, портал + PipeWire" : "X11, весь экран", n, secs);
+    for (int i = 1; i <= n; i++) {
+        char err[160] = "";
+        long a0 = st_status_kb("RssAnon");
+        if (!share_start(ow < 1280 ? 1 : 0, 0, err, sizeof err)) { printf("  %d: старт не удался: %s\n", i, err); bad++; continue; }
+        ShareState q;
+        double c0 = st_clock(CLOCK_MONOTONIC);
+        /* ST_STOPCHOOSE=МС: share_stop, пока открыто системное окно выбора, — проверка, что ожидание прерывается */
+        int stop_ms = getenv("ST_STOPCHOOSE") ? atoi(getenv("ST_STOPCHOOSE")) : 0;
+        do { st_sleep_ms(50); share_state(&q); } while (q.active && q.choosing && st_clock(CLOCK_MONOTONIC) - c0 < (stop_ms > 0 ? stop_ms : 120000));
+        if (stop_ms > 0) {
+            bool was = q.active && q.choosing;
+            double t1 = st_clock(CLOCK_MONOTONIC);
+            share_stop();
+            share_state(&q);
+            printf("  %d: стоп во время выбора (окно было открыто: %s): share_stop за %.0f мс, идёт: %s, причина: %s\n", i, was ? "да" : "нет",
+                   st_clock(CLOCK_MONOTONIC) - t1, q.active ? "ДА" : "нет", q.reason);
+            if (!was || q.active) bad++;
+            continue;
+        }
+        if (!q.active || q.choosing) { printf("  %d: выбор источника: %s\n", i, q.active ? "нет ответа 120 с" : q.reason); share_stop(); bad++; continue; }
+        printf("  %d: источник выбран за %.0f мс\n", i, st_clock(CLOCK_MONOTONIC) - c0);
+        double w0 = st_clock(CLOCK_MONOTONIC), p0 = st_clock(CLOCK_PROCESS_CPUTIME_ID);
+        long rss_pk = 0, anon_pk = 0, shm_pk = 0;
+        int npause = 0, nt = 0;
+        for (int t = 0; t < secs * 10 && q.active; t++) {
+            st_sleep_ms(100);
+            share_state(&q);
+            long r = st_status_kb("VmRSS"), an = st_status_kb("RssAnon"), sm = st_status_kb("RssShmem");
+            if (r > rss_pk) rss_pk = r;
+            if (an > anon_pk) anon_pk = an;
+            if (sm > shm_pk) shm_pk = sm;
+            nt++; npause += q.paused;
+            if (t % 10 == 9) printf("  %d: %3d с: %.1f к/с, %.2f Мбит/с%s%s\n", i, (t + 1) / 10, q.fps_out, q.mbps, q.paused ? ", пауза: " : "", q.paused ? q.pause_why : "");
+        }
+        double cpu = st_clock(CLOCK_PROCESS_CPUTIME_ID) - p0, wall = st_clock(CLOCK_MONOTONIC) - w0;
+        ShareState ss;
+        share_state(&ss);
+        printf("  %d: %dx%d, тактов %d, отправлено %d (%.2f МБ), пауза %d%% времени; CPU процесса %.1f%% ядра; VmRSS пик %ld КБ, RssAnon пик %ld КБ (%+ld к началу), RssShmem пик %ld КБ; звук: %s%s\n",
+               i, ss.w, ss.h, ss.frames, ss.sent, (double)ss.bytes / 1048576.0, npause * 100 / (nt ? nt : 1), cpu * 100.0 / (wall > 0 ? wall : 1),
+               rss_pk, anon_pk, anon_pk - a0, shm_pk, ss.audio ? "идёт" : "нет ", ss.audio_err);
+        if (!ss.active) printf("  %d: остановилась сама: %s\n", i, ss.reason);
+        share_stop();
+        ShareState s2;
+        share_state(&s2);
+        printf("  %d: после стопа RssAnon %ld КБ%s\n", i, st_status_kb("RssAnon"), s2.active ? " — НЕ ОСТАНОВЛЕН" : "");
+        if (!ss.active || s2.active) bad++;
+    }
+    printf("share_loop: %d циклов, сбоев %d\n", n, bad);
+    return bad ? 1 : 0;
+}
+/* share_* для Linux — в share_x11.c (захват X11; Wayland — portal_wl.c + share_pw.c) */
 #endif
 #endif /* ASTRA_VIDEO */

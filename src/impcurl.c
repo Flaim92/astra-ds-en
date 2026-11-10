@@ -23,6 +23,7 @@ bool impcurl_verbose;                               /* --imptest: печатат
 #ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
+#include <zlib.h>
 
 #define IMPCURL_RCDATA_ID 10
 
@@ -54,9 +55,28 @@ static bool extract_and_load(void) {
     const void *data = g ? LockResource(g) : NULL;
     if (!data || !sz) { DBG("LoadResource/LockResource пусто (sz=%lu)", sz); return false; }
     DBG("ресурс найден, %lu байт", sz);
+    /* ресурс — gzip (build.sh): распаковать в кучу на время записи файла. Размер — из хвоста gzip (ISIZE). */
+    if (sz < 18) return false;
+    const unsigned char *gz = data;
+    uLong full = (uLong)gz[sz - 4] | (uLong)gz[sz - 3] << 8 | (uLong)gz[sz - 2] << 16 | (uLong)gz[sz - 1] << 24;
+    if (full < 4096 || full > (64u << 20)) return false;
+    unsigned char *dll = malloc(full);
+    if (!dll) return false;
+    z_stream zs;
+    memset(&zs, 0, sizeof zs);
+    bool zok = inflateInit2(&zs, 16 + MAX_WBITS) == Z_OK;
+    if (zok) {
+        zs.next_in = (Bytef *)gz; zs.avail_in = sz;
+        zs.next_out = dll; zs.avail_out = (uInt)full;
+        zok = inflate(&zs, Z_FINISH) == Z_STREAM_END && zs.total_out == full;
+        inflateEnd(&zs);
+    }
+    if (!zok) { free(dll); DBG("распаковка DLL не удалась"); return false; }
+    data = dll;
+    sz = (DWORD)full;
 
     wchar_t base[MAX_PATH];
-    if (!GetTempPathW(MAX_PATH, base)) { DBG("GetTempPath failed %lu", GetLastError()); return false; }
+    if (!GetTempPathW(MAX_PATH, base)) { DBG("GetTempPath failed %lu", GetLastError()); free(dll); return false; }
     sweep_old(base);                                 /* убрать остатки прошлых запусков */
     /* случайная часть имени: 8 hex от QueryPerformanceCounter */
     LARGE_INTEGER c;
@@ -67,13 +87,14 @@ static bool extract_and_load(void) {
     /* Шаг 1: записать DLL и ЗАКРЫТЬ ручку — иначе LoadLibrary не смапит (sharing violation). */
     HANDLE wf = CreateFileW(DLL_PATH, GENERIC_WRITE, FILE_SHARE_READ, NULL,
                             CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, NULL);
-    if (wf == INVALID_HANDLE_VALUE) { DBG("CreateFile(write) failed %lu", GetLastError()); return false; }
+    if (wf == INVALID_HANDLE_VALUE) { DBG("CreateFile(write) failed %lu", GetLastError()); free(dll); return false; }
     DWORD w = 0;
     if (!WriteFile(wf, data, sz, &w, NULL) || w != sz) {
         DBG("WriteFile failed %lu (w=%lu)", GetLastError(), w);
-        CloseHandle(wf); DeleteFileW(DLL_PATH); return false;
+        CloseHandle(wf); DeleteFileW(DLL_PATH); free(dll); return false;
     }
     CloseHandle(wf);
+    free(dll);
 
     /* Шаг 2: загрузить. */
     DLL_H = LoadLibraryExW(DLL_PATH, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
@@ -178,7 +199,8 @@ const ImpCurl *impcurl_vt(void) {
     if (VT.global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) { DBG("global_init != OK"); unload(); return NULL; }
     DBG("global_init ок, вктабл готов");
     ready = true;
-    atexit(impcurl_shutdown);                        /* распакованный файл удалить при выходе */
+    static bool reg;                                 /* после выгрузки (login_finish) DLL может грузиться снова */
+    if (!reg) { reg = true; atexit(impcurl_shutdown); }   /* распакованный файл удалить при выходе */
     return &VT;
 }
 
@@ -202,6 +224,17 @@ int impcurl_selftest(void) {
         return 1;
     }
     printf("impcurl: DLL загружена, функции найдены\n");
+    {   /* IMPTEST_LOAD=1: только выгрузка и повторная загрузка (как после входа и при повторном входе), без сети */
+        const char *lo = getenv("IMPTEST_LOAD");
+        if (lo && !strcmp(lo, "1")) {
+            impcurl_shutdown();
+            const ImpCurl *v2 = impcurl_vt();
+            bool again = v2 && v2->easy_init;
+            impcurl_shutdown();
+            printf("impcurl: выгрузка и повторная загрузка: %s\n", again ? "ок" : "НЕ ВЫШЛО");
+            return again ? 0 : 1;
+        }
+    }
     CURL *e = v->easy_init();
     if (!e) { printf("impcurl: easy_init() == NULL\n"); return 1; }
     v->easy_setopt(e, CURLOPT_IMPERSONATE, "chrome152");

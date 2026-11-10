@@ -8,6 +8,11 @@
 #include <string.h>
 #include "mc.h"
 #include "demo_en.h"
+#ifdef ASTRA_VIDEO
+#define DEMO_STREAM ",\"self_stream\":true"    /* Video: в «ОБЩИЙ» двое транслируют (снимки панели просмотра) */
+#else
+#define DEMO_STREAM ""
+#endif
 
 /* ---------- i18n п.4: английский демо-набор ----------
  * Демо-данные написаны по-русски; при английском интерфейсе JSON-строки демо подменяются целиком по таблице
@@ -122,8 +127,8 @@ static const char READY[] =
     "{\"id\":\"3016\",\"type\":2,\"name\":\"Учёба\",\"position\":5,\"parent_id\":\"3010\"},"
     "{\"id\":\"3017\",\"type\":2,\"name\":\"Тихая\",\"position\":6,\"parent_id\":\"3010\"},"
     "{\"id\":\"3018\",\"type\":2,\"name\":\"Отдых\",\"position\":7,\"parent_id\":\"3010\",\"last_message_id\":\"9993\"}],"
-    "\"voice_states\":[{\"user_id\":\"1006\",\"channel_id\":\"3011\",\"self_mute\":false,\"self_deaf\":false},"
-    "{\"user_id\":\"1002\",\"channel_id\":\"3011\",\"self_mute\":true,\"self_deaf\":false}]},"
+    "\"voice_states\":[{\"user_id\":\"1006\",\"channel_id\":\"3011\",\"self_mute\":false,\"self_deaf\":false" DEMO_STREAM "},"
+    "{\"user_id\":\"1002\",\"channel_id\":\"3011\",\"self_mute\":true,\"self_deaf\":false" DEMO_STREAM "}]},"
     "{\"id\":\"2100\",\"properties\":{\"name\":\"Другой сервер\",\"owner_id\":\"1002\",\"icon\":\"1123456789abcdef0123456789abcdef\"},"
     "\"roles\":[{\"id\":\"2100\",\"permissions\":\"3263553\"}],"
     "\"channels\":[{\"id\":\"3100\",\"type\":0,\"name\":\"чат\",\"position\":0,\"last_message_id\":\"9200\"}]},"

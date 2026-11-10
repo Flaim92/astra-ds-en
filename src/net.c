@@ -1443,8 +1443,9 @@ static void inflate_frame(void) {
         else handle_payload(G.text.p, G.text.len);
     }
     /* После READY (мегабайты) буферы не держим на пике. */
-    if (G.frame.cap > (1u << 20)) buf_free(&G.frame);
-    if (G.text.cap > (1u << 20)) buf_free(&G.text);
+    /* после крупного пакета (READY, список участников) буферы не держим: порог 64 КБ (было 1 МБ — до 2 МБ навсегда) */
+    if (G.frame.cap > (64u << 10)) buf_free(&G.frame);
+    if (G.text.cap > (64u << 10)) buf_free(&G.text);
 }
 
 void gw_service(void) {
@@ -1516,14 +1517,24 @@ void gw_subscribe(u64 guild, u64 channel) {
     gw_send(b);
 }
 
+#ifdef ASTRA_VIDEO
+extern bool g_gw_self_video;                    /* voice_cam.c: камера включена */
+#endif
 void gw_voice_state(u64 guild, u64 channel, bool mute, bool deaf) {
     if (G.st != GW_LIVE) return;
     char g[32], c[32], b[256];
     if (guild) snprintf(g, sizeof g, "\"%llu\"", (unsigned long long)guild); else snprintf(g, sizeof g, "null");
     if (channel) snprintf(c, sizeof c, "\"%llu\"", (unsigned long long)channel); else snprintf(c, sizeof c, "null");
+#ifdef ASTRA_VIDEO
+    bool video = channel && g_gw_self_video;
+    snprintf(b, sizeof b,
+        "{\"op\":4,\"d\":{\"guild_id\":%s,\"channel_id\":%s,\"self_mute\":%s,\"self_deaf\":%s,\"self_video\":%s,\"flags\":2}}",
+        g, c, mute ? "true" : "false", deaf ? "true" : "false", video ? "true" : "false");
+#else
     snprintf(b, sizeof b,
         "{\"op\":4,\"d\":{\"guild_id\":%s,\"channel_id\":%s,\"self_mute\":%s,\"self_deaf\":%s,\"self_video\":false,\"flags\":2}}",
         g, c, mute ? "true" : "false", deaf ? "true" : "false");
+#endif
     gw_send(b);
 }
 

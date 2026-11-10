@@ -18,6 +18,8 @@
 #ifdef ASTRA_VIDEO
 #include "golive.h"
 #include "share.h"
+#include "cam.h"
+static void cam_main_chores(void);              /* voice_cam.c */
 #define VS_PT_H264 105                           /* трансляция: H264 и его RTX — нумерация официального клиента */
 #define VS_PT_RTX 106                            /* (AV1 101/102, H265 103/104, H264 105/106, VP8 107/108) */
 #endif                               /* SOCKS5 UDP для VLESS: static, отдельно не компилируется */
@@ -99,8 +101,13 @@ void voice_diag(char *host, size_t n, int *port, int *curl_rc, int *ws_close) {
 #ifdef ASTRA_VIDEO
 static atomic_uint vs_ops[40];                  /* трансляция: сколько пришло сообщений шлюза по номеру op (livetest) */
 #endif
+#ifdef ASTRA_VIDEO
+static _Thread_local bool t_watch;              /* этот поток — зритель чужой трансляции */
+#include <stdarg.h>
+#endif
 static void status_set(VoicePhase ph, const char *err) {
 #ifdef ASTRA_VIDEO
+    if (t_watch) { golive_wstatus((int)ph, err); return; }
     if (t_stream) { golive_vstatus((int)ph, err); return; }
 #endif
     mutex_lock(V.mu);
@@ -115,6 +122,10 @@ static void voice_rejoin(void);
 /* Служебные дела главного потока по сигналам голосового (голосовой поток не трогает net.c и vless.c). */
 static void voice_main_chores(void) {
     if (atomic_exchange(&V.vl_fail, false)) vless_report_failure(ui_tr("голос"));
+#ifdef ASTRA_VIDEO
+    cam_main_chores();                           /* self_video на основном шлюзе */
+    if (V.st.phase == VS_IDLE || V.st.phase == VS_FAILED) cam_on_voice_end();   /* звонка нет — камера выключается */
+#endif
     /* голосовой поток упал: сообщаем Discord о выходе, иначе для других мы «висим» в канале */
     if (atomic_exchange(&V.need_leave, false) && !O.demo) gw_voice_state(V.st.guild_id, 0, false, false);
     if (O.demo || V.st.phase == VS_IDLE) return;
@@ -281,14 +292,37 @@ typedef struct {
     int last_curl;                               /* код curl последней неудачной попытки WebSocket (диагностика) */
 #ifdef ASTRA_VIDEO
     bool stream;                                 /* соединение трансляции экрана (voice_stream.c) */
+    bool watch;                                  /* соединение зрителя чужой трансляции (stream тоже true) */
+    u32 wvssrc; u64 wuser;                       /* зритель: видео-SSRC и автор трансляции (op 12) */
+    u64 wauthor;                                 /* зритель: автор из ключа потока — чужие op 12 мимо */
+    bool wwide;                                  /* зритель: в op 1 — широкий набор кодеков (после отката) */
+    struct WVid *wv;                             /* зритель: видео (сборка, DAVE, декодер) — voice_stream.c */
     u32 vssrc, vrtx, vts;
     u16 vseq;
     long long vsent, vbytes, vdave_ok, vdave_fail, vpli, vnack, vrtx_sent;
     u16 vrtx_seq;
     i64 next_sr;
+    /* камера в основном соединении (voice_cam.c) */
+    int cam_gen;                                 /* какое состояние камеры уже объявлено op 12 */
+    bool cam_op12;                               /* op 12 с включённой камерой отправлен */
+    bool vcodec_ok;                              /* op 4/14: видеокодек сессии — H264 (иначе камера не уходит) */
+    void *chist;                                 /* история своего видео для RTX */
+    i64 cam_next_rx;
 #endif
 } VW;
-#define VW_WSBUF 65536
+#define VW_WSBUF 16384                          /* приём кусками: сообщение больше — склеивается в w->in (было 64 КБ на соединение) */
+#ifdef ASTRA_VIDEO
+static void wv_ratchet(VW *w);                   /* voice_stream.c: ключ DAVE автора -> дешифратор видео */
+static void wv_pass(VW *w, bool on);             /* переходный режим дешифратора видео */
+/* voice_cam.c: камера в основном соединении */
+static void vrx(VW *w, const unsigned char *b, int k);
+static void cam_tick(VW *w);
+static void cam_vw_end(VW *w);
+static void crx_op12(VW *w, const cJSON *d);
+static void crx_remove_user(VW *w, u64 user);
+static void crx_ratchet_all(VW *w);
+static void crx_pass(VW *w, bool on);
+#endif
 
 static void vw_error(VW *w, const char *msg) {
     status_set(VS_FAILED, msg);
@@ -390,7 +424,13 @@ static void dave_set_ratchet(VW *w, Src *s) {
     DAVEKeyRatchetHandle r = daveSessionGetKeyRatchet(w->dave, u);
     if (r) { daveDecryptorTransitionToKeyRatchet(s->dd, r); daveKeyRatchetDestroy(r); }
 }
-static void dave_apply_receive(VW *w) { for (int i = 0; i < w->nsrc; i++) dave_set_ratchet(w, &w->src[i]); }
+static void dave_apply_receive(VW *w) {
+    for (int i = 0; i < w->nsrc; i++) dave_set_ratchet(w, &w->src[i]);
+#ifdef ASTRA_VIDEO
+    if (w->watch) wv_ratchet(w);
+    if (!w->stream) crx_ratchet_all(w);         /* камеры участников */
+#endif
+}
 static void dave_execute(VW *w) {
     w->dave_ver = w->dave_pending;
     if (w->dave_ver == 0) { w->dave_on = false; w->dave_ready = false; return; }
@@ -405,7 +445,7 @@ static void dave_execute(VW *w) {
         if (w->stream) {
             daveEncryptorAssignSsrcToCodec(w->denc, w->vssrc, DAVE_CODEC_H264);
             daveEncryptorAssignSsrcToCodec(w->denc, w->ssrc, DAVE_CODEC_OPUS);   /* звук трансляции (audio_ssrc) */
-        } else
+        } else if (w->vssrc) daveEncryptorAssignSsrcToCodec(w->denc, w->vssrc, DAVE_CODEC_H264);   /* своя камера */
 #endif
         daveEncryptorAssignSsrcToCodec(w->denc, w->ssrc, DAVE_CODEC_OPUS);
         daveKeyRatchetDestroy(r);
@@ -413,6 +453,10 @@ static void dave_execute(VW *w) {
     w->dave_on = daveEncryptorHasKeyRatchet(w->denc);
     /* вернулись на DAVE: переходный режим «без шифрования» у дешифраторов выключается */
     for (int i = 0; i < w->nsrc; i++) if (w->src[i].dd) daveDecryptorTransitionToPassthroughMode(w->src[i].dd, false);
+#ifdef ASTRA_VIDEO
+    if (w->watch) wv_pass(w, false);
+    if (!w->stream) crx_pass(w, false);
+#endif
 }
 static void send_tid(VW *w, int op, int tid) {
     char b[80];
@@ -902,7 +946,12 @@ static void vw_identify(VW *w) {
 #endif
     snprintf(b, sizeof b,
         "{\"op\":0,\"d\":{\"server_id\":\"%llu\",\"user_id\":\"%llu\",\"session_id\":\"%s\",\"token\":\"%s\","
-        "\"video\":false,\"max_dave_protocol_version\":%u}}",
+#ifdef ASTRA_VIDEO
+        "\"video\":true,\"streams\":[{\"type\":\"video\",\"rid\":\"100\",\"quality\":100}],"   /* камера (voice_cam.c) */
+#else
+        "\"video\":false,"
+#endif
+        "\"max_dave_protocol_version\":%u}}",
         (unsigned long long)w->server_id, (unsigned long long)w->me, w->session, w->token, (unsigned)daveMaxSupportedProtocolVersion());
     ws_text(w, b);
     wipe(b, sizeof b);
@@ -963,12 +1012,34 @@ static bool ip_discovery(VW *w, const char *ip, int port) {
                 char b[256];
                 snprintf(b, sizeof b, "{\"op\":1,\"d\":{\"protocol\":\"udp\",\"data\":{\"address\":\"%s\",\"port\":%d,\"mode\":\"aead_aes256_gcm_rtpsize\"}}}", myip, myport);
 #ifdef ASTRA_VIDEO
+                if (w->watch) {
+                    /* зритель: все кодеки, что умеем декодировать; приоритет (меньше — лучше) — по цене декодирования:
+                     * H264, VP8, H265, VP9, AV1. RTX = PT + 1. Кодировать (encode) зритель ничего не будет. */
+                    char c[1600];
+                    int k = snprintf(c, sizeof c, "{\"op\":1,\"d\":{\"protocol\":\"udp\",\"data\":{\"address\":\"%s\",\"port\":%d,\"mode\":\"aead_aes256_gcm_rtpsize\"},"
+                                     "\"codecs\":[{\"name\":\"opus\",\"type\":\"audio\",\"priority\":1000,\"payload_type\":120}", myip, myport);
+                    /* набор: по умолчанию H264 + VP8, после отката — все (golive.c watch_codecs_json, golive_fallback) */
+                    int m = k > 0 && k < (int)sizeof c ? watch_codecs_json(c + k, sizeof c - (size_t)k, w->wwide) : -1;
+                    if (m >= 0) k += m;
+                    if (m >= 0 && k < (int)sizeof c - 4) { memcpy(c + k, "]}}", 4); ws_text(w, c); }
+                    return true;
+                }
                 if (w->stream) {
                     char c[1200];
                     snprintf(c, sizeof c, "{\"op\":1,\"d\":{\"protocol\":\"udp\",\"data\":{\"address\":\"%s\",\"port\":%d,\"mode\":\"aead_aes256_gcm_rtpsize\"},"
                              "\"codecs\":[{\"name\":\"opus\",\"type\":\"audio\",\"priority\":1000,\"payload_type\":120},"
                              "{\"name\":\"H264\",\"type\":\"video\",\"priority\":1000,\"payload_type\":%d,\"rtx_payload_type\":%d,\"encode\":true,\"decode\":true}]}}",
                              myip, myport, VS_PT_H264, VS_PT_RTX);
+                    ws_text(w, c);
+                    return true;
+                }
+                {   /* основное соединение: камера — H264 (кодируем и принимаем), VP8 — только приём */
+                    char c[1200];
+                    snprintf(c, sizeof c, "{\"op\":1,\"d\":{\"protocol\":\"udp\",\"data\":{\"address\":\"%s\",\"port\":%d,\"mode\":\"aead_aes256_gcm_rtpsize\"},"
+                             "\"codecs\":[{\"name\":\"opus\",\"type\":\"audio\",\"priority\":1000,\"payload_type\":120},"
+                             "{\"name\":\"H264\",\"type\":\"video\",\"priority\":1000,\"payload_type\":%d,\"rtx_payload_type\":%d,\"encode\":true,\"decode\":true},"
+                             "{\"name\":\"VP8\",\"type\":\"video\",\"priority\":2000,\"payload_type\":%d,\"rtx_payload_type\":%d,\"encode\":false,\"decode\":true}]}}",
+                             myip, myport, VS_PT_H264, VS_PT_RTX, vc_pt(VC_VP8), vc_pt(VC_VP8) + 1);
                     ws_text(w, c);
                     return true;
                 }
@@ -1019,7 +1090,7 @@ static void vw_text(VW *w, const char *text, size_t len) {
         if (w->udp >= 0) break;                  /* повторный READY: сокет уже есть */
         w->ssrc = (u32)jint(d, "ssrc", 0);
 #ifdef ASTRA_VIDEO
-        if (w->stream) {
+        {   /* трансляция и камера основного соединения: ssrc видео из streams[0] */
             const cJSON *s0 = cJSON_GetArrayItem(jget(d, "streams"), 0);
             w->vssrc = (u32)jint(s0, "ssrc", 0);
             w->vrtx = (u32)jint(s0, "rtx_ssrc", 0);
@@ -1042,9 +1113,15 @@ static void vw_text(VW *w, const char *text, size_t len) {
             vw_error(w, ui_tr("неверное описание сессии")); atomic_store(w->stopf, true); break;
         }
 #ifdef ASTRA_VIDEO
-        if (w->stream) {
+        if (w->watch) {                          /* зритель: любой из объявленных; кодек кадра — по PT пакета */
+            const char *vc = jstr(d, "video_codec");
+            if (vc && vc_of_name(vc) < 0) { vw_error(w, ui_tr("сервер трансляции выбрал неизвестный видеокодек")); atomic_store(w->stopf, true); break; }
+        } else if (w->stream) {
             const char *vc = jstr(d, "video_codec");
             if (vc && strcmp(vc, "H264")) { vw_error(w, ui_tr("сервер трансляции выбрал другой видеокодек")); atomic_store(w->stopf, true); break; }
+        } else {                                 /* звонок: камера уходит только в H264 (звук — в любом случае) */
+            const char *vc = jstr(d, "video_codec");
+            w->vcodec_ok = !vc || !strcmp(vc, "H264");
         }
 #endif
         int i = 0;
@@ -1055,6 +1132,10 @@ static void vw_text(VW *w, const char *text, size_t len) {
         if (dv > 0) { dave_init(w, dv); dave_send_kp(w); status_set(VS_DAVE, NULL); }
         else status_set(VS_CONNECTED, ui_tr("звонок без E2EE: микрофон не передаётся"));
 #ifdef ASTRA_VIDEO
+        if (w->watch) {                          /* зритель: своих потоков нет, просим присылать видео */
+            ws_text(w, "{\"op\":15,\"d\":{\"any\":100}}");
+            break;
+        }
         if (w->stream) {
             ShareState sh;
             share_state(&sh);
@@ -1094,11 +1175,46 @@ static void vw_text(VW *w, const char *text, size_t len) {
         break;
     }
     case 18: case 20: { u64 uid = jid(d, "user_id"); if (uid) dave_add_user(w, uid); break; }
-    case 13: { u64 uid = jid(d, "user_id"); if (uid) src_remove_user(w, uid); break; }
+#ifdef ASTRA_VIDEO
+    case 14: {                                   /* SESSION_UPDATE: кодек видео мог смениться (камера — только H264) */
+        const char *vc = jstr(d, "video_codec");
+        if (vc && !w->stream) w->vcodec_ok = !strcmp(vc, "H264");
+        break;
+    }
+    case 12: {                                   /* зритель: SSRC звука и видео автора трансляции */
+        if (!w->watch) { if (!w->stream) crx_op12(w, d); break; }   /* звонок: камеры участников */
+        u64 uid = jid(d, "user_id");
+        if (w->wauthor && uid && uid != w->wauthor) break;   /* не автор этой трансляции — его потоки не берём */
+        u32 a = (u32)jint(d, "audio_ssrc", 0), v = (u32)jint(d, "video_ssrc", 0);
+        if (!v) v = (u32)jint(cJSON_GetArrayItem(jget(d, "streams"), 0), "ssrc", 0);
+        if (uid) { dave_add_user(w, uid); if (w->wuser != uid) { w->wuser = uid; wv_ratchet(w); } }
+        if (uid && a) {
+            int i;
+            for (i = 0; i < w->nsmap && w->smap[i].ssrc != a; i++) {}
+            if (i == w->nsmap && w->nsmap < 64) w->nsmap++;
+            if (i < 64) { w->smap[i].ssrc = a; w->smap[i].user = uid; }
+            src_get(w, a, uid);
+        }
+        if (v) w->wvssrc = v;
+        break;
+    }
+#endif
+    case 13: {
+        u64 uid = jid(d, "user_id");
+        if (uid) src_remove_user(w, uid);
+#ifdef ASTRA_VIDEO
+        if (uid && !w->stream) crx_remove_user(w, uid);
+#endif
+        break;
+    }
     case 21: {
         int ver = (int)jint(d, "protocol_version", 1), tid = (int)jint(d, "transition_id", 0);
         w->dave_pending = (u16)(ver < 0 ? 0 : ver);
         if (ver == 0) for (int s = 0; s < w->nsrc; s++) if (w->src[s].dd) daveDecryptorTransitionToPassthroughMode(w->src[s].dd, true);
+#ifdef ASTRA_VIDEO
+        if (ver == 0 && w->watch) wv_pass(w, true);
+        if (ver == 0 && !w->stream) crx_pass(w, true);
+#endif
         if (tid == 0) dave_execute(w); else send_tid(w, 23, tid);
         break;
     }
@@ -1366,8 +1482,16 @@ void voice_stats(VoiceStats *out) {
     *out = V.stats;
     mutex_unlock(V.mu);
 }
+#ifdef ASTRA_VIDEO
+#define VRX vrx                                  /* видео и RTCP камеры — voice_cam.c, звук — on_rtp */
+#else
+#define VRX on_rtp
+#endif
 static int voice_thread(void *arg) {
     VW *w = arg;
+#ifdef ASTRA_VIDEO
+    w->vcodec_ok = true;
+#endif
     thread_audio_priority();
     plat_timer_hires(true);                     /* ревью 17: такт 20 мс без дрожи 15,6 мс; вернём при выходе */
     g_audio_busy = true;
@@ -1441,8 +1565,11 @@ static int voice_thread(void *arg) {
             sockwait_clear(w->udp_wait);
             unsigned char pk[2048];
             int k;
-            for (int g = 0; g < 128 && (k = vudp_recv(w, pk, sizeof pk)) >= 0; g++) if (k > 0) on_rtp(w, pk, k);
+            for (int g = 0; g < 128 && (k = vudp_recv(w, pk, sizeof pk)) >= 0; g++) if (k > 0) VRX(w, pk, k);
         }
+#ifdef ASTRA_VIDEO
+        cam_tick(w);                             /* своя камера (кадры, op 12) и видимость камер участников */
+#endif
         if (atomic_load(&V.stop)) break;
         if (w->ws_dead) { ws_lost(w); if (atomic_load(&V.stop)) break; }
         now = now_ms();
@@ -1495,7 +1622,7 @@ static int voice_thread(void *arg) {
         if (w->udp >= 0) {
             unsigned char pkt[2048];
             int k;
-            for (int g = 0; g < 128 && (k = vudp_recv(w, pkt, sizeof pkt)) >= 0; g++) if (k > 0) on_rtp(w, pkt, k);
+            for (int g = 0; g < 128 && (k = vudp_recv(w, pkt, sizeof pkt)) >= 0; g++) if (k > 0) VRX(w, pkt, k);
         }
         if (w->au && (audio_lost(w->au) || gen != atomic_load(&V.dev_gen))) {   /* отключили или выбрали другое */
             gen = atomic_load(&V.dev_gen);
@@ -1524,6 +1651,9 @@ static int voice_thread(void *arg) {
         publish(w);
     }
 out:
+#ifdef ASTRA_VIDEO
+    cam_vw_end(w);                               /* приём камер — до нуля; свою камеру гасит главный поток */
+#endif
     plat_timer_hires(false);
     g_audio_busy = false;
     for (int i = 0; i < w->nsrc; i++) src_free(&w->src[i]);
@@ -1663,6 +1793,9 @@ void voice_join(u64 guild_id, u64 channel_id) {
 }
 
 void voice_leave(void) {
+#ifdef ASTRA_VIDEO
+    cam_on_voice_end();                          /* камера — только в звонке */
+#endif
     if (V.st.phase == VS_IDLE) return;
     u64 g = V.st.guild_id;
     if (!O.demo) gw_voice_state(g, 0, false, false);
@@ -2144,14 +2277,16 @@ static bool vm_selftest(long *samples, double *rms) {
     u8 s1 = 19;
     vm_put_page(&ogg, &s1, 1, head, 19, 2);
     {   /* OpusTags на 10 000 байт (больше буфера пакета): не должен «съесть» первый звуковой пакет */
-        static u8 tags[10000];
+        enum { TAGS_N = 10000 };                 /* в куче: static держал бы 10 КБ частной памяти всегда */
+        u8 *tags = xcalloc(TAGS_N, 1);
         memcpy(tags, "OpusTags", 8);
         u8 segs[40];
         int ns = 0;
-        size_t left = sizeof tags;
+        size_t left = TAGS_N;
         while (left >= 255) { segs[ns++] = 255; left -= 255; }
         segs[ns++] = (u8)left;
-        vm_put_page(&ogg, segs, ns, tags, sizeof tags, 0);
+        vm_put_page(&ogg, segs, ns, tags, TAGS_N, 0);
+        free(tags);
     }
     /* 50 кадров по 20 мс в страницах по 10 пакетов */
     for (int pg = 0; pg < 5; pg++) {
@@ -2321,8 +2456,8 @@ static void cont_test(int *jumps, int *gaps, int *dev_empty, long *played) {
     opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1));
     opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(5));
     enum { NPK = 200 };                         /* 4 с */
-    static unsigned char pk[NPK][400];
-    static int pkn[NPK], at[NPK], order[NPK];
+    unsigned char (*pk)[400] = xcalloc(NPK, sizeof *pk);   /* в куче: только на время проверки */
+    int *pkn = xcalloc(NPK, sizeof *pkn), *at = xcalloc(NPK, sizeof *at), *order = xcalloc(NPK, sizeof *order);
     for (int p = 0; p < NPK; p++) {
         int16_t pcm[FRAME * 2];
         for (int i = 0; i < FRAME; i++) pcm[i * 2] = pcm[i * 2 + 1] = (int16_t)(8000 * sin(2 * 3.14159265358979 * 440 * (p * FRAME + i) / 48000.0));
@@ -2337,7 +2472,7 @@ static void cont_test(int *jumps, int *gaps, int *dev_empty, long *played) {
     s.dec = opus_decoder_create(48000, 2, &e);
     s.fifo = xmalloc(FIFO_FRAMES * 2 * sizeof(int16_t));
     s.pcm = xmalloc(5760 * 2 * sizeof(int16_t));
-    static int32_t acc[4800 * 2];
+    int32_t *acc = xcalloc(4800 * 2, sizeof *acc);
     int16_t *out = xmalloc((size_t)(48 * 5000) * sizeof(int16_t));
     long nout = 0, devq = 0;
     int ip = 0, t = 0;
@@ -2376,6 +2511,8 @@ static void cont_test(int *jumps, int *gaps, int *dev_empty, long *played) {
     free(s.fifo);
     free(s.pcm);
     free(out);
+    free(acc);
+    free(pk); free(pkn); free(at); free(order);
 }
 int voice_selftest(void (*check)(bool ok, const char *what)) {
     {
@@ -2397,11 +2534,11 @@ int voice_selftest(void (*check)(bool ok, const char *what)) {
         int16_t *fr = xcalloc(FRAME * 2, sizeof(int16_t));
         for (int i = 0; i < FRAME; i++) fr[i * 2] = fr[i * 2 + 1] = (int16_t)(8000 * sin(2 * 3.14159265358979 * 440 * i / 48000.0));
         for (int i = 0; i < 5; i++) fifo_push(&s, fr, FRAME);
-        static int32_t acc[4800 * 2];
+        int32_t *acc = xcalloc(4800 * 2, sizeof *acc);
         src_pull(&s, acc, FRAME * 2, 256);       /* играет */
         src_rx(&s, 100, NULL, -1, 0);            /* тишина: конец фразы */
         u32 u0 = s.st.underruns;
-        memset(acc, 0, sizeof acc);
+        memset(acc, 0, 4800 * 2 * sizeof *acc);
         src_pull(&s, acc, 4800, 256);            /* кольцо (60 мс) кончилось — PLC не нужен */
         bool m1 = s.st.underruns == u0 && !s.playing && s.quiet;
         src_rx(&s, 101, NULL, 0, 0);
@@ -2414,7 +2551,7 @@ int voice_selftest(void (*check)(bool ok, const char *what)) {
         fifo_push(&s, big, 5760);
         int moved = (s.rd - rd0 + FIFO_FRAMES) % FIFO_FRAMES;
         bool m2 = moved % FRAME == 0 && s.n <= FIFO_FRAMES && s.n == n0 + 5760 - moved && moved > 0;
-        free(big); free(fr); free(s.fifo); free(s.pcm);
+        free(big); free(fr); free(s.fifo); free(s.pcm); free(acc);
         opus_decoder_destroy(s.dec);
         char w[200];
         snprintf(w, sizeof w, "приём: после кадра тишины без PLC-хвоста; залп больше кольца — срез целыми кадрами (сдвиг %d)", moved);
@@ -2488,10 +2625,11 @@ int voice_selftest(void (*check)(bool ok, const char *what)) {
         check(ra < 1500 && rb > 6500, w);
     }
     {   /* №145: звуки — синтез без файлов, длительность и уровень */
-        static int16_t buf[48000 * 3];
+        int16_t *buf = xcalloc(48000 * 3, sizeof *buf);   /* в куче: 288 КБ только на время проверки */
         int n1 = sound_synth(SOUND_RING, buf, 48000 * 3), n2 = sound_synth(SOUND_JOIN, buf, 48000 * 3), n3 = sound_synth(SOUND_MSG, buf, 48000 * 3);
         int pk = 0;
         for (int i = 0; i < n3; i++) if (abs(buf[i]) > pk) pk = abs(buf[i]);
+        free(buf);
         sound_play(SOUND_JOIN);                   /* в selftest звук фиктивный — устройство не открывается */
         sound_stop();
         sounds_enable(false);
@@ -2641,4 +2779,5 @@ int voice_selftest(void (*check)(bool ok, const char *what)) {
 
 #ifdef ASTRA_VIDEO
 #include "voice_stream.c"                       /* соединение трансляции экрана: тот же код шлюза и DAVE, свой поток */
+#include "voice_cam.c"                          /* камера в основном соединении: отправка и приём */
 #endif

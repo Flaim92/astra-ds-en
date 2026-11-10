@@ -118,6 +118,8 @@ typedef struct {                                /* кто в каком голо
     u64 guild_id, channel_id, user_id;
     char *name;
     bool self_mute, self_deaf, mute, deaf;
+    bool stream;                                /* транслирует экран (self_stream) */
+    bool video;                                 /* включена камера (self_video) */
 } VoiceState;
 
 typedef struct { char *emoji; int count; bool me; } Reaction;
@@ -470,7 +472,7 @@ bool mod_voice_mute(u64 gid, u64 uid, bool mute, bool deaf, char *err, size_t er
 /* ---- Автообновление (update.c; SECURITY.md «Автообновление») ----
  * Проверка — при запуске не чаще раза в сутки (если включено; дата — в хранилище секретов) или по кнопке.
  * Загрузка и замена — только после явного «Обновить» (update_apply). Затем «Перезапустить» (update_restart). */
-#define ASTRA_VERSION "0.2.2"                   /* версия этой сборки: релиз поднимает её (обновление — только на строго большую) */
+#define ASTRA_VERSION "0.2.5"                   /* версия этой сборки: релиз поднимает её (обновление — только на строго большую) */
 enum { UP_IDLE, UP_CHECKING, UP_NONE, UP_AVAILABLE, UP_DOWNLOADING, UP_READY, UP_FAILED };
 typedef struct {
     int phase;                                  /* UP_* */

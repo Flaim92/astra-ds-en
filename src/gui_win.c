@@ -345,7 +345,71 @@ static void draw_layers(HDC dc, int y) {
         SelectObject(dc, f_norm);
     }
 }
+#ifdef ASTRA_VIDEO
+/* ---------- видео просмотра трансляции: кадр поверх клеток (gui_grid.c держит буфер) ---------- */
+bool gb_video_ok(void) { return hwnd != NULL; }
+bool gb_video_shown(void) { return hwnd && (hidden || (!IsIconic(hwnd) && IsWindowVisible(hwnd))); }   /* свёрнуто / в трее — нет */
+void *gb_vbuf_alloc(size_t n) { return malloc(n); }
+void gb_vbuf_free(void *p, size_t n) { (void)n; free(p); }
+void gb_cell_px(int *w, int *h) { *w = cw; *h = chh; }
+void gb_video_inval(int x, int y, int w, int h) {   /* InvalidateRect можно звать из любого потока */
+    if (!hwnd || hidden || w <= 0 || h <= 0) return;
+    RECT r = { x, y, x + w, y + h };
+    InvalidateRect(hwnd, &r, FALSE);
+}
+#define VID_RECTS 9                              /* трансляция + плитки камер (CAM_TILES) */
+static int vid_rects(RECT *r) {                 /* области с кадром — текст под ними не рисуется */
+    int n = 0;
+    GvPaint g, t[VID_RECTS - 1];
+    if (gvid_paint_lock(&g)) { r[n++] = (RECT){ g.x, g.y, g.x + g.w, g.y + g.h }; gvid_paint_unlock(); }
+    int k = gcam_paint_lock(t, VID_RECTS - 1);
+    for (int i = 0; i < k; i++) r[n++] = (RECT){ t[i].x, t[i].y, t[i].x + t[i].w, t[i].y + t[i].h };
+    gcam_paint_unlock();
+    return n;
+}
+static void vid_blit(HDC dc, const GvPaint *gp) {
+    GvPaint g = *gp;
+    int dw, dh;                                  /* вписать с пропорциями (увеличение — силами GDI) */
+    if ((long long)g.bw * g.h > (long long)g.bh * g.w) { dw = g.w; dh = (int)((long long)g.bh * g.w / g.bw); }
+    else { dh = g.h; dw = (int)((long long)g.bw * g.h / g.bh); }
+    int dx = g.x + (g.w - dw) / 2, dy = g.y + (g.h - dh) / 2;
+    RECT bars[4] = { { g.x, g.y, g.x + g.w, dy }, { g.x, dy + dh, g.x + g.w, g.y + g.h },
+                     { g.x, dy, dx, dy + dh }, { dx + dw, dy, g.x + g.w, dy + dh } };
+    for (int i = 0; i < 4; i++) if (bars[i].left < bars[i].right && bars[i].top < bars[i].bottom) fill(dc, &bars[i], 0);
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = g.bw;
+    bi.bmiHeader.biHeight = -g.bh;               /* сверху вниз */
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    SetStretchBltMode(dc, COLORONCOLOR);
+    StretchDIBits(dc, dx, dy, dw, dh, 0, 0, g.bw, g.bh, g.buf, &bi, DIB_RGB_COLORS, SRCCOPY);
+}
+static void vid_paint(HDC dc) {
+    GvPaint g, t[VID_RECTS - 1];
+    if (gvid_paint_lock(&g)) { vid_blit(dc, &g); gvid_paint_unlock(); }
+    int k = gcam_paint_lock(t, VID_RECTS - 1);  /* плитки камер */
+    for (int i = 0; i < k; i++) vid_blit(dc, &t[i]);
+    gcam_paint_unlock();
+}
+#endif
 static void paint(HDC dc, const RECT *rc, int cl_right) {
+#ifdef ASTRA_VIDEO
+    RECT vr[VID_RECTS];
+    int nv = vid_rects(vr);
+    bool vid = false;
+    for (int i = 0; i < nv; i++) {
+        RECT t;
+        if (!IntersectRect(&t, &vr[i], rc)) continue;   /* область перерисовки видео не задевает — как раньше */
+        vid = true;
+        if (rc->left >= vr[i].left && rc->top >= vr[i].top && rc->right <= vr[i].right && rc->bottom <= vr[i].bottom) {
+            vid_paint(dc);                       /* новый кадр: перерисовка целиком внутри видео — текст не трогаем */
+            return;
+        }
+    }
+    if (vid) for (int i = 0; i < nv; i++) ExcludeClipRect(dc, vr[i].left, vr[i].top, vr[i].right, vr[i].bottom);
+#endif
     SetBkMode(dc, OPAQUE);
     SetTextAlign(dc, TA_TOP | TA_LEFT | TA_NOUPDATECP);
     HGDIOBJ old = SelectObject(dc, f_norm);
@@ -358,6 +422,9 @@ static void paint(HDC dc, const RECT *rc, int cl_right) {
     RECT m2 = { rc->left, G.rows * chh, cl_right, rc->bottom };
     if (m2.top < m2.bottom) fill(dc, &m2, G.def_bg);
     SelectObject(dc, old);
+#ifdef ASTRA_VIDEO
+    if (vid) { SelectClipRgn(dc, NULL); vid_paint(dc); }
+#endif
 }
 
 void gb_flush(void) {

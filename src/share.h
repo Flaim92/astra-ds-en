@@ -11,6 +11,7 @@ typedef struct {
     bool minimized;                              /* окно-источник свёрнуто: поток идёт (повтор последнего кадра) */
     bool dib;                                    /* окно снимается PrintWindow (видно и под другими окнами) */
     bool audio;                                  /* звук транслируется (процесс окна / всё, кроме нас) */
+    bool choosing;                               /* Wayland: открыто системное окно выбора источника (эфир ещё не начат) */
     char audio_err[64];                          /* почему без звука (пусто — со звуком или ещё запускается) */
     int w, h, fps;                               /* размер кадра и целевые к/с */
     double fps_out, mbps;                        /* отправлено за последнюю секунду */
@@ -28,5 +29,8 @@ void share_request_idr(void);
 void share_audio_enable(bool on);                /* до share_start: «Транслировать звук» (по умолчанию вкл) */                   /* Go Live: следующий кадр — ключевой (SPS+PPS+IDR) */
 void share_self_excluded(bool ok);               /* term_capture_exclude сработал: свои окна — не перекрытие */
 void share_state(ShareState *out);
+#ifndef _WIN32
+bool share_wayland(void);                        /* сеанс Wayland: источник выбирается в системном окне (xdg-desktop-portal) */
+#endif
 #endif
 #endif

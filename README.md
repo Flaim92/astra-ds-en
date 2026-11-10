@@ -53,7 +53,7 @@ The official Discord app is a whole browser inside a program. For comparison:
 |---|---|---|---|
 | Discord (Electron) | usually 300-600 MB¹ | noticeably above zero | hundreds of MB |
 | [larperCord](https://github.com/RshaCuDeVidro/larperCord) (Zig, SDL3) | ~130 MB² | 0-0.4%² | ~14 MB |
-| **Astra DS** | **~2.9 MB**³ | **0%** | **~16 MB** |
+| **Astra DS** | **~2.9 MB**³ | **0%** | **~13 MB** |
 
 <sub>¹ Estimate from Task Manager, depends on how many servers you're in. Not measured side by side.
 ² From the larperCord README, not our measurement.
@@ -83,9 +83,14 @@ Against an inventory of 162 Discord screens and features, **86%** is done (84% n
 - **Comfort.** Zoom with Ctrl+= and Ctrl+-, full screen with Alt+Enter, resizable columns, notifications and a tray icon, focus mode, keyword alerts, word filter.
 - **Three modes.** A window with mouse support, a full-screen terminal mode (`--tui`) and a line-based IRC-like mode (`--cli`).
 
-**Screen sharing** is in a separate build, **Astra DS Video**: the whole screen or one window, 1280x720 at 30 frames per second. On Windows it includes the program's sound, on Linux (X11) it is picture only for now. The regular build has none of this code, so it stays just as light.
+**Video** is in a separate build, **Astra DS Video**. The regular build has none of this code, so it stays just as light.
 
-**Not included:** camera, animated GIFs, plugins.
+- **Screen sharing.** The whole screen or one window, 1280x720 at 30 frames per second. On Windows it includes the program's sound. On Linux it works on both X11 and Wayland (GNOME, KDE, sway and others, through the system source picker), picture only for now.
+- **Watching other people's streams** in voice channels and calls.
+- **Camera**: your own and other people's, as tiles or large (Alt+arrows, Alt+F). Turn it on with the `[]/` button, F12 or Alt+C.
+- **Eye hiding on your camera.** The program finds your face in every frame and covers the eyes with a block of noise and random characters. If no face is found or the program is not sure, others see the Astra DS logo instead of the frame, and your preview says "Face not found". On by default, turn it off with Alt+E or the checkbox in the Camera dialog. Everything runs on your computer; frames go nowhere except the call.
+
+**Not included:** animated GIFs, plugins.
 
 ## Privacy and security
 
@@ -135,7 +140,7 @@ Against an inventory of 162 Discord screens and features, **86%** is done (84% n
 
 ## Download
 
-Ready-made builds for Windows 10/11 and Linux are in [Releases](../../releases/latest): the regular one and Astra DS Video. On Windows it's a single exe with no installer. On Linux you need glibc 2.36+, `libasound2` and `libx11-6`. For the captcha window on Linux, install `libwebkit2gtk-4.1-0`. You can also build it yourself, see below.
+Ready-made builds for Windows 10/11 and Linux are in [Releases](../../releases/latest): the regular one and Astra DS Video. On Windows it's a single exe with no installer. On Linux you need glibc 2.36+, `libasound2` and `libx11-6`. For the captcha window on Linux, install `libwebkit2gtk-4.1-0`. Screen sharing on Wayland needs `xdg-desktop-portal` and PipeWire, which regular distributions already have. You can also build it yourself, see below.
 
 ## Useful flags
 

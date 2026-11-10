@@ -14,11 +14,41 @@
 #ifdef ASTRA_VIDEO
 #include "share.h"
 #include "golive.h"
-static ShareState SHS;                           /* снимок состояния трансляции (ui_tick) */
+#include "cam.h"
+static ShareState SHS;                          /* снимок состояния трансляции (ui_tick) */
 static int GL_phase, GL_prev;                    /* фаза Go Live для индикатора */
+static bool GL_wait;                             /* в эфире, но зрителей ещё нет */
+#ifdef ASTRA_VIDEO
+static GoWatchState WS;                          /* просмотр чужой трансляции: снимок для индикатора */
+/* панель просмотра: chat — скрыта (виден чат, просмотр идёт), full — на всё окно, ch/gd — где открыли
+ * (ушли в другой канал — панель прячется); su — кто транслирует в моём голосовом канале (кадр) */
+static struct { bool chat, full; int n, gd; u64 su[8], ch; u8 sk[8]; u64 cam; } WV;   /* sk: 0 трансляция, 1 камера; cam — смотрим камеру (не 0) */
+static u64 demo_watch;                           /* --demo: подставной просмотр (сети нет) */
+static CamState CS;                              /* своя камера (cam.h): снимок для индикатора (ui_tick) */
+/* Анонимизация своей камеры (anon.h): глаза под прямоугольником; лицо не найдено — собеседники видят значок
+ * Astra DS вместо кадра, у себя в предпросмотре — предупреждение (кадр рисует anon_preview_warning; ui.c — то же
+ * клетками под растром: в демо, в --tui и пока кадра нет). Только то,
+ * что уходит от вас; чужие камеры не трогаются. Флажок — anon_default()/anon_set_default(), действует сразу. */
+#ifdef ASTRA_ANON
+#include "anon.h"
+#else                                            /* сборка без src/anon.c: скрывать нечем — флажок и пометки молчат */
+enum { ANON_OFF, ANON_TRACKING, ANON_NOFACE };
+static bool anon_default(void) { return false; }
+static void anon_set_default(bool on) { (void)on; }
+static int anon_status(void) { return ANON_OFF; }
+#endif
+enum { CA_OFF, CA_EYES, CA_FULL };               /* в уходящем кадре: ничего не скрыто / глаза / лица нет — значок */
+static int cu_anon_st(void) {
+    if (!anon_default()) return CA_OFF;
+    if (O.demo) return now_ms() / 4000 % 4 == 3 ? CA_FULL : CA_EYES;   /* демо: иногда «лицо не найдено» */
+    return anon_status() == ANON_TRACKING ? CA_EYES : CA_FULL;   /* ещё нет кадров — тоже закрыто целиком (fail-closed) */
+}
+#endif
 static char GL_err[128];
 static bool sh_prev_streamer, sh_running;
 static u64 sh_ch;
+static u64 sh_gid;
+static bool sh_gl_wait;                          /* Wayland: ждём ответа системного окна выбора, Go Live ещё не начат */
 #endif
 
 bool g_quit;
@@ -109,7 +139,7 @@ enum {
     B_PING, B_PINS, B_INBOX, B_PRESENT, B_STATUS, B_CARD_BLOCK, B_CARD_ADD, B_NEWMSG,
     B_PINS_MORE, B_INBOX_T0, B_INBOX_T1, B_ACK_ALL, B_EP_X, B_EMOJI, B_CAP_GO, B_CAP_NO,
     B_ADDSRV, B_GMENU, B_GINVITE, B_ADDFRIEND, B_TXT_EXP, B_TXT_DL, B_STARTASK, B_RV_X, B_EPH_HIDE, B_EMBEDS, B_MRETRY, B_MDISCARD,
-    B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS, B_NS_OFF, B_NS_SPX, B_NS_RNN,
+    B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS, B_NS_OFF, B_NS_SPX, B_NS_RNN, B_WATCH, B_WATCH_STOP, B_WATCH_PICK, B_WATCH_FULL, B_WATCH_CHAT, B_WATCH_SHOW, B_CAM, B_CAM_PV, B_CAM_VIEW, B_CAM_TILE, B_ANON,
     B_SP_PREV, B_SP_NEXT
 };
 enum { MI_REPLY = 1, MI_EDIT, MI_DELETE, MI_REACT, MI_COPY,
@@ -122,9 +152,10 @@ enum { MI_REPLY = 1, MI_EDIT, MI_DELETE, MI_REACT, MI_COPY,
        MI_FORWARD, MI_REACTS,                                /* пакет А: переслать, кто поставил реакцию */
        MI_G_MUTE, MI_G_NOTIFY, MI_C_MUTE, MI_C_NOTIFY,       /* заглушить, уровень уведомлений */
        MI_THREAD, MI_T_JOIN, MI_GDM_ADD, MI_GDM_LEAVE, MI_FOCUS30, MI_FOCUS60, MI_FOCUS120, MI_FOCUSOFF, MI_C_VSTATUS, MI_STATUS_SET, MI_C_ARCH, MI_T_RENAME, MI_T_ARCH, MI_T_LOCK, MI_T_MEMB, MI_GDM_RENAME,                                 /* пакет Б: создать ветку; вступить/покинуть ветку */
-       MI_MRETRY, MI_MDISCARD };                             /* неотправленное: повторить, отменить */
-enum { MENU_MSG = 1, MENU_SET, MENU_FRIEND, MENU_STATUS, MENU_GUILD, MENU_CHAN };
-#define MENU_LEFT(k) ((k) == MENU_SET || (k) == MENU_STATUS || (k) == MENU_GUILD || (k) == MENU_CHAN)
+       MI_MRETRY, MI_MDISCARD,
+       MI_V_VOL, MI_V_UP, MI_V_DN, MI_V_MUTE, MI_V_PROF, MI_V_MOVE, MI_V_SMUTE, MI_V_MIC, MI_V_DEAF };   /* меню участника голосового канала */                             /* неотправленное: повторить, отменить */
+enum { MENU_MSG = 1, MENU_SET, MENU_FRIEND, MENU_STATUS, MENU_GUILD, MENU_CHAN, MENU_VMEM };
+#define MENU_LEFT(k) ((k) == MENU_SET || (k) == MENU_STATUS || (k) == MENU_GUILD || (k) == MENU_CHAN || (k) == MENU_VMEM)
 enum { RP_NONE, RP_PINS, RP_INBOX };
 /* как подсвечивать при наведении */
 enum { HV_BG, HV_ACC, HV_MSG, HV_RED, HV_UL, HV_PILL, HV_ICON };
@@ -132,15 +163,21 @@ typedef struct { short x, y, w, h; u8 act, sub, hv, tip; int arg; } Hit;
 /* подсказки словом при наведении на значки (Hit.tip) */
 enum { T_NONE, T_INVITE, T_EVENTS, T_BOOST, T_MIC, T_DEAF, T_SET, T_LEAVE, T_CAM, T_SCREEN, T_FX, T_SOUNDB,
        T_NOISE, T_ADDSRV, T_MEMBERS, T_HELP, T_CALL, T_GIFT, T_GIF, T_STICKER, T_EMOJI, T_HOME, T_ATTACH,
-       T_CHATX, T_SEARCH, T_E2EE, T_ADDDM, T_FRTAB, T_NITRO, T_VSTAT, T_CHSET, T_FIND, T_MORE, T_WRITE, T_MB_REACT, T_MB_REPLY, T_MB_EDIT, T_PING, T_PINS, T_INBOX, T_STATUS, T_NEWMSG, T_DATE };
+       T_CHATX, T_SEARCH, T_E2EE, T_ADDDM, T_FRTAB, T_NITRO, T_VSTAT, T_CHSET, T_FIND, T_MORE, T_WRITE, T_MB_REACT, T_MB_REPLY, T_MB_EDIT, T_PING, T_PINS, T_INBOX, T_STATUS, T_NEWMSG, T_DATE
+#ifdef ASTRA_VIDEO
+       , T_WSTOP, T_WFULL, T_WCHAT, T_WPICK, T_WSHOW, T_CAMPV, T_CAMOFF, T_CAMVIEW, T_ANON
+#endif
+       , T_END };
 #ifdef ASTRA_VIDEO
 #define TIP_SCREEN "Демонстрация экрана"     /* в Video-сборке работает (в обычной — «нет в Astra DS») */
+#define TIP_CAM "Камера (F12, Alt+C)"
 #else
 #define TIP_SCREEN "Демонстрация экрана: нет в Astra DS"
+#define TIP_CAM "Камера: только в Astra DS Video"
 #endif
 static const char *const TIPS[] = {
     "", "Пригласить: нет в Astra DS", "Мероприятия: нет в Astra DS", "Бусты сервера: нет в Astra DS",
-    "Микрофон (F5)", "Звук (F6)", "Настройки пользователя", "Отключиться (F7)", "Камера: нет в Astra DS",
+    "Микрофон (F5)", "Звук (F6)", "Настройки пользователя", "Отключиться (F7)", TIP_CAM,
     TIP_SCREEN, "Смена голоса (F11, Alt+V)", "Звуковая панель: нет в Astra DS",
     "Подавление шума: в настройках - Голос и видео", "Добавить сервер: нет в Astra DS", "Список участников",
     "Справка (F1)", "Позвонить (F4)", "Подарок: нет в Astra DS", "GIF: нет в Astra DS", "Стикеры: нет в Astra DS",
@@ -149,7 +186,13 @@ static const char *const TIPS[] = {
     "Добавить в друзья: нет в Astra DS", "Nitro: нет в Astra DS", "Статус канала: нет в Astra DS",
     "Настройки канала: нет в Astra DS", "Начать беседу с другом", "Ещё", "Написать", "Добавить реакцию", "Ответить", "Изменить", "Упоминать автора ответа",
     "Закреплённые сообщения", "Входящие (Ctrl+I)", "Сменить статус", "К первому непрочитанному", "",
+#ifdef ASTRA_VIDEO
+    "Выйти из просмотра", "Во весь экран и обратно (Alt+F, Esc)", "Показать чат, просмотр идёт (Alt+W)",
+    "Смотреть эту трансляцию (Alt+стрелки)", "Показать трансляцию (Alt+W)",
+    "Скрыть или показать себя", "Выключить камеру (F12, Alt+C)", "Смотреть камеру крупно (Alt+стрелки - соседняя)", "Скрывать глаза: вкл/выкл (Alt+E)",
+#endif
 };
+_Static_assert(sizeof TIPS / sizeof *TIPS == T_END, "TIPS и T_* разошлись");
 /* клетка кадра: символ, цвет текста (младшие 24 бита) + атрибуты (старший байт), цвет фона */
 typedef struct { u32 cp, fg, bg; } Cell;
 #define MAX_HITS 384                             /* 6 КБ; не хватило - лишние области просто не кликаются */
@@ -248,6 +291,7 @@ static struct {
     bool rp_full;                                /* правая панель занимает весь центр (узкое окно) */
     bool moving;                                 /* перестановка каналов (Alt+Up/Down) */
     u64 menu_cid;                                /* меню канала: какой канал */
+    u64 menu_vch;                                /* меню участника голоса (MENU_VMEM): его канал; кто — menu_uid */
     bool fr_seen;                                /* «Друзья» уже показаны с момента входа (выбор вкладки по умолчанию) */
     u64 fwd_msg, fwd_ch;                         /* «Переслать»: какое сообщение (Ctrl+K в режиме выбора) */
     u64 eph_hidden[8];                           /* скрытые «видно только вам» (кольцо) */
@@ -3330,6 +3374,10 @@ static const HelpItem HELP[] = {
     { NULL, "ГОЛОС И ЗВОНКИ" },
     { "F5 / F6 / F7", "микрофон, звук, отключиться (кнопки внизу слева; выключенное - красным с x)" },
     { "F8", "рация (с --ptt)" },
+#ifdef ASTRA_VIDEO
+    { "F12 / Alt+C", "камера вкл/выкл в звонке (кнопка []/ - с выбором камеры; щелчок по []/ КАМЕРА внизу - выключить)" },
+    { "Alt+E", "скрывать глаза на своей камере вкл/выкл (анонимизация; не уверен в лице - закрывается весь кадр)" },
+#endif
     { "F9 / F10", "порог активации голосом -/+ 3 дБ (и в меню настроек *)" },
     { "+ / -", "громкость участника голосового канала (в списке каналов)" },
     { "F4 / F2 / F3", "позвонить в ЛС ([позвонить]), принять входящий, отклонить" },
@@ -3497,6 +3545,13 @@ static void st_hint(int *x, int y, int *left, const char *s) {
 }
 /* Строка под полем ввода (клетки x0..x1-1): входящий звонок | «печатает...» | уведомление или подсказка. */
 static bool show_ram = true;                     /* №13: память в строке состояния (настройка «Производительность») */
+#ifdef ASTRA_VIDEO
+/* кодер: имя автора трансляции — как в списке голосового канала (ник на сервере из VoiceState), иначе глобальное */
+static const char *wv_uname(u64 uid) {
+    for (int i = 0; i < S.nvs; i++) if (S.vs[i].user_id == uid && S.vs[i].name && *S.vs[i].name) return S.vs[i].name;
+    return user_name(uid);
+}
+#endif
 static int draw_status(int x0, int x1, int y) {
     int x = x0, left = x1 - x0 - (x1 >= U.gw ? 1 : 0);
     bool ram = show_ram && left >= 40;           /* №13: место под память — справа, подсказки короче */
@@ -3504,7 +3559,9 @@ static int draw_status(int x0, int x1, int y) {
 #ifdef ASTRA_VIDEO
     if (sh_running) {                            /* постоянный индикатор эфира; щелчок — остановить */
         char lv[160];                            /* 96 не хватало: «окно свёрнуто - зрители видят последний кадр» обрезалось */
-        if (GL_phase == GL_FAILED) {
+        if (sh_gl_wait) {
+            snprintf(lv, sizeof lv, "%s", TR(" (o) ЭФИР: выбор источника в системном окне... "));
+        } else if (GL_phase == GL_FAILED) {
             char *e = san(GL_err, true);
             snprintf(lv, sizeof lv, TR(" (o) ЭФИР: ошибка - %s "), e);
             free(e);
@@ -3515,12 +3572,50 @@ static int draw_status(int x0, int x1, int y) {
             if (*c) snprintf(lv, sizeof lv, TR(" (o) ЭФИР: окно перекрыто (%s) - показан последний кадр "), c);
             else snprintf(lv, sizeof lv, TR(" (o) ЭФИР: %s - показан последний кадр "), SHS.pause_why[0] ? tr(SHS.pause_why) : TR("окно перекрыто"));
             free(c);
-        } else if (GL_phase != GL_LIVE) snprintf(lv, sizeof lv, "%s", TR(" (o) ЭФИР: подключение... "));
+        } else if (GL_phase != GL_LIVE) snprintf(lv, sizeof lv, "%s", GL_wait ? TR(" (o) ЭФИР: ждём зрителей ") : TR(" (o) ЭФИР: подключение... "));
         else if (SHS.audio) snprintf(lv, sizeof lv, TR(" (o) ЭФИР %dp %.0f к/с %.1f Мбит/с, со звуком "), SHS.h, SHS.fps_out, SHS.mbps);
         else snprintf(lv, sizeof lv, TR(" (o) ЭФИР %dp %.0f к/с %.1f Мбит/с "), SHS.h, SHS.fps_out, SHS.mbps);
         int xs = x;
         st_seg(&x, y, &left, lv, C_WHITE, AT_B, C_RED);
         hit_add(xs, y, x - xs, 1, A_BTN, B_SHARE, 0, HV_RED);
+        st_seg(&x, y, &left, "  ", C_MUTED, 0, 0);
+    }
+    if (CS.phase == CAM_STARTING || CS.phase == CAM_WAIT_E2EE || CS.phase == CAM_LIVE) {   /* своя камера; щелчок — выключить */
+        char lv[120];
+        if (CS.phase == CAM_STARTING) snprintf(lv, sizeof lv, "%s", TR(" []/ КАМЕРА: включение... "));
+        else if (CS.phase == CAM_WAIT_E2EE) snprintf(lv, sizeof lv, "%s", TR(" []/ КАМЕРА: ждём E2EE - пока видно только вам "));
+        else {
+            int an = cu_anon_st();
+            if (an == CA_FULL) snprintf(lv, sizeof lv, "%s", TR(" []/ КАМЕРА: лицо не найдено - собеседники видят значок "));
+            else if (an == CA_EYES) snprintf(lv, sizeof lv, TR(" []/ КАМЕРА %dp %.0f к/с, глаза скрыты "), CS.h, CS.fps_out);
+            else snprintf(lv, sizeof lv, TR(" []/ КАМЕРА %dp %.0f к/с "), CS.h, CS.fps_out);
+        }
+        int xs = x;
+        st_seg(&x, y, &left, lv, C_WHITE, AT_B, C_RED);
+        hit_add(xs, y, x - xs, 1, A_BTN, B_CAM, 0, HV_RED);
+        U.hit[U.nhit - 1].tip = T_CAMOFF;
+        st_seg(&x, y, &left, "  ", C_MUTED, 0, 0);
+    }
+    if (WV.cam) {                                /* крупный просмотр камеры; щелчок — выйти (панель скрыта — вернуть) */
+        char lv[160], *nm = san(wv_uname(WV.cam), true);
+        snprintf(lv, sizeof lv, TR(" [>] СМОТРЮ КАМЕРУ %s "), nm);
+        free(nm);
+        int xs = x;
+        st_seg(&x, y, &left, lv, C_WHITE, AT_B, C_ACC);
+        hit_add(xs, y, x - xs, 1, A_BTN, WV.chat ? B_WATCH_SHOW : B_WATCH_STOP, 0, HV_ACC);
+        U.hit[U.nhit - 1].tip = WV.chat ? T_WSHOW : T_WSTOP;
+        st_seg(&x, y, &left, "  ", C_MUTED, 0, 0);
+    }
+    if (WS.phase != GW_OFF) {                    /* просмотр чужой трансляции; щелчок — выйти */
+        char lv[200], *nm = san(wv_uname(WS.user), true);
+        if (WS.phase == GW_FAILED) { char *e = san(WS.err, true); snprintf(lv, sizeof lv, TR(" [>] %s: %s "), nm, e); free(e); }
+        else if (WS.phase != GW_LIVE) snprintf(lv, sizeof lv, TR(" [>] %s: подключение... "), nm);
+        else snprintf(lv, sizeof lv, TR(" [>] СМОТРЮ %s: звук %lld, видео %lld пак. "), nm, WS.apkts, WS.vpkts);
+        free(nm);
+        int xs = x;
+        st_seg(&x, y, &left, lv, C_WHITE, AT_B, C_ACC);
+        hit_add(xs, y, x - xs, 1, A_BTN, WV.chat ? B_WATCH_SHOW : B_WATCH_STOP, 0, HV_ACC);   /* панель скрыта — вернуть её */
+        U.hit[U.nhit - 1].tip = WV.chat ? T_WSHOW : T_WSTOP;
         st_seg(&x, y, &left, "  ", C_MUTED, 0, 0);
     }
 #endif
@@ -3672,6 +3767,30 @@ static int menu_items(int kind, const Message *m, int *ids, const char **names, 
         }
 #endif
         if (!guild_is_owner(g)) { ids[n] = MI_G_LEAVE; danger[n] = true; names[n++] = TR("Покинуть сервер"); }
+        return n;
+    }
+    if (kind == MENU_VMEM) {                     /* участник голосового канала (правый щелчок по строке) */
+        u64 uid = U.menu_uid;
+        if (uid == S.me_id) {                    /* свой участник: микрофон и звук, без громкости */
+            VoiceStatus v;
+            voice_status(&v);
+            ids[n] = MI_V_MIC; danger[n] = false; names[n++] = v.self_mute ? TR("Включить микрофон      F5") : TR("Выключить микрофон     F5");
+            ids[n] = MI_V_DEAF; danger[n] = false; names[n++] = v.self_deaf ? TR("Включить звук          F6") : TR("Выключить звук         F6");
+            ids[n] = MI_V_PROF; danger[n] = false; names[n++] = TR("Профиль");
+            return n;
+        }
+        static char vl[48];
+        int pc = (int)(voice_get_volume(uid) * 100 + 0.5f);
+        snprintf(vl, sizeof vl, TR("Громкость: %d%%  (сброс 100%%)"), pc);
+        ids[n] = MI_V_VOL; danger[n] = false; names[n++] = vl;
+        ids[n] = MI_V_UP; danger[n] = false; names[n++] = TR("Громче  +10%           +");
+        ids[n] = MI_V_DN; danger[n] = false; names[n++] = TR("Тише    -10%           -");
+        ids[n] = MI_V_MUTE; danger[n] = false; names[n++] = pc == 0 ? TR("Включить для меня") : TR("Заглушить для меня");
+        ids[n] = MI_V_PROF; danger[n] = false; names[n++] = TR("Профиль");
+        Channel *vc = chan_find(U.menu_vch);
+        u64 g = vc ? vc->guild_id : 0;
+        if (g && mod_can(g, MOD_MUTE)) { ids[n] = MI_V_SMUTE; danger[n] = true; names[n++] = TR("Заглушить на сервере..."); }
+        if (g && mod_can(g, MOD_MOVE)) { ids[n] = MI_V_MOVE; danger[n] = true; names[n++] = TR("Перенести или отключить..."); }
         return n;
     }
     if (kind == MENU_CHAN) {
@@ -3842,6 +3961,7 @@ static void share_ui_stop(const char *why) {
     golive_stop();
     share_stop();
     sh_running = false;
+    sh_gl_wait = false;
     GL_phase = GL_prev = GL_OFF;
     streamer_set(sh_prev_streamer);
     if (why && *why) ui_notice("%s", tr(why));
@@ -4938,6 +5058,240 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
     if (se < cx + cw - 3) g_ch(se, H - 1, ' ', C_MUTED, 0);
 }
 
+#ifdef ASTRA_VIDEO
+/* ---- камера (cam.h): кнопка []/ , диалог «Камера», плитки в центре голосового канала, предпросмотр ----
+ * Плитка участника с камерой (кадр — растр окна поверх клеток: g_cam_area в каждом render(); не вызвана в
+ * кадре — плитка не собирается и не декодируется). Без камеры — та же рамка, внутри аватар:
+ *   +----------------------+
+ *   |       кадр 16:9      |
+ *   +----------------------+
+ *    Имя  (/)           []/
+ * Предпросмотр своей камеры — над голосовой панелью в колонке каналов (если своя плитка не видна в центре).
+ * --demo: настоящая камера не открывается; «камеры» у 1002, 1006 и у вас (кнопкой) — движущийся узор клетками. */
+static bool cu_demo;                             /* --demo: своя «камера» включена */
+static bool cu_pv_hide;                          /* предпросмотр в колонке каналов скрыт */
+static bool cu_center;                           /* в этом кадре своя плитка — в центре: в колонке не дублировать */
+static bool cu_anim;                             /* в этом кадре нарисован демо-узор: ui_tick перерисует */
+static int cu_areas;                             /* g_cam_area за этот кадр (не больше CAM_TILES) */
+static CamDevice cu_dev[8];
+static const char *cu_names[8];
+static int cu_ndev;
+static u64 cu_tu[16];                            /* плитки с камерой этого кадра (щелчок — крупно), 0 — без камеры */
+static bool cu_covered(void);                    /* поверх центра открыто окно/меню — растр спрятать */
+static const char *cu_anon_label(u32 *col);
+static bool cu_on(void) { return O.demo ? cu_demo : cam_active(); }
+static bool cu_user(const VoiceState *v) {       /* у участника включена камера */
+    if (v->user_id == S.me_id) return cu_on();
+    if (O.demo) return v->user_id == 1002 || v->user_id == 1006;
+    CamTile t;
+    return v->video || (cam_tile(v->user_id, &t) && t.video);   /* video — self_video (store.c) */
+}
+/* Раскладка n плиток в w x h клеток. Клетка окна ~1:2, кадр 16:9 -> высота кадра в клетках = ширина * 9/32.
+ * Плитка = кадр iw x ih + рамка (2 по ширине, 2 по высоте) + строка имени; между плитками 1 клетка.
+ * Наибольший кадр; не влезают все — меньше плиток. Возврат — сколько плиток помещается (0 — ни одной). */
+typedef struct { int cols, rows, tw, th, iw, ih; } CamGrid;
+static int cam_grid(int n, int w, int h, CamGrid *g) {
+    memset(g, 0, sizeof *g);
+    for (int fit = n; fit >= 1; fit--) {
+        int best = 0;
+        for (int cols = 1; cols <= fit; cols++) {
+            int rows = (fit + cols - 1) / cols;
+            int tw = (w - (cols - 1)) / cols, th = (h - (rows - 1)) / rows;
+            int iw = tw - 2, ih = th - 3;
+            if (iw < 10 || ih < 3) continue;
+            if (iw * 9 / 32 < ih) ih = iw * 9 / 32;
+            else iw = ih * 32 / 9;
+            if (iw < 10 || ih < 3) continue;
+            if (iw * ih > best) { best = iw * ih; *g = (CamGrid){ cols, rows, iw + 2, ih + 3, iw, ih }; }
+        }
+        if (best) return fit;
+    }
+    return 0;
+}
+static int cu_tri(i64 t, int period, int amp) {  /* треугольная волна 0..amp */
+    if (period < 2 || amp < 1) return 0;
+    int p = (int)(t % (2 * period));
+    return (p < period ? p : 2 * period - p) * amp / period;
+}
+/* --demo: подставной «кадр» клетками — полосы цвета участника и светлое пятно, которое ходит по кадру */
+static void cu_pattern(int x, int y, int w, int h, u64 uid) {
+    i64 t = now_ms() / 80;
+    static const u32 hue[4] = { 0x2b4a7au, 0x6a3b6eu, 0x2f6a4cu, 0x7a5a2bu };
+    u32 base = hue[(uid / 2) % 4];
+    int bx = cu_tri(t + (int)(uid % 7) * 9, 40, w - 1), by = cu_tri(t + (int)(uid % 5) * 5, 23, h - 1);
+    for (int r = 0; r < h; r++) for (int c = 0; c < w; c++) {
+        int band = (int)((c + r + t / 2) % 12);
+        u32 col = mix(0x0b0c10u, base, 90 + band * 10);
+        int dx = c - bx, dy = (r - by) * 2, d2 = dx * dx + dy * dy, rr = h > 4 ? h : 4;
+        if (d2 < rr * rr) col = mix(col, 0xe8e2d0u, 200 - 200 * d2 / (rr * rr));
+        g_rect(x + c, y + r, 1, 1, col);
+    }
+    cu_anim = true;
+}
+/* Кадр камеры uid в клетках (x, y, w, h): заглушка под растром + заявка g_cam_area. */
+/* Своя камера, лицо не найдено: вместо кадра — перечёркнутое лицо и предупреждение (собеседники видят значок). */
+static void cu_noface(int x, int y, int w, int h) {
+    static const char *const face[3] = { "\\ .--. /", " |x  x| ", "/ '--' \\" };
+    g_rect(x, y, w, h, 0x1a1410u);
+    bool wide = w >= 40;
+    int nt = wide ? 2 : 3, nf = h >= nt + 3 ? 3 : 0, top = y + (h - nf - (h >= nt ? nt : 1)) / 2;
+    for (int i = 0; i < nf; i++) g_ctext(x, top + i, w, face[i], C_RED, AT_B);
+    int ty = top + nf;
+    if (h < nt) { g_ctext(x, y + (h - 1) / 2, w, TR("лицо не найдено"), C_GOLD, AT_B); return; }
+    g_ctext(x, ty, w, TR("Соединение не защищено:"), C_GOLD, AT_B);
+    if (wide) g_ctext(x, ty + 1, w, TR("проверьте, находится ли лицо в камере"), C_TEXT, 0);
+    else { g_ctext(x, ty + 1, w, TR("проверьте, находится ли"), C_TEXT, 0); g_ctext(x, ty + 2, w, TR("лицо в камере"), C_TEXT, 0); }
+}
+static void cu_frame(int x, int y, int w, int h, u64 uid) {
+    bool noface = uid == S.me_id && cu_anon_st() == CA_FULL;   /* своя камера без лица: предупреждение */
+    if (noface) { cu_noface(x, y, w, h); if (O.demo) { cu_anim = true; return; } }
+    else g_rect(x, y, w, h, 0x000000u);
+    if (O.demo) { cu_pattern(x, y, w, h, uid); return; }
+    CamTile t;
+    bool have = cam_tile(uid, &t);
+    bool ras = g_video_supported() && !(have && t.unsupported);
+    if (!noface && (!have || !t.shown || !ras)) {
+        const char *m = have && t.unsupported ? TR("формат видео не поддерживается") : !g_video_supported() ? TR("камера включена")
+                      : uid == S.me_id ? TR("включение камеры...") : TR("подключение камеры...");
+        int cy = y + (h - 1) / 2;
+        if (h >= 3) g_ctext(x, cy - 1, w, "[]/", C_MUTED, AT_B);
+        g_ctext(x, h >= 3 ? cy + 1 : cy, w, m, have && t.unsupported ? C_RED : C_MUTED, 0);
+    }
+    if (ras && !cu_covered() && cu_areas < CAM_TILES) { g_cam_area(uid, x, y, w, h); cu_areas++; }
+}
+/* Плитка участника: рамка (говорит — зелёная), кадр или аватар, строка имени. */
+static void cu_tile(int x, int y, const CamGrid *g, const VoiceState *v, bool cam, bool sp, int idx) {
+    const char *nm = v->name && *v->name ? v->name : user_name(v->user_id);
+    u32 fr = sp ? C_GREEN : C_LINE;
+    int a = sp ? AT_B : 0, ix = x + 1, iy = y + 1;
+    g_ch(x, y, '+', fr, a); g_ch(x + g->tw - 1, y, '+', fr, a);
+    g_ch(x, y + g->ih + 1, '+', fr, a); g_ch(x + g->tw - 1, y + g->ih + 1, '+', fr, a);
+    for (int i = 1; i < g->tw - 1; i++) { g_ch(x + i, y, '-', fr, a); g_ch(x + i, y + g->ih + 1, '-', fr, a); }
+    for (int r = 1; r <= g->ih; r++) { g_ch(x, y + r, '|', fr, a); g_ch(x + g->tw - 1, y + r, '|', fr, a); }
+    if (cam) cu_frame(ix, iy, g->iw, g->ih, v->user_id);
+    else {
+        g_rect(ix, iy, g->iw, g->ih, C_PANEL);
+        int lh = g->ih - 2 > 6 ? 6 : g->ih - 2;
+        if (lh < 1) lh = 1;
+        int aw = 2 * lh;
+        if (aw > g->iw) { aw = g->iw & ~1; lh = aw / 2; }
+        int ax = ix + (g->iw - aw) / 2, ay = iy + (g->ih - lh) / 2;
+        for (int r = 0; r < lh; r++) { g_avatar(ax, ay + r, aw, lh, r, v->user_id, nm); strip_part(G_TILES, ax, ay + r, aw, lh, r, PK_AVR, v->user_id); }
+    }
+    int ny = y + g->ih + 2, right = x + g->tw - 1;
+    if (cam) right = g_rtext(right, ny, "[]/", 3, C_TEXT, AT_B) - 1;
+    const char *mute = v->self_deaf || v->deaf ? "/x\\" : v->self_mute || v->mute ? "(/)" : NULL;
+    if (mute) right = g_rtext(right, ny, mute, 3, C_RED, AT_B) - 1;
+    if (cam && v->user_id == S.me_id && g->tw >= 26) {   /* своя камера: что скрыто в уходящем кадре */
+        u32 ac;
+        const char *al = cu_anon_label(&ac);
+        right = g_rtext(right, ny, al, right - x - 8, ac, 0) - 1;
+    }
+    g_texte(x + 1, ny, nm, right - x - 1, sp ? C_GREEN : C_TEXT, sp ? AT_B : 0);
+    if (cam && idx >= 0) { hit_add(x, y, g->tw, g->th, A_BTN, B_CAM_TILE, idx, HV_UL); U.hit[U.nhit - 1].tip = T_CAMVIEW; }
+}
+/* Центр голосового канала, где вы, когда хоть у кого-то камера: плитки сеткой (камеры первыми), снизу
+ * «Отключиться». false — камер нет, рисуется обычный вид. */
+static bool cu_voice_grid(int x, int y, int w, int h, const VoiceState *const *list, int k, const VoiceStatus *vs) {
+    const VoiceState *ord[16];
+    bool cam[16];
+    int n = 0, nc = 0;
+    for (int i = 0; i < k && i < 16; i++) if (cu_user(list[i])) { ord[n] = list[i]; cam[n++] = true; nc++; }
+    if (!nc) return false;
+    for (int i = 0; i < k && i < 16; i++) if (!cu_user(list[i])) { ord[n] = list[i]; cam[n++] = false; }
+    if (h < 12 || w < 16) return false;
+    CamGrid g;
+    int gh = h - 5, fit = cam_grid(n, w - 2, gh, &g);
+    if (!fit) return false;
+    int gw = g.cols * g.tw + g.cols - 1, gt = g.rows * g.th + g.rows - 1;
+    int x0 = x + (w - gw) / 2, y0 = y + 1 + (gh - gt) / 2;
+    for (int i = 0; i < fit; i++) {
+        bool sp = false;
+        for (int q = 0; q < vs->nspeaking; q++) if (vs->speaking[q] == ord[i]->user_id) sp = true;
+        int row = i / g.cols, col = i % g.cols;
+        int inrow = row == g.rows - 1 ? fit - row * g.cols : g.cols;   /* неполный последний ряд — по центру */
+        int rx = x0 + (g.cols - inrow) * (g.tw + 1) / 2;
+        cu_tu[i] = cam[i] ? ord[i]->user_id : 0;
+        cu_tile(rx + col * (g.tw + 1), y0 + row * (g.th + 1), &g, ord[i], cam[i], sp, i);
+        if (ord[i]->user_id == S.me_id && cam[i]) cu_center = true;
+    }
+    if (fit < n) { char t[48]; snprintf(t, sizeof t, TR("и ещё %d"), n - fit); g_ctext(x, y0 + gt, w, t, C_MUTED, 0); }
+    const char *bt = TR("Отключиться");
+    int bw = vw(bt) + 6, bx = x + (w - bw) / 2, by = y + h - 2;
+    g_hbox(bx, by - 1, bw);
+    g_hbox(bx, by + 1, bw);
+    g_ch(bx, by, '|', C_LINE, 0);
+    g_ch(bx + bw - 1, by, '|', C_LINE, 0);
+    g_text(bx + 3, by, bt, bw - 6, C_RED, 0);
+    hit_add(bx + 1, by, bw - 2, 1, A_BTN, B_LEAVE, 0, HV_RED);
+    return true;
+}
+/* Предпросмотр своей камеры в колонке каналов: сколько строк занять (0 — не показывать). */
+static int cu_pv_rows(int sw, int H, bool vpanel, int *iw, int *ih) {
+    *iw = *ih = 0;
+    if (!vpanel || !cu_on() || cu_center || H < 22 || sw < 16) return 0;
+    if (cu_pv_hide) return 1;
+    *iw = sw - 4 > 24 ? 24 : sw - 4;
+    *ih = *iw * 9 / 32;
+    if (*ih < 3) { *iw = *ih = 0; return 1; }
+    return 2 + *ih;                              /* заголовок, кадр, строка анонимизации */
+}
+/* пометка анонимизации своей камеры: текст и цвет (предпросмотр, своя плитка, крупный вид) */
+static const char *cu_anon_label(u32 *col) {
+    int st = cu_anon_st();
+    if (st == CA_FULL) { *col = C_GOLD; return TR("[x] лицо не найдено"); }
+    if (st == CA_EYES) { *col = C_GREEN; return TR("[=] глаза скрыты"); }
+    if (anon_default()) { *col = C_MUTED; return TR("[=] скрывать глаза: вкл"); }
+    *col = C_RED; return TR("[ ] глаза видны");
+}
+static void cu_pv_draw(int sx, int sw, int py, int iw, int ih) {
+    g_text(sx + 1, py, "[]/", 3, C_MUTED, AT_B);
+    int r = g_rtext(sx + sw - 2, py, cu_pv_hide || !ih ? TR("показать") : TR("скрыть"), 10, C_MUTED, 0);
+    g_texte(sx + 5, py, TR("Ваша камера"), r - sx - 6, C_TEXT, 0);
+    hit_add(sx + 1, py, sw - 2, 1, A_BTN, B_CAM_PV, 0, HV_UL);
+    U.hit[U.nhit - 1].tip = T_CAMPV;
+    if (!ih) return;
+    cu_frame(sx + (sw - iw) / 2, py + 1, iw, ih, S.me_id);
+    u32 ac;
+    const char *al = cu_anon_label(&ac);
+    int ar = g_rtext(sx + sw - 2, py + 1 + ih, "Alt+E", 5, C_MUTED, 0);
+    g_texte(sx + 1, py + 1 + ih, al, ar - sx - 2, ac, AT_B);
+    hit_add(sx + 1, py + 1 + ih, sw - 2, 1, A_BTN, B_ANON, 0, HV_UL);
+    U.hit[U.nhit - 1].tip = T_ANON;
+}
+/* selftest: раскладка плиток и подсказки камеры */
+int ui_cam_selftest(void (*check)(bool ok, const char *what)) {
+    CamGrid g;
+    int f = cam_grid(1, 60, 24, &g);
+    check(f == 1 && g.cols == 1 && g.iw <= 58 && g.ih == g.iw * 9 / 32 && g.th <= 24, "камера: одна плитка - кадр 16:9 во всю ширину или высоту");
+    f = cam_grid(4, 60, 24, &g);
+    check(f == 4 && g.cols * g.rows >= 4 && g.cols * g.tw + g.cols - 1 <= 60 && g.rows * g.th + g.rows - 1 <= 24, "камера: 4 плитки помещаются в 60x24");
+    f = cam_grid(3, 80, 20, &g);
+    check(f == 3 && g.rows == 1, "камера: 3 плитки в широком центре - одним рядом");
+    f = cam_grid(16, 30, 12, &g);
+    check(f >= 1 && f < 16 && g.cols * g.tw + g.cols - 1 <= 30 && g.rows * g.th + g.rows - 1 <= 12, "камера: 16 плиток в 30x12 - сколько влезло, без выхода за край");
+    check(cam_grid(2, 8, 4, &g) == 0, "камера: слишком мало места - плиток нет");
+    bool ok = true;
+    for (int n = 1; n <= 16; n++) for (int w = 16; w <= 120; w += 13) for (int h = 6; h <= 40; h += 7) {
+        int k = cam_grid(n, w, h, &g);
+        if (k && (k > n || g.cols * g.tw + g.cols - 1 > w || g.rows * g.th + g.rows - 1 > h || g.iw < 10 || g.ih < 3 || g.cols * g.rows < k)) ok = false;
+    }
+    check(ok, "камера: раскладка 1..16 плиток в 16..120 x 6..40 клеток - внутри области");
+    check(!strcmp(TIPS[T_CAM], TIP_CAM) && strstr(TIPS[T_CAM], "F12") && strstr(TIPS[T_CAMOFF], "F12"), "камера: подсказки кнопки и индикатора называют клавишу F12");
+    bool a0 = anon_default();
+    u32 ac = 0;
+    anon_set_default(false);
+    check(!strcmp(cu_anon_label(&ac), "[ ] глаза видны") && ac == C_RED && cu_anon_st() == CA_OFF, "камера: анонимизация выключена - пометка красным «глаза видны»");
+    anon_set_default(a0);
+    check(strstr(TIPS[T_ANON], "Alt+E") != NULL, "камера: подсказка анонимизации называет Alt+E");
+    bool en = g_lang_en;
+    g_lang_en = true;
+    const char *e1 = tr(TIP_CAM), *e2 = tr(" []/ КАМЕРА %dp %.0f к/с ");
+    check(strcmp(e1, TIP_CAM) && strstr(e1, "F12") && strcmp(e2, " []/ КАМЕРА %dp %.0f к/с "), "камера: подсказка и индикатор переведены");
+    g_lang_en = en;
+    return 0;
+}
+#endif
 /* Экран голосового канала (эталон владельца): тот же тёмно-серый фон, крупный ASCII-логотип — значок сервера
  * (в окне мелкой сеткой), название, «Сейчас в голосовом чате никого нет» или плитки участников,
  * кнопка «Присоединиться к голосовому каналу» в рамке +----+. */
@@ -4948,6 +5302,9 @@ static void draw_voice_view(int x, int y, int w, int h, const Channel *c, const 
     const VoiceState *list[16];
     int k = voice_members(c->id, list, 16);
     bool here = vs->phase != VS_IDLE && vs->channel_id == c->id;
+#ifdef ASTRA_VIDEO
+    if (here && cu_voice_grid(x, y, w, h, list, k, vs)) return;   /* у кого-то камера — плитки сеткой */
+#endif
     Guild *g = c->guild_id ? guild_find(c->guild_id) : NULL;
     int lh = k ? (h >= 24 ? 6 : 3) : h >= 30 ? 9 : h >= 24 ? 7 : h >= 18 ? 5 : 0;   /* высота логотипа или аватаров плиток (12x6) */
     int lw = 2 * lh;
@@ -6143,7 +6500,7 @@ static const char *guild_description(u64 g) { (void)g; return ""; }
 
 enum { FF_TEXT, FF_CHOICE, FF_TOGGLE, FF_TRI, FF_INFO };
 enum { FM_NONE, FM_ADDSRV, FM_GCREATE, FM_JOIN, FM_JOINCARD, FM_INVITE, FM_GSET, FM_GDELETE, FM_LEAVE, FM_CHCREATE,
-       FM_CATCREATE, FM_CHEDIT, FM_CHDELETE, FM_PERMS, FM_ADDFRIEND, FM_THREAD, FM_ALERTS, FM_FILTER, FM_VSTATUS, FM_TRENAME, FM_FPOST, FM_GRENAME, FM_MEPROF, FM_FALT, FM_MOD, FM_STATUS, FM_NOTE, FM_SHARE };
+       FM_CATCREATE, FM_CHEDIT, FM_CHDELETE, FM_PERMS, FM_ADDFRIEND, FM_THREAD, FM_ALERTS, FM_FILTER, FM_VSTATUS, FM_TRENAME, FM_FPOST, FM_GRENAME, FM_MEPROF, FM_FALT, FM_MOD, FM_STATUS, FM_NOTE, FM_SHARE, FM_CAM };
 enum { FB_OK = 1, FB_CANCEL, FB_X1, FB_X2, FB_RETRY };     /* кнопки формы (sub у A_FORMB) */
 /* буфер поля — в куче на время окна: лимит поля в символах x 4 байта (тема 1024 символа целиком), иначе 256 */
 static void utf8_cpy(char *d, size_t n, const char *s);
@@ -6389,12 +6746,31 @@ static void fm_open(int id, u64 gid, u64 cid) {
 #ifdef _WIN32
         snprintf(FM.sub, sizeof FM.sub, "%s", TR("Эфир 1280x720, 30 к/с. Окно: видно только оно, даже под другими окнами; свёрнутое - зрители видят последний кадр. Весь экран: видно всё. Astra DS в эфир не попадает, включится режим стримера."));
 #else
+        if (share_wayland()) {                   /* Wayland: экран или окно выбирается в системном окне компоновщика */
+            sh_n = 0;
+            sh_names[0] = "Выбрать экран или окно (системное окно Wayland)";
+            snprintf(FM.sub, sizeof FM.sub, "%s", TR("Wayland: экран или окно выберите в системном окне, оно откроется после нажатия. При показе экрана видно и окно Astra DS."));
+        } else
         snprintf(FM.sub, sizeof FM.sub, "%s", TR("Внимание: в X11 при показе всего экрана видны все окна, в том числе это."));
 #endif
         fm_choice(fm_add(FF_CHOICE, "ИСТОЧНИК", NULL), sh_names, sh_n + 1, 0);
         fm_choice(fm_add(FF_CHOICE, "КАЧЕСТВО", NULL), SH_MODES, 2, 0);
         fm_add(FF_TOGGLE, "Транслировать звук", NULL)->ch = 1;   /* окно — звук его программы; экран — всё, кроме Astra DS */
         fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Начать трансляцию"), FB_OK, 1);
+        break;
+    }
+#endif
+#ifdef ASTRA_VIDEO
+    case FM_CAM: {                               /* камера: какая и показывать ли себя; список — cu_devices() */
+        int cur = 0;
+        const char *sel = O.demo ? "" : cam_selected();
+        for (int i = 0; i < cu_ndev; i++) if (sel && *sel && !strcmp(cu_dev[i].id, sel)) cur = i;
+        snprintf(FM.title, sizeof FM.title, "%s", TR("Камера"));
+        snprintf(FM.sub, sizeof FM.sub, "%s", TR("Видео видят участники звонка, только со сквозным шифрованием (E2EE). Выключить - кнопка []/, F12 или Alt+C (сразу, без этого окна)."));
+        fm_choice(fm_add(FF_CHOICE, "КАМЕРА", NULL), cu_names, cu_ndev, cur);
+        fm_add(FF_TOGGLE, "Скрывать глаза (анонимизация)", NULL)->ch = anon_default();
+        fm_add(FF_TOGGLE, "Показывать себя в колонке каналов", NULL)->ch = !cu_pv_hide;
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Включить камеру"), FB_OK, 1);
         break;
     }
 #endif
@@ -7233,6 +7609,10 @@ static int draw_sidebar(int sx, int sw0, int H, const VoiceStatus *vs) {
     bool vpanel = vs->phase != VS_IDLE;
     int user_top = H - 2, voice_top = vpanel ? H - 6 : user_top;
     int list_bot = voice_top - 2;
+#ifdef ASTRA_VIDEO
+    int pv_iw, pv_ih, pv_n = cu_pv_rows(sw, H, vpanel, &pv_iw, &pv_ih);   /* предпросмотр своей камеры над панелью голоса */
+    if (pv_n) list_bot -= pv_n + 1;
+#endif
     int ch_h = list_bot - list_top + 1;
     if (!U.row_free && U.sel_row >= 0) {
         if (U.sel_row < U.row_scroll) U.row_scroll = U.sel_row;
@@ -7287,8 +7667,18 @@ static int draw_sidebar(int sx, int sw0, int H, const VoiceStatus *vs) {
             int right = sx + sw - 2;
             if (mute) right = g_rtext(right, y, mute, 3, C_RED, AT_B) - 1;
             if (tail[0]) right = g_rtext(right, y, tail, 5, C_MUTED, 0) - 1;
+#ifdef ASTRA_VIDEO
+            int live_x = 0;
+            if (v && v->stream) { live_x = g_rtext(right, y, "LIVE", 4, C_WHITE, AT_B); g_bg(live_x, y, 4, C_RED); right = live_x - 1; }
+            int cam_x = v && cu_user(v) ? g_rtext(right, y, "[]/", 3, C_WHITE, AT_B) : 0;   /* камера включена */
+            if (cam_x) right = cam_x - 1;
+#endif
             g_texte(sx + 10, y, nm, right - sx - 10, speaking ? C_WHITE : C_TEXT, speaking ? AT_B : 0);
             hit_add(sx + 1, y, sw - 2, 1, A_ROW, 0, ri, HV_PILL);
+#ifdef ASTRA_VIDEO
+            if (live_x && r->user != S.me_id) hit_add(live_x, y, 4, 1, A_BTN, B_WATCH, ri, HV_RED);   /* щелчок по LIVE — смотреть */
+            if (cam_x) { hit_add(cam_x, y, 3, 1, A_BTN, B_CAM_VIEW, ri, HV_ACC); U.hit[U.nhit - 1].tip = T_CAMVIEW; }   /* по []/ — камеру крупно */
+#endif
             continue;
         }
         if (!c) continue;
@@ -7319,6 +7709,13 @@ static int draw_sidebar(int sx, int sw0, int H, const VoiceStatus *vs) {
         hit_add(sx + 1, y, sw - 2, 1, A_ROW, 0, ri, HV_PILL);
     }
 
+#ifdef ASTRA_VIDEO
+    if (pv_n) {
+        g_rect(sx, list_bot + 1, sw, pv_n + 1, C_PANEL);
+        g_uline(sx, list_bot + 1, sw);
+        cu_pv_draw(sx, sw, list_bot + 2, pv_iw, pv_ih);
+    }
+#endif
     /* ---- панель «Голосовая связь подключена» в рамке ---- */
     g_rect(sx, voice_top - 1, sw, H - voice_top + 1, C_PANEL);
     if (vpanel) {
@@ -7348,7 +7745,7 @@ static int draw_sidebar(int sx, int sw0, int H, const VoiceStatus *vs) {
         /* ряд из 4 кнопок в рамках: камера, экран, смена голоса, звуковая панель */
         static const char *const ic[4] = { "[]/", "[^]", "~v~", "<))" };
 #ifdef ASTRA_VIDEO
-        static const int ids[4] = { B_NOP, B_SHARE, B_FX, B_NOP }, tips[4] = { T_CAM, T_SCREEN, T_FX, T_SOUNDB };
+        static const int ids[4] = { B_CAM, B_SHARE, B_FX, B_NOP }, tips[4] = { T_CAM, T_SCREEN, T_FX, T_SOUNDB };
 #else
         static const int ids[4] = { B_NOP, B_NOP, B_FX, B_NOP }, tips[4] = { T_CAM, T_SCREEN, T_FX, T_SOUNDB };
 #endif
@@ -7359,6 +7756,7 @@ static int draw_sidebar(int sx, int sw0, int H, const VoiceStatus *vs) {
             bool on = ids[i] == B_FX && fx != VFX_OFF;
 #ifdef ASTRA_VIDEO
             if (ids[i] == B_SHARE && sh_running) on = true;
+            if (ids[i] == B_CAM && cu_on()) on = true;
 #endif
             g_pill(x, y + 2, bw, on ? C_ACC : C_BTN2);
             g_ctext(x, y + 2, bw, ic[i], C_TEXT, AT_B);
@@ -7411,6 +7809,199 @@ static int draw_sidebar(int sx, int sw0, int H, const VoiceStatus *vs) {
 }
 
 /* Шапка колонки: подпись слева, тонкая линия по низу строки. */
+#ifdef ASTRA_VIDEO
+/* камера: включение/выключение (cam.h), окно поверх — растр плиток прячется */
+static bool cu_covered(void) {
+    return U.menu || U.pick || U.card_uid || U.ep || U.qs || FM.id || IV.on || AVB.uid || tm_on || rules_on || upd_on || CSEL.on;
+}
+static void cu_devices(void) {
+    if (O.demo) {                                /* демо: настоящие камеры не трогаем */
+        static const char *const dn[2] = { "Встроенная камера (демо)", "USB-камера (демо)" };
+        cu_ndev = 2;
+        for (int i = 0; i < 2; i++) { snprintf(cu_dev[i].id, sizeof cu_dev[i].id, "demo%d", i); snprintf(cu_dev[i].name, sizeof cu_dev[i].name, "%s", tr(dn[i])); }
+    } else cu_ndev = cam_list(cu_dev, 8);
+    if (cu_ndev < 0) cu_ndev = 0;
+    for (int i = 0; i < cu_ndev; i++) cu_names[i] = cu_dev[i].name;
+}
+static void cu_start(void) {
+    if (O.demo) { cu_demo = true; ui_notice("%s", TR("камера включена (демо)")); U.dirty = true; return; }
+    char err[160] = "";
+    if (!cam_start(err, sizeof err)) ui_notice("%s", err[0] ? err : TR("камера не включилась"));
+    U.dirty = true;
+}
+/* Alt+E и щелчок по пометке под предпросмотром: скрывать глаза вкл/выкл (действует сразу, и на идущую камеру) */
+static void cu_anon_toggle(void) {
+#ifndef ASTRA_ANON
+    ui_notice("%s", TR("анонимизация: нет в этой сборке"));
+    return;
+#endif
+    anon_set_default(!anon_default());           /* всем открытым контекстам — с ближайшего кадра */
+    ui_notice("%s", anon_default() ? TR("анонимизация: глаза скрыты (Alt+E - выключить)") : TR("анонимизация выключена: глаза видны (Alt+E - включить)"));
+    U.dirty = true;
+}
+/* кнопка []/ (ask — с окном выбора камеры) и F12 / Alt+C (сразу, выбранной камерой) */
+static void cu_toggle(bool ask) {
+    U.dirty = true;
+    if (cu_on()) { if (O.demo) cu_demo = false; else cam_stop(); ui_notice("%s", TR("камера выключена")); return; }
+    VoiceStatus v;
+    voice_status(&v);
+    if (v.phase == VS_IDLE) { ui_notice("%s", TR("камера: сначала подключитесь к голосовому каналу или звонку")); return; }
+    cu_devices();
+    if (!cu_ndev) { ui_notice("%s", TR("камера не найдена: подключите камеру и попробуйте снова")); return; }
+    if (ask) fm_open(FM_CAM, 0, 0);
+    else cu_start();
+}
+#endif
+#ifdef ASTRA_VIDEO
+/* ---- просмотр чужой трансляции: панель видео вместо центра окна (или на всё окно) ----
+ *  [>] Имя LIVE                              [Чат] [Во весь экран] [Выйти]
+ *  Трансляции в канале: [Вася] [Петя]                       Alt+<- Alt+->   (если смотреть есть кого ещё)
+ *  +--------------------------------------------------------------------+
+ *  |              растр (g_video_area) или текст состояния             |
+ *  строка состояния
+ * Растр рисует окно (gui*, кодер): g_video_area — прямоугольник в клетках на этот кадр; не вызвана — скрыто.
+ * Объявления — golive.h, реализация — gui_grid.c. */
+/* что можно смотреть в моём голосовом канале: трансляции (kind 0), затем камеры (kind 1); своё — только камера */
+static int wv_sources(u64 *out, u8 *kind, int max) {
+    VoiceStatus v;
+    voice_status(&v);
+    if (v.phase == VS_IDLE) return 0;
+    const VoiceState *l[32];
+    int k = voice_members(v.channel_id, l, 32), n = 0;
+    for (int i = 0; i < k && n < max; i++) if (l[i]->stream && l[i]->user_id != S.me_id) { out[n] = l[i]->user_id; kind[n++] = 0; }
+    for (int i = 0; i < k && n < max; i++) if (cu_user(l[i])) { out[n] = l[i]->user_id; kind[n++] = 1; }
+    return n;
+}
+static bool wv_on(void) { return WS.phase != GW_OFF || WV.cam; }   /* панель просмотра открыта (трансляция или камера) */
+static void wv_watch(u64 uid) {                 /* смотреть uid; golive_watch сам закрывает текущий просмотр */
+    U.full = U.dirty = true;
+    WV.chat = false; WV.ch = S.open_ch; WV.gd = U.sel_guild;
+    WV.cam = 0;                                  /* панель одна: трансляция вместо камеры */
+    if (WS.phase != GW_OFF && WS.phase != GW_FAILED && WS.user == uid) return;   /* уже смотрим — только показать */
+    VoiceStatus v;
+    voice_status(&v);
+    if (v.phase == VS_IDLE) { ui_notice("%s", TR("чтобы смотреть трансляцию, сначала войдите в этот голосовой канал")); return; }
+    if (O.demo) { demo_watch = uid; return; }
+    Channel *wc = chan_find(v.channel_id);
+    char err[128] = "";
+    if (!golive_watch(wc ? wc->guild_id : 0, v.channel_id, uid, err, sizeof err)) ui_notice("%s", err);
+}
+static void wv_stop(void) { golive_unwatch(); demo_watch = 0; WS.phase = GW_OFF; WV.cam = 0; WV.full = WV.chat = false; U.full = U.dirty = true; }
+/* крупно камеру uid в той же панели (трансляция, если смотрели, закрывается); кадр — полный, не плиточный */
+static void cv_open(u64 uid) {
+    VoiceStatus v;
+    voice_status(&v);
+    if (v.phase == VS_IDLE) { ui_notice("%s", TR("чтобы смотреть камеру, сначала войдите в этот голосовой канал")); return; }
+    if (WS.phase != GW_OFF) { golive_unwatch(); demo_watch = 0; WS.phase = GW_OFF; }
+    WV.cam = uid;
+    WV.chat = false; WV.ch = S.open_ch; WV.gd = U.sel_guild;
+    U.full = U.dirty = true;
+}
+static void wv_pick(int i) { if (i >= 0 && i < WV.n) { if (WV.sk[i]) cv_open(WV.su[i]); else wv_watch(WV.su[i]); } }
+static void wv_step(int d) {                    /* Alt+стрелки: соседняя трансляция или камера в канале */
+    int n = wv_sources(WV.su, WV.sk, 8), cur = -1;
+    WV.n = n;
+    for (int i = 0; i < n; i++) if (WV.cam ? WV.sk[i] && WV.su[i] == WV.cam : !WV.sk[i] && WV.su[i] == WS.user) cur = i;
+    if (n > 0) wv_pick(cur < 0 ? 0 : (cur + d + n) % n);
+}
+static bool wv_key(const Key *k) {
+    bool alt = k->alt && !k->ctrl;
+    if (k->code == K_ESC && WV.full && !WV.chat && !U.menu && !U.card_uid && !U.ep && !U.qs && !FM.id) { WV.full = false; U.full = U.dirty = true; return true; }
+    if (alt && (k->code == K_LEFT || k->code == K_RIGHT)) { wv_step(k->code == K_LEFT ? -1 : 1); return true; }
+    if (alt && k->code == K_CHAR) {
+        u32 c = k->ch;
+        if (c == 'w' || c == 'W' || c == 0x446 || c == 0x426) { WV.chat = !WV.chat; WV.ch = S.open_ch; WV.gd = U.sel_guild; U.full = U.dirty = true; return true; }   /* ц */
+        if ((c == 'f' || c == 'F' || c == 0x430 || c == 0x410) && !WV.chat) { WV.full = !WV.full; U.full = U.dirty = true; return true; }   /* а */
+    }
+    return false;
+}
+static void wv_rbtn(int *right, const char *t, int style, int id, int tip) {   /* кнопка справа налево */
+    int w = vw(t) + 4;
+    *right -= w;
+    if (g_button(*right, 0, t, w, style, id)) U.hit[U.nhit - 1].tip = (u8)tip;
+    *right -= 1;
+}
+static void draw_watch(int x, int w, int H) {
+    g_rect(x, 0, w, H, C_FEED);
+    WV.n = wv_sources(WV.su, WV.sk, 8);
+    bool narrow = w < 72;
+    u64 who = WV.cam ? WV.cam : WS.user;
+    int right = x + w - 1;
+    wv_rbtn(&right, narrow ? "x" : TR("Выйти"), 2, B_WATCH_STOP, T_WSTOP);
+    wv_rbtn(&right, WV.full ? (narrow ? "][" : TR("Обычный вид")) : (narrow ? "[ ]" : TR("Во весь экран")), 0, B_WATCH_FULL, T_WFULL);
+    wv_rbtn(&right, narrow ? "#" : TR("Чат"), 0, B_WATCH_CHAT, T_WCHAT);
+    char *nm = san(wv_uname(who), true);
+    g_text(x + 1, 0, "[>]", 3, C_MUTED, AT_B);
+    int px = x + 5;
+    px += g_texte(px, 0, nm, right - px - 5, C_WHITE, AT_B) + 1;
+    free(nm);
+    if (WV.cam && px + 4 < right) {
+        g_text(px, 0, "[]/", 3, C_WHITE, AT_B); px += 4;
+        u32 ac = C_MUTED;
+        const char *cl = WV.cam == S.me_id ? cu_anon_label(&ac) : TR("камера");
+        if (right - px > 8) g_texte(px, 0, cl, right - px - 1, ac, 0);
+    }
+    else if (WS.phase == GW_LIVE && px + 4 < right) { g_text(px, 0, "LIVE", 4, C_WHITE, AT_B); g_bg(px, 0, 4, C_RED); px += 5; }
+    const char *ph = WV.cam ? NULL : WS.phase == GW_WAIT ? TR("ожидание сервера") : WS.phase == GW_CONNECTING ? TR("подключение")
+                   : WS.phase == GW_FAILED ? TR("ошибка") : NULL;
+    if (ph && right - px > 4) g_texte(px, 0, ph, right - px - 1, WS.phase == GW_FAILED ? C_RED : C_MUTED, 0);
+    g_uline(x, 0, w);
+    /* список трансляций и камер канала — только если есть на кого переключиться */
+    int y = 1;
+    bool other = false, cams = false;
+    for (int i = 0; i < WV.n; i++) { if (WV.cam ? !(WV.sk[i] && WV.su[i] == WV.cam) : WV.sk[i] || WV.su[i] != WS.user) other = true; if (WV.sk[i]) cams = true; }
+    if (other) {
+        int lx = x + 1, lr = x + w - 1;
+        const char *hint = "Alt+<- Alt+->";
+        bool hs = !narrow;
+        if (hs) lr -= vw(hint) + 2;
+        lx += g_text(lx, y, narrow ? (cams ? TR("Смотреть:") : "LIVE:") : cams ? TR("Трансляции и камеры:") : TR("Трансляции в канале:"), lr - lx, C_MUTED, AT_B) + 1;
+        for (int i = 0; i < WV.n; i++) {
+            char *sn = san(wv_uname(WV.su[i]), true);
+            bool cur = WV.sk[i] ? WV.cam == WV.su[i] : !WV.cam && WV.su[i] == WS.user;
+            int pre = WV.sk[i] ? 4 : 0;              /* камера — со значком []/ перед именем */
+            int tw = vw(sn) > 16 ? 16 : vw(sn), bw = tw + 4 + pre;
+            if (lx + bw > lr) { if (lr - lx >= 3) g_text(lx, y, "...", 3, C_MUTED, 0); free(sn); break; }
+            g_pill(lx, y, bw, cur ? C_ACC : C_BTN2);
+            if (pre) g_text(lx + 2, y, "[]/", 3, cur ? C_WHITE : C_TEXT, AT_B);
+            g_texte(lx + 2 + pre, y, sn, tw, cur ? C_WHITE : C_TEXT, cur ? AT_B : 0);
+            if (!cur) { hit_add(lx, y, bw, 1, A_BTN, B_WATCH_PICK, i, HV_PILL); U.hit[U.nhit - 1].tip = T_WPICK; }
+            lx += bw + 1;
+            free(sn);
+        }
+        if (hs) g_rtext(x + w - 2, y, hint, vw(hint), C_MUTED, 0);
+        y++;
+    }
+    /* область видео: поля в 1 клетку, снизу пустая строка и строка состояния */
+    int vx = x + 1, vy = y + 1, vwd = w - 2, vh = H - 2 - vy;
+    if (vh < 1) vh = 1;
+    g_rect(vx, vy, vwd, vh, 0x000000u);
+    int cy = vy + vh / 2;
+    if (WV.cam) cu_frame(vx, vy, vwd, vh, WV.cam);   /* камера крупно: окно отдаёт полный кадр под размер области */
+    else if (WS.phase == GW_FAILED) {
+        char *e = san(WS.err, true);
+        g_ctext(vx, cy - 1, vwd, TR("Не удалось подключиться к трансляции"), C_RED, AT_B);
+        if (*e) g_ctext(vx, cy, vwd, e, C_TEXT, 0);
+        g_ctext(vx, cy + 2, vwd, TR("Щёлкните LIVE у участника, чтобы попробовать снова"), C_MUTED, 0);
+        free(e);
+    } else if (WS.phase != GW_LIVE) g_ctext(vx, cy, vwd, WS.phase == GW_WAIT ? TR("Ждём ответ сервера трансляции...") : TR("Подключение к трансляции..."), C_MUTED, 0);
+    else if (!g_video_supported()) {
+        g_ctext(vx, cy - 1, vwd, TR("Видео в терминале не показывается, звук идёт"), C_TEXT, AT_B);
+        g_ctext(vx, cy + 1, vwd, TR("Чат - Alt+W, выйти - кнопка «Выйти»"), C_MUTED, 0);
+    } else if (WS.v.unsupported) {               /* кодер: растр не заявляем — иначе вместо текста чёрное поле */
+        g_ctext(vx, cy - 1, vwd, TR("Формат трансляции не поддерживается"), C_RED, AT_B);
+        g_ctext(vx, cy + 1, vwd, TR("Звук трансляции идёт"), C_MUTED, 0);
+    } else {
+        if (!WS.vpkts) g_ctext(vx, cy, vwd, TR("Ждём первый кадр..."), C_MUTED, 0);
+        else if (O.demo) g_ctext(vx, cy, vwd, TR("демо: здесь будет видео трансляции"), C_MUTED, 0);
+        /* растр поверх клеток закрыл бы меню, карточки и окна — пока они открыты, видео прячется */
+        bool cover = U.menu || U.pick || U.card_uid || U.ep || U.qs || FM.id || IV.on || AVB.uid || tm_on || rules_on || upd_on || CSEL.on;
+        if (!cover) g_video_area(vx, vy, vwd, vh);
+    }
+    draw_status(x, x + w, H - 1);
+}
+#endif
+
 static void draw_main(int W, int H) {
     VoiceStatus vs;
     voice_status(&vs);
@@ -7418,6 +8009,30 @@ static void draw_main(int W, int H) {
     if (sw < 20) sw = 20;
     if (sw > (PW.side ? W / 2 : 34)) sw = PW.side ? W / 2 : 34;
     int sx = RAIL_W, cx = sx + sw, cw = W - cx;
+#ifdef ASTRA_VIDEO
+    if (wv_on() && !WV.chat && (S.open_ch != WV.ch || U.sel_guild != WV.gd)) WV.chat = true;   /* ушли в другой канал — к чату */
+    {
+        cu_areas = 0; cu_anim = false;
+        Channel *oc0 = chan_find(S.open_ch);      /* своя плитка будет в центре — предпросмотр в колонке не нужен */
+        cu_center = cu_on() && oc0 && is_voice(oc0) && vs.phase != VS_IDLE && vs.channel_id == oc0->id && !(wv_on() && !WV.chat);
+        if (WV.cam == S.me_id && !WV.chat && cu_on()) cu_center = true;   /* себя смотрим крупно — в колонке не дублировать */
+    }
+    if (wv_on() && !WV.chat) {                   /* просмотр трансляции или камеры: панель видео вместо центра */
+        if (WV.full || cw < 44) draw_watch(0, W, H);
+        else {
+            draw_rail(H);
+            draw_sidebar(sx, sw, H, &vs);
+            hit_add(cx - 1, 1, 1, H - 3, A_SPLIT, 0, 0, HV_ACC);
+            draw_watch(cx, cw, H);
+        }
+        if (U.menu) draw_menu(MENU_LEFT(U.menu_kind) ? sx : cx, 1, MENU_LEFT(U.menu_kind) ? W - sx : cw, H - 1);
+        if (U.pick) draw_picker(W, H, sx + sw - 4, 5);
+        if (U.card_uid) draw_card(W, H);
+        if (U.ep) draw_ep(W, H);
+        if (U.qs) draw_qs(W, H);
+        return;
+    }
+#endif
     draw_rail(H);
     draw_sidebar(sx, sw, H, &vs);
     hit_add(cx - 1, 1, 1, H - 3, A_SPLIT, 0, 0, HV_ACC);   /* №11: граница колонки каналов */
@@ -9424,6 +10039,20 @@ static void fm_submit(int bid) {
         voice_status(&v5);
         share_audio_enable(FM.f[2].ch != 0);
         ok = share_start(FM.f[1].ch, id, err, sizeof err);
+        if (!ok && err[0]) { char t2[sizeof err]; snprintf(t2, sizeof t2, "%s", tr(err)); snprintf(err, sizeof err, "%s", t2); }   /* ошибки захвата — на языке интерфейса */
+#ifndef _WIN32
+        if (ok && share_wayland()) {             /* Go Live — после выбора в системном окне (иначе отмена мелькнула бы эфиром) */
+            if (!v5.channel_id) { share_stop(); ok = false; snprintf(err, sizeof err, "%s", TR("трансляция: сначала войдите в голосовой канал")); break; }
+            sh_gl_wait = true;
+            GL_phase = GL_prev = GL_OFF;
+            sh_running = true;
+            sh_ch = v5.channel_id; sh_gid = v5.guild_id;
+            sh_prev_streamer = streamer_on();
+            streamer_set(true);
+            ui_notice("%s", TR("выберите экран или окно в системном окне"));
+            break;
+        }
+#endif
         if (ok && !golive_start(v5.guild_id, v5.channel_id, err, sizeof err)) { share_stop(); ok = false; }   /* Go Live в этот канал/звонок */
         if (ok) {
             GL_phase = GL_prev = GL_CREATING;
@@ -9431,8 +10060,18 @@ static void fm_submit(int bid) {
             sh_ch = v5.channel_id;
             sh_prev_streamer = streamer_on();
             streamer_set(true);
-            ui_notice("%s", TR("трансляция началась: отправка в Discord появится позже, сейчас - только захват и кодирование"));
+            ui_notice("%s", TR("трансляция началась"));
         }
+        break;
+    }
+#endif
+#ifdef ASTRA_VIDEO
+    case FM_CAM: {
+        int d = FM.f[0].ch;
+        if (!O.demo && d >= 0 && d < cu_ndev) cam_select(cu_dev[d].id);
+        anon_set_default(FM.f[1].ch != 0);       /* до cam_start: первый же кадр уходит уже закрытым */
+        cu_pv_hide = !FM.f[2].ch;
+        cu_start();
         break;
     }
 #endif
@@ -9577,7 +10216,43 @@ static void copy_text(const char *s) {
     ui_notice(TR("текст скопирован"));
 }
 /* ---- действия над сообщением (клавиши r/e/d/+ и пункты меню) ---- */
+static void user_card(u64 uid, int x, int y);
+static struct { u64 u; float v; } lmute[16];     /* «Заглушить для меня»: громкость до заглушения (в памяти) */
+static void vmem_action(int what) {
+    u64 uid = U.menu_uid;
+    if (!uid) return;
+    float v = voice_get_volume(uid);
+    switch (what) {
+    case MI_V_VOL: voice_set_volume(uid, 1.0f); break;
+    case MI_V_UP: case MI_V_DN: {
+        int pc = (int)(v * 100 + 0.5f) + (what == MI_V_UP ? 10 : -10);   /* шаг ровно 10% без дрейфа float */
+        voice_set_volume(uid, (pc < 0 ? 0 : pc > 200 ? 200 : pc) / 100.0f);
+        break;
+    }
+    case MI_V_MUTE: {
+        int k = -1, fr = -1;
+        for (int i = 0; i < 16; i++) { if (lmute[i].u == uid) k = i; if (!lmute[i].u && fr < 0) fr = i; }
+        if (v < 0.005f) { voice_set_volume(uid, k >= 0 && lmute[k].v > 0.005f ? lmute[k].v : 1.0f); if (k >= 0) lmute[k].u = 0; }
+        else { if (k < 0) k = fr >= 0 ? fr : 0; lmute[k].u = uid; lmute[k].v = v; voice_set_volume(uid, 0); }
+        U.menu = false;
+        return;
+    }
+    case MI_V_PROF: U.menu = false; user_card(uid, U.menu_x, U.menu_y); return;
+    case MI_V_MIC: voice_toggle_mute(); U.menu = false; return;
+    case MI_V_DEAF: voice_toggle_deaf(); U.menu = false; return;
+    case MI_V_SMUTE: case MI_V_MOVE: {
+        Channel *vc = chan_find(U.menu_vch);
+        U.menu = false;
+        if (!vc || !vc->guild_id) return;
+        fm_mod_uid = uid; fm_mod_kind = what == MI_V_SMUTE ? MOD_MUTE : MOD_MOVE;   /* та же форма, что в карточке (B_MOD) */
+        fm_open(FM_MOD, vc->guild_id, vc->id);
+        return;
+    }
+    }
+    U.menu = true;                               /* громкость: меню остаётся открытым, можно жать ещё */
+}
 static void msg_action(Message *m, int what) {
+    if (what >= MI_V_VOL && what <= MI_V_DEAF) { vmem_action(what); return; }
     switch (what) {
     case MI_FX: fx_cycle(); return;
     case MI_VADDN: voice_vad_adjust(-3); ui_notice(TR("порог голоса: %d дБ"), voice_vad_db()); return;
@@ -9819,6 +10494,34 @@ static void button(int id, int x, int y) {
         fm_open(FM_SHARE, 0, 0);
         break;
     }
+#endif
+#ifdef ASTRA_VIDEO
+    case B_WATCH: {
+        int ri = U.btn_arg;
+        if (ri < 0 || ri >= U.nrows || U.rows[ri].kind != R_MEMBER) break;
+        VoiceStatus v8;
+        voice_status(&v8);
+        if (v8.phase == VS_IDLE || v8.channel_id != U.rows[ri].id) { ui_notice("%s", TR("чтобы смотреть трансляцию, сначала войдите в этот голосовой канал")); break; }
+        wv_watch(U.rows[ri].user);
+        break;
+    }
+    case B_WATCH_STOP: wv_stop(); break;
+    case B_WATCH_PICK: wv_pick(U.btn_arg); break;
+    case B_WATCH_FULL: WV.full = !WV.full; U.full = true; break;
+    case B_WATCH_CHAT: WV.chat = true; U.full = true; break;
+    case B_WATCH_SHOW: WV.chat = false; WV.ch = S.open_ch; WV.gd = U.sel_guild; U.full = true; break;
+    case B_CAM: cu_toggle(!cu_on()); break;
+    case B_CAM_PV: cu_pv_hide = !cu_pv_hide; U.full = true; break;
+    case B_ANON: cu_anon_toggle(); break;
+    case B_CAM_VIEW:                             /* значок []/ у участника в списке канала */
+        if (U.btn_arg >= 0 && U.btn_arg < U.nrows && U.rows[U.btn_arg].kind == R_MEMBER) {
+            VoiceStatus v8;
+            voice_status(&v8);
+            if (v8.phase == VS_IDLE || v8.channel_id != U.rows[U.btn_arg].id) ui_notice("%s", TR("чтобы смотреть камеру, сначала войдите в этот голосовой канал"));
+            else cv_open(U.rows[U.btn_arg].user);
+        }
+        break;
+    case B_CAM_TILE: if (U.btn_arg >= 0 && U.btn_arg < 16 && cu_tu[U.btn_arg]) cv_open(cu_tu[U.btn_arg]); break;
 #endif
     case B_HPF: voice_hpf(!voice_hpf_on()); break;
     case B_NS_OFF: case B_NS_SPX: case B_NS_RNN: voice_ns_set(NS_OFF + (id - B_NS_OFF)); break;
@@ -10085,6 +10788,11 @@ static void mouse(const Key *k) {
         else if (h->act == A_ROW && h->arg >= 0 && h->arg < U.nrows && (U.rows[h->arg].kind == R_CHAN || U.rows[h->arg].kind == R_HEADER)) {
             U.menu_cid = U.rows[h->arg].id;          /* правый щелчок по каналу/категории — меню канала */
             menu_open(MENU_CHAN, -1, k->x, k->y);
+        } else if (h->act == A_ROW && h->arg >= 0 && h->arg < U.nrows && U.rows[h->arg].kind == R_MEMBER) {
+            U.menu_uid = U.rows[h->arg].user;    /* правый щелчок по участнику голоса — его меню */
+            U.menu_vch = U.rows[h->arg].id;
+            U.sel_row = h->arg;
+            menu_open(MENU_VMEM, -1, k->x, k->y);
         }
         return;
     }
@@ -10192,6 +10900,9 @@ static void handle_key(const Key *k) {
     }
     if (k->code == K_ENTER && k->alt && !k->ctrl && full_toggle()) return;
     if (!LG.on && k->code == K_CHAR && k->alt && !k->ctrl && k->ch >= '1' && k->ch <= '9' && (int)(k->ch - '1') < TB.n) { tab_go((int)(k->ch - '1')); return; }
+#ifdef ASTRA_VIDEO
+    if (!LG.on && !U.help && !U.settings && wv_on() && wv_key(k)) return;   /* просмотр трансляции: Alt+W, Alt+F, Alt+стрелки, Esc */
+#endif
     if (!LG.on && k->code == K_CHAR && k->ctrl && !k->alt && (k->ch == 'w' || k->ch == 'W' || k->ch == 0x446 || k->ch == 0x426) && TB.n && !(U.focus == F_INPUT && U.in.len)) { tab_close(tab_pos(S.open_ch)); return; }   /* в поле с текстом Ctrl+W стирает слово */   /* №16; в консоли Alt+Enter — перенос строки */
     if (k->code == K_CHAR && k->ctrl && !k->alt && (k->ch == '=' || k->ch == '+' || k->ch == '-' || k->ch == '_' || k->ch == '0')) {
         zoom_step(k->ch == '0' ? 0 : k->ch == '-' || k->ch == '_' ? -1 : 1);
@@ -10370,6 +11081,11 @@ static void handle_key(const Key *k) {
         fx_cycle();
         return;
     }
+#ifdef ASTRA_VIDEO
+    /* камера: F12 или Alt+C (Alt+с) — сразу, выбранной камерой; окно выбора — кнопкой []/ */
+    if (k->code == K_F12 || (k->code == K_CHAR && k->alt && !k->ctrl && (k->ch == 'c' || k->ch == 'C' || k->ch == 0x441 || k->ch == 0x421))) { cu_toggle(false); return; }
+    if (k->code == K_CHAR && k->alt && !k->ctrl && (k->ch == 'e' || k->ch == 'E' || k->ch == 0x443 || k->ch == 0x423)) { cu_anon_toggle(); return; }   /* Alt+E (Alt+у) */
+#endif
     if (k->code >= K_F2 && k->code <= K_F10) { voice_keys(k); return; }
     if (U.help && k->code == K_ESC) { U.help = false; U.full = true; U.dirty = true; return; }
     /* открытая справка листается стрелками и PgUp/PgDn (верхняя граница - в render) */
@@ -10597,6 +11313,32 @@ void ui_tick(void) {
         static bool ep_was;
         if (ep_was && !U.ep) emoji_close();      /* №32: эмодзи сервера живут, пока открыт пикер */
 #ifdef ASTRA_VIDEO
+        {
+            static i64 ws_next;
+            GoWatchState nw;
+            golive_wstate(&nw);
+            if (O.demo && demo_watch) {          /* --demo: подставной просмотр для снимков (сети нет) */
+                static i64 dw0;
+                static u64 dwu;
+                if (dwu != demo_watch) { dwu = demo_watch; dw0 = now; }
+                nw = (GoWatchState){ .phase = now - dw0 < 600 ? GW_CONNECTING : GW_LIVE, .user = demo_watch, .apkts = (now - dw0) / 20, .vpkts = (now - dw0) / 8 };
+            }
+            if (nw.phase != WS.phase || nw.user != WS.user || (nw.phase != GW_OFF && now >= ws_next)) { WS = nw; U.dirty = true; ws_next = now + 1000; }
+            if (WS.phase != GW_OFF) {
+                VoiceStatus v7;
+                voice_status(&v7);
+                if (v7.phase == VS_IDLE) wv_stop();
+            }
+            if (WV.cam) {                        /* камера крупно: участник выключил камеру или звонок кончился */
+                VoiceStatus v7;
+                voice_status(&v7);
+                const VoiceState *l7[32];
+                int k7 = v7.phase == VS_IDLE ? 0 : voice_members(v7.channel_id, l7, 32);
+                bool has = false;
+                for (int i = 0; i < k7; i++) if (l7[i]->user_id == WV.cam && cu_user(l7[i])) has = true;
+                if (!has) { if (k7) ui_notice("%s", TR("камера выключена у участника")); wv_stop(); }
+            }
+        }
         if (sh_running) {
             ShareState ns2;
             share_state(&ns2);
@@ -10613,12 +11355,39 @@ void ui_tick(void) {
             GoLiveState gl;
             golive_state(&gl);
             if (gl.phase != GL_phase) { GL_prev = GL_phase; GL_phase = gl.phase; snprintf(GL_err, sizeof GL_err, "%s", gl.err); U.dirty = true; }
+            if (gl.waiting != GL_wait) { GL_wait = gl.waiting; U.dirty = true; }
             VoiceStatus v6;
             voice_status(&v6);
-            if (!ns2.active) share_ui_stop(ns2.reason[0] ? ns2.reason : "трансляция остановлена");
-            else if (GL_phase == GL_OFF && GL_prev != GL_OFF) share_ui_stop("трансляция остановлена: Discord завершил эфир");
+            if (sh_gl_wait && ns2.active && !ns2.choosing) {   /* Wayland: источник выбран — теперь Go Live */
+                char ge[128] = "";
+                sh_gl_wait = false;
+                if (!golive_start(sh_gid, sh_ch, ge, sizeof ge)) share_ui_stop(ge);
+                else { GL_phase = GL_prev = GL_CREATING; ui_notice("%s", TR("трансляция началась")); }
+                U.dirty = true;
+            }
+            if (!sh_running) { /* остановлено выше */ }
+            else if (!ns2.active) share_ui_stop(ns2.reason[0] ? ns2.reason : "трансляция остановлена");
+            else if (!sh_gl_wait && GL_phase == GL_OFF && GL_prev != GL_OFF) share_ui_stop("трансляция остановлена: Discord завершил эфир");
             else if (v6.phase == VS_IDLE) share_ui_stop("трансляция остановлена: вы вышли из звонка");
             else if (v6.channel_id != sh_ch) share_ui_stop("трансляция остановлена: другой канал");
+        }
+        {                                        /* своя камера: индикатор раз в секунду, сбой — словами */
+            static i64 cs_next, an_next;
+            CamState nc;
+            if (O.demo) {
+                VoiceStatus v9;
+                voice_status(&v9);
+                if (v9.phase == VS_IDLE) cu_demo = false;
+                nc = cu_demo ? (CamState){ .phase = CAM_LIVE, .w = 1280, .h = 720, .fps = 30, .fps_out = 30 } : (CamState){ .phase = CAM_OFF };
+            } else cam_state(&nc);
+            if (nc.phase != CS.phase) {
+                if (nc.phase == CAM_FAILED && nc.err[0]) ui_notice(TR("камера выключена: %s"), nc.err);
+                CS = nc; U.full = U.dirty = true;
+            } else if (nc.phase != CAM_OFF && now >= cs_next) {
+                if (nc.h != CS.h || (int)(nc.fps_out + 0.5) != (int)(CS.fps_out + 0.5)) U.dirty = true;
+                CS = nc; cs_next = now + 1000;
+            }
+            if (cu_anim && now >= an_next) { an_next = now + 100; U.dirty = true; }   /* --demo: узор плиток движется */
         }
 #endif
         {

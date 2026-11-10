@@ -7,6 +7,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include "gui.h"
+#ifdef ASTRA_VIDEO
+#include <stdatomic.h>
+#include "plat.h"
+#include "golive.h"
+#include "cam.h"
+#endif
 
 Grid G;
 
@@ -308,7 +314,16 @@ static void csi(char f) {
     if (G.priv == '?') {
         if (f != 'h' && f != 'l') return;
         for (int i = 0; i < G.np; i++) {
-            if (G.par[i] == 2026) { G.sync = f == 'h'; if (!G.sync) { layers_reap(); gb_flush(); } }
+            if (G.par[i] == 2026) {
+                G.sync = f == 'h';
+                if (!G.sync) {
+                    layers_reap();
+#ifdef ASTRA_VIDEO
+                    gvid_commit();              /* кадр вывода окончен: прямоугольник видео этого render() */
+#endif
+                    gb_flush();
+                }
+            }
             else if (G.par[i] == 1049) { sgr_reset(); erase_all(); G.cx = G.cy = 0; }
         }
         return;
@@ -642,7 +657,12 @@ void gui_shutdown(void) {
     kq_wipe();
     gb_flush();
 }
-void gui_size(int *w, int *h) { *w = G.cols; *h = G.rows; }
+void gui_size(int *w, int *h) {
+#ifdef ASTRA_VIDEO
+    gvid_frame_begin();                         /* render() начинается с term_size: новый кадр — видео пока не заявлено */
+#endif
+    *w = G.cols; *h = G.rows;
+}
 void gui_resize(int cols, int rows) {
     grid_resize(cols, rows);
     if (G.ui) kq_push(&(Key){ .code = K_RESIZE });
@@ -668,3 +688,371 @@ void gui_atexit(void) {
         if (any) break;
     }
 }
+
+#ifdef ASTRA_VIDEO
+/* ---------- растровое видео поверх сетки (просмотр трансляции) ----------
+ * ui.c в каждом render() (после term_size -> gui_size) зовёт g_video_area, пока панель видна; в конце кадра вывода
+ * (ESC[?2026l) прямоугольник фиксируется (gvid_commit): не звали в этом кадре — видео скрыто. Поток зрителя кладёт
+ * кадр (gvid_put_i420): I420 -> BGRA с масштабом «ближайший сосед» сразу в буфер размера вписанной картинки (не
+ * больше исходного кадра — дальше растягивает окно), под мьютексом; будит перерисовку только области видео, не чаще
+* частотой источника (до 30 к/с). Бэкенд рисует его поверх клеток (поля — чёрные). Буфер живёт, пока видео видно; скрыто/конец — затирается. */
+static struct {
+    PlatMutex *mu;
+    atomic_bool want;                           /* область видна */
+    int px, py, pw, ph;                         /* область в пикселях (под mu) */
+    u32 *buf; int bw, bh; size_t bcap;          /* вписанная картинка (под mu); память — у бэкенда (X11: MIT-SHM) */
+    int *xi; u8 *row; int auxw;                 /* таблица индексов x и строки выборки Y/U/V под ширину auxw */
+    i64 last;                                   /* время последнего показанного кадра */
+    bool pend_set; int pend[4];                 /* главный поток: вызов в текущем render() */
+    int cur[4];                                 /* главный поток: зафиксированный прямоугольник в клетках */
+} GV;
+static void gv_drop_buf(void) {                 /* под mu */
+    if (GV.buf) { wipe(GV.buf, GV.bcap); gb_vbuf_free(GV.buf, GV.bcap); }
+    GV.buf = NULL; GV.bw = GV.bh = 0; GV.bcap = 0;
+    if (GV.row) wipe(GV.row, (size_t)GV.auxw * 3 + 48);
+    free(GV.xi); free(GV.row);
+    GV.xi = NULL; GV.row = NULL; GV.auxw = 0;
+}
+bool g_video_supported(void) { return gb_video_ok(); }
+void g_video_area(int x, int y, int w, int h) {
+    if (!GV.mu || !G.ch) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > G.cols) w = G.cols - x;
+    if (y + h > G.rows) h = G.rows - y;
+    if (w <= 0 || h <= 0) return;
+    GV.pend[0] = x; GV.pend[1] = y; GV.pend[2] = w; GV.pend[3] = h;
+    GV.pend_set = true;
+}
+static void gcam_frame_begin(void);
+static void gcam_commit(void);
+void gvid_frame_begin(void) { GV.pend_set = false; gcam_frame_begin(); }
+void gvid_commit(void) {
+    gcam_commit();                              /* плитки камер (cam.h) */
+    if (!GV.mu) return;
+    int nc[4] = { 0, 0, 0, 0 };
+    if (GV.pend_set && gb_video_ok()) memcpy(nc, GV.pend, sizeof nc);
+    int cw = 1, chh = 1;
+    gb_cell_px(&cw, &chh);
+    int np[4] = { nc[0] * cw, nc[1] * chh, nc[2] * cw, nc[3] * chh };
+    mutex_lock(GV.mu);
+    int op[4] = { GV.px, GV.py, GV.pw, GV.ph };
+    bool same = !memcmp(op, np, sizeof op);
+    if (!same) {
+        GV.px = np[0]; GV.py = np[1]; GV.pw = np[2]; GV.ph = np[3];
+        if (!GV.pw) gv_drop_buf();               /* скрыто — растр не держим */
+        GV.last = 0;                             /* новый размер — следующий кадр сразу */
+    }
+    mutex_unlock(GV.mu);
+    memcpy(GV.cur, nc, sizeof nc);
+    atomic_store(&GV.want, np[2] > 0 && np[3] > 0);
+    if (!same) {
+        if (op[2] > 0) gb_video_inval(op[0], op[1], op[2], op[3]);
+        if (np[2] > 0) gb_video_inval(np[0], np[1], np[2], np[3]);
+    }
+}
+/* видна область и само окно (не свёрнуто, не скрыто в трей, на X11 — отображено и не закрыто целиком):
+ * иначе декодер останавливается до нуля, при возврате — новый ключевой кадр (PLI) */
+bool gvid_wanted(void) { return GV.mu && atomic_load(&GV.want) && gb_video_shown(); }
+void gvid_open(void) { if (!GV.mu) GV.mu = mutex_new(); }
+void gvid_area_px(int *pw, int *ph) {           /* размер области видео в пикселях (для pixelCounts) */
+    *pw = *ph = 0;
+    if (!GV.mu) return;
+    mutex_lock(GV.mu);
+    *pw = GV.pw; *ph = GV.ph;
+    mutex_unlock(GV.mu);
+}
+void gvid_close(void) {
+    if (!GV.mu) return;
+    mutex_lock(GV.mu);
+    int op[4] = { GV.px, GV.py, GV.pw, GV.ph };
+    bool had = GV.buf != NULL;
+    gv_drop_buf();
+    mutex_unlock(GV.mu);
+    if (had && op[2] > 0) gb_video_inval(op[0], op[1], op[2], op[3]);   /* клетки под видео — снова видны */
+}
+size_t gvid_bytes(void) {
+    if (!GV.mu) return 0;
+    mutex_lock(GV.mu);
+    size_t n = GV.bcap;
+    mutex_unlock(GV.mu);
+    return n;
+}
+static inline u8 gv_clip(int v) { return (u8)(v < 0 ? 0 : v > 255 ? 255 : v); }
+static inline u32 gv_px(int Yv, int Uv, int Vv) {   /* BT.601, узкий диапазон, точно */
+    int c = 298 * (Yv - 16), d = Uv - 128, e = Vv - 128;
+    return (u32)gv_clip((c + 409 * e + 128) >> 8) << 16 | (u32)gv_clip((c - 100 * d - 208 * e + 128) >> 8) << 8 | gv_clip((c + 516 * d + 128) >> 8);
+}
+#if defined(__SSE2__)
+#include <emmintrin.h>
+/* 8 точек: y/u/v — по 8 значений (u, v уже размножены по точкам). Коэффициенты BT.601 в масштабе 64, сложения с
+ * насыщением (иначе 74*(Y-16) + 129*(U-128) переполняет 16 бит). Отклонение от точного пути — до 2/255 на канал. */
+static inline void gv_sse2_8(u32 *o, const u8 *yp, const u8 *up, const u8 *vp) {
+    __m128i z = _mm_setzero_si128();
+    __m128i y = _mm_sub_epi16(_mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)yp), z), _mm_set1_epi16(16));
+    __m128i u = _mm_sub_epi16(_mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)up), z), _mm_set1_epi16(128));
+    __m128i v = _mm_sub_epi16(_mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)vp), z), _mm_set1_epi16(128));
+    __m128i c = _mm_adds_epi16(_mm_mullo_epi16(y, _mm_set1_epi16(74)), _mm_set1_epi16(32));
+    __m128i r = _mm_adds_epi16(c, _mm_mullo_epi16(v, _mm_set1_epi16(102)));
+    __m128i g = _mm_subs_epi16(c, _mm_adds_epi16(_mm_mullo_epi16(u, _mm_set1_epi16(25)), _mm_mullo_epi16(v, _mm_set1_epi16(52))));
+    __m128i b = _mm_adds_epi16(c, _mm_mullo_epi16(u, _mm_set1_epi16(129)));
+    __m128i Rv = _mm_packus_epi16(_mm_srai_epi16(r, 6), z), Gv = _mm_packus_epi16(_mm_srai_epi16(g, 6), z), Bv = _mm_packus_epi16(_mm_srai_epi16(b, 6), z);
+    __m128i bg = _mm_unpacklo_epi8(Bv, Gv), r0 = _mm_unpacklo_epi8(Rv, z);
+    _mm_storeu_si128((__m128i *)o, _mm_unpacklo_epi16(bg, r0));
+    _mm_storeu_si128((__m128i *)(o + 4), _mm_unpackhi_epi16(bg, r0));
+}
+#endif
+/* ближайший сосед по таблице индексов x (одна на ширину), строка выборки -> BT.601 (SSE2 по 8 точек);
+ * xi — fw чисел, row — fw * 3 + 48 байт (Y | U | V с запасом под чтение по 8). Общее у трансляции и плиток камер. */
+static void gv_scale(const u8 *y, const u8 *u, const u8 *v, int ys, int uvs, int w, int h, int bits, u32 *buf, int fw, int fh, int *xi, u8 *row) {
+    u32 sx_step = (u32)(((u64)w << 16) / (u32)fw), sy_step = (u32)(((u64)h << 16) / (u32)fh);
+    { u32 sx = sx_step / 2; for (int dx = 0; dx < fw; dx++, sx += sx_step) xi[dx] = (int)(sx >> 16); }
+    u8 *ty = row, *tu = row + fw + 16, *tv = row + 2 * fw + 32;
+    u32 sy = sy_step / 2;
+    int prev_uv = -1;
+    for (int dy = 0; dy < fh; dy++, sy += sy_step) {
+        int yy = (int)(sy >> 16);
+        const u8 *Yr = y + (size_t)yy * ys, *Ur = u + (size_t)(yy >> 1) * uvs, *Vr = v + (size_t)(yy >> 1) * uvs;
+        u32 *o = buf + (size_t)dy * fw;
+        if (bits == 8) {
+            for (int dx = 0; dx < fw; dx++) ty[dx] = Yr[xi[dx]];
+            if ((yy >> 1) != prev_uv) { prev_uv = yy >> 1; for (int dx = 0; dx < fw; dx++) { tu[dx] = Ur[xi[dx] >> 1]; tv[dx] = Vr[xi[dx] >> 1]; } }
+        } else {                                 /* 10 бит: u16 -> u8 */
+            const uint16_t *Y16 = (const uint16_t *)Yr, *U16 = (const uint16_t *)Ur, *V16 = (const uint16_t *)Vr;
+            for (int dx = 0; dx < fw; dx++) { ty[dx] = (u8)(Y16[xi[dx]] >> 2); tu[dx] = (u8)(U16[xi[dx] >> 1] >> 2); tv[dx] = (u8)(V16[xi[dx] >> 1] >> 2); }
+        }
+        int dx = 0;
+#if defined(__SSE2__)
+        for (; dx + 8 <= fw; dx += 8) gv_sse2_8(o + dx, ty + dx, tu + dx, tv + dx);
+#endif
+        for (; dx < fw; dx++) o[dx] = gv_px(ty[dx], tu[dx], tv[dx]);
+    }
+}
+/* bits 8 — отсчёт u8, 10 — u16 (младшие 10 бит); шаги ys/uvs — в байтах */
+static bool gv_put(const u8 *y, const u8 *u, const u8 *v, int ys, int uvs, int w, int h, int bits) {
+    if (!gvid_wanted() || w < 2 || h < 2 || (bits != 8 && bits != 10)) return false;
+    i64 now = now_ms();
+    mutex_lock(GV.mu);
+    if (GV.pw <= 0 || GV.ph <= 0) { mutex_unlock(GV.mu); return false; }
+    if (GV.last && now - GV.last < 25) { mutex_unlock(GV.mu); return true; }   /* не чаще 40 к/с: трансляция Discord до 30 к/с идёт без пропусков (запас на неровный приход кадров) */
+    int pw = GV.pw, ph = GV.ph, fw, fh;
+    if ((i64)w * ph > (i64)h * pw) { fw = pw; fh = (int)((i64)h * pw / w); }   /* вписать с пропорциями */
+    else { fh = ph; fw = (int)((i64)w * ph / h); }
+    if (fw > w || fh > h) { fw = w; fh = h; }   /* не больше исходного: увеличивает окно (Windows) */
+    if (fw < 1) fw = 1;
+    if (fh < 1) fh = 1;
+    size_t need = (size_t)fw * fh * 4;
+    if (need > GV.bcap || fw != GV.auxw) {
+        gv_drop_buf();
+        GV.buf = gb_vbuf_alloc(need);
+        GV.xi = malloc((size_t)fw * sizeof *GV.xi);
+        GV.row = malloc((size_t)fw * 3 + 48);    /* Y | U | V, с запасом под чтение по 8 */
+        if (!GV.buf || !GV.xi || !GV.row) { if (GV.buf) gb_vbuf_free(GV.buf, need); GV.buf = NULL; free(GV.xi); free(GV.row); GV.xi = NULL; GV.row = NULL; mutex_unlock(GV.mu); return false; }
+        GV.bcap = need;
+        GV.auxw = fw;
+    }
+    gv_scale(y, u, v, ys, uvs, w, h, bits, GV.buf, fw, fh, GV.xi, GV.row);
+    GV.bw = fw; GV.bh = fh;
+    GV.last = now;
+    int a[4] = { GV.px, GV.py, GV.pw, GV.ph };
+    mutex_unlock(GV.mu);
+    gb_video_inval(a[0], a[1], a[2], a[3]);
+    return true;
+}
+/* selftest: быстрый путь (SSE2) против точного — все Y, U, V с шагом 3: отклонение канала <= 2/255 */
+int gvid_selftest(void (*check)(bool ok, const char *what)) {
+    int worst = 0;
+    long long n = 0;
+#if defined(__SSE2__)
+    u8 ty[16], tu[16], tv[16];
+    u32 o[8];
+    for (int Y = 0; Y < 256; Y += 3) for (int U = 0; U < 256; U += 3) for (int V = 0; V < 256; V += 24) {
+        for (int k = 0; k < 8; k++) { ty[k] = (u8)Y; tu[k] = (u8)U; tv[k] = (u8)(V + k * 3 > 255 ? 255 : V + k * 3); }
+        gv_sse2_8(o, ty, tu, tv);
+        for (int k = 0; k < 8; k++) {
+            u32 e = gv_px(ty[k], tu[k], tv[k]);
+            for (int c = 0; c < 24; c += 8) { int d = (int)((o[k] >> c) & 255) - (int)((e >> c) & 255); if (d < 0) d = -d; if (d > worst) worst = d; }
+            n++;
+        }
+    }
+#endif
+    char m[160];
+    snprintf(m, sizeof m, "Go Live зритель: I420 -> BGRA SSE2 против точного: %lld точек, наибольшее отклонение %d/255", n, worst);
+    check(worst <= 2, m);
+    return 0;
+}
+bool gvid_put_i420(const u8 *y, const u8 *u, const u8 *v, int ys, int uvs, int w, int h) { return gv_put(y, u, v, ys, uvs, w, h, 8); }
+bool gvid_put_pic(const VidPic *p) { return gv_put(p->p[0], p->p[1], p->p[2], p->s[0], p->s[1], p->w, p->h, p->bits); }
+/* бэкенд (главный поток, рисование): true — есть кадр, mu захвачен до gvid_paint_unlock */
+bool gvid_paint_lock(GvPaint *o) {
+    if (!GV.mu) return false;
+    mutex_lock(GV.mu);
+    if (!GV.buf || GV.pw <= 0 || GV.ph <= 0 || !GV.bw) { mutex_unlock(GV.mu); return false; }
+    o->x = GV.px; o->y = GV.py; o->w = GV.pw; o->h = GV.ph;
+    o->buf = GV.buf; o->bw = GV.bw; o->bh = GV.bh;
+    return true;
+}
+void gvid_paint_unlock(void) { mutex_unlock(GV.mu); }
+
+/* ---------- плитки камер (cam.h): несколько растров поверх сетки ----------
+ * Тот же договор, что у трансляции: ui.c в каждом render() зовёт g_cam_area(user, ...) для видимых плиток, в конце
+ * кадра вывода (gvid_commit) набор фиксируется; плитка, которую не заявили, скрыта — её растр затирается и
+ * освобождается, кадры для неё не нужны (gcam_want false: voice_cam.c не собирает и не декодирует). Кадр сразу
+ * уменьшается до вписанного размера плитки (не больше исходного), поэтому полный кадр на участника не хранится.
+ * Растр — обычная куча (сегмент MIT-SHM у X11 один и занят трансляцией). */
+typedef struct {
+    u64 user;
+    int px, py, pw, ph;                         /* пиксели */
+    u32 *buf; int bw, bh; size_t bcap;
+    int *xi; u8 *row; int auxw;
+    i64 last;
+} GcTile;
+static struct {
+    PlatMutex *mu;
+    GcTile t[CAM_TILES];                        /* под mu */
+    int n;
+    struct { u64 user; int c[4]; } pend[CAM_TILES];   /* главный поток: заявки текущего render() */
+    int npend;
+} GC;
+static void gc_drop(GcTile *t) {                /* под mu */
+    if (t->buf) { wipe(t->buf, t->bcap); free(t->buf); }
+    if (t->row) wipe(t->row, (size_t)t->auxw * 3 + 48);
+    free(t->xi); free(t->row);
+    t->buf = NULL; t->xi = NULL; t->row = NULL; t->bw = t->bh = t->auxw = 0; t->bcap = 0; t->last = 0;
+}
+void g_cam_area(u64 user, int x, int y, int w, int h) {
+    if (!G.ch || !user) return;
+    if (!GC.mu) GC.mu = mutex_new();
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > G.cols) w = G.cols - x;
+    if (y + h > G.rows) h = G.rows - y;
+    if (w <= 0 || h <= 0) return;
+    int i;
+    for (i = 0; i < GC.npend && GC.pend[i].user != user; i++) {}
+    if (i == GC.npend) { if (GC.npend == CAM_TILES) return; GC.npend++; }
+    GC.pend[i].user = user;
+    GC.pend[i].c[0] = x; GC.pend[i].c[1] = y; GC.pend[i].c[2] = w; GC.pend[i].c[3] = h;
+}
+static void gcam_frame_begin(void) { GC.npend = 0; }
+static void gcam_commit(void) {
+    if (!GC.mu) return;
+    int cw = 1, chh = 1;
+    gb_cell_px(&cw, &chh);
+    bool ok = gb_video_ok();
+    int inv[2 * CAM_TILES][4], ni = 0;
+    mutex_lock(GC.mu);
+    for (int i = GC.n - 1; i >= 0; i--) {       /* больше не заявлена — растр до нуля */
+        bool keep = false;
+        for (int j = 0; ok && j < GC.npend; j++) if (GC.pend[j].user == GC.t[i].user) keep = true;
+        if (keep) continue;
+        if (GC.t[i].buf && ni < 2 * CAM_TILES) { inv[ni][0] = GC.t[i].px; inv[ni][1] = GC.t[i].py; inv[ni][2] = GC.t[i].pw; inv[ni][3] = GC.t[i].ph; ni++; }
+        gc_drop(&GC.t[i]);
+        GC.t[i] = GC.t[--GC.n];
+        memset(&GC.t[GC.n], 0, sizeof GC.t[GC.n]);
+    }
+    for (int j = 0; ok && j < GC.npend; j++) {
+        int np[4] = { GC.pend[j].c[0] * cw, GC.pend[j].c[1] * chh, GC.pend[j].c[2] * cw, GC.pend[j].c[3] * chh };
+        int i;
+        for (i = 0; i < GC.n && GC.t[i].user != GC.pend[j].user; i++) {}
+        if (i == GC.n) { if (GC.n == CAM_TILES) continue; memset(&GC.t[i], 0, sizeof GC.t[i]); GC.t[i].user = GC.pend[j].user; GC.n++; }
+        GcTile *t = &GC.t[i];
+        if (t->px != np[0] || t->py != np[1] || t->pw != np[2] || t->ph != np[3]) {
+            if (t->buf && ni < 2 * CAM_TILES) { inv[ni][0] = t->px; inv[ni][1] = t->py; inv[ni][2] = t->pw; inv[ni][3] = t->ph; ni++; }
+            t->px = np[0]; t->py = np[1]; t->pw = np[2]; t->ph = np[3];
+            t->last = 0;                         /* новый размер — следующий кадр сразу */
+            if (t->buf) {                        /* старая картинка под новый размер не годится: до нового кадра — заглушка ui.c */
+                gc_drop(t);
+            }
+        }
+    }
+    mutex_unlock(GC.mu);
+    for (int i = 0; i < ni; i++) gb_video_inval(inv[i][0], inv[i][1], inv[i][2], inv[i][3]);
+}
+/* поток звонка/камеры: плитка участника видна (и окно видно); размер плитки в пикселях */
+bool gcam_want(u64 user, int *pw, int *ph);
+bool gcam_want(u64 user, int *pw, int *ph) {
+    *pw = *ph = 0;
+    if (!GC.mu || !gb_video_shown()) return false;
+    bool r = false;
+    mutex_lock(GC.mu);
+    for (int i = 0; i < GC.n; i++) if (GC.t[i].user == user && GC.t[i].pw > 0) { *pw = GC.t[i].pw; *ph = GC.t[i].ph; r = true; }
+    mutex_unlock(GC.mu);
+    return r;
+}
+bool gcam_shown(u64 user);
+bool gcam_shown(u64 user) {
+    if (!GC.mu) return false;
+    bool r = false;
+    mutex_lock(GC.mu);
+    for (int i = 0; i < GC.n; i++) if (GC.t[i].user == user && GC.t[i].buf && GC.t[i].bw) r = true;
+    mutex_unlock(GC.mu);
+    return r;
+}
+void gcam_drop(u64 user);
+void gcam_drop(u64 user) {                      /* видео участника кончилось: растр до нуля (плитка — снова заглушка) */
+    if (!GC.mu) return;
+    int a[4] = { 0, 0, 0, 0 };
+    mutex_lock(GC.mu);
+    for (int i = 0; i < GC.n; i++) if (GC.t[i].user == user && GC.t[i].buf) { a[0] = GC.t[i].px; a[1] = GC.t[i].py; a[2] = GC.t[i].pw; a[3] = GC.t[i].ph; gc_drop(&GC.t[i]); }
+    mutex_unlock(GC.mu);
+    if (a[2] > 0) gb_video_inval(a[0], a[1], a[2], a[3]);
+}
+size_t gcam_bytes(void);
+size_t gcam_bytes(void) {
+    if (!GC.mu) return 0;
+    size_t n = 0;
+    mutex_lock(GC.mu);
+    for (int i = 0; i < GC.n; i++) n += GC.t[i].bcap + (GC.t[i].xi ? (size_t)GC.t[i].auxw * (sizeof(int) + 3) + 48 : 0);
+    mutex_unlock(GC.mu);
+    return n;
+}
+bool gcam_put(u64 user, const u8 *y, const u8 *u, const u8 *v, int ys, int uvs, int w, int h, int bits);
+bool gcam_put(u64 user, const u8 *y, const u8 *u, const u8 *v, int ys, int uvs, int w, int h, int bits) {
+    if (!GC.mu || w < 2 || h < 2 || (bits != 8 && bits != 10) || !gb_video_shown()) return false;
+    i64 now = now_ms();
+    mutex_lock(GC.mu);
+    GcTile *t = NULL;
+    for (int i = 0; i < GC.n; i++) if (GC.t[i].user == user) t = &GC.t[i];
+    if (!t || t->pw <= 0 || t->ph <= 0) { mutex_unlock(GC.mu); return false; }
+    if (t->last && now - t->last < 25) { mutex_unlock(GC.mu); return true; }
+    int pw = t->pw, ph = t->ph, fw, fh;
+    if ((i64)w * ph > (i64)h * pw) { fw = pw; fh = (int)((i64)h * pw / w); }
+    else { fh = ph; fw = (int)((i64)w * ph / h); }
+    if (fw > w || fh > h) { fw = w; fh = h; }
+    if (fw < 1) fw = 1;
+    if (fh < 1) fh = 1;
+    size_t need = (size_t)fw * fh * 4;
+    if (need > t->bcap || fw != t->auxw) {
+        gc_drop(t);
+        t->buf = malloc(need);
+        t->xi = malloc((size_t)fw * sizeof *t->xi);
+        t->row = malloc((size_t)fw * 3 + 48);
+        if (!t->buf || !t->xi || !t->row) { free(t->buf); free(t->xi); free(t->row); t->buf = NULL; t->xi = NULL; t->row = NULL; mutex_unlock(GC.mu); return false; }
+        t->bcap = need;
+        t->auxw = fw;
+    }
+    gv_scale(y, u, v, ys, uvs, w, h, bits, t->buf, fw, fh, t->xi, t->row);
+    t->bw = fw; t->bh = fh;
+    t->last = now;
+    int a[4] = { t->px, t->py, t->pw, t->ph };
+    mutex_unlock(GC.mu);
+    gb_video_inval(a[0], a[1], a[2], a[3]);
+    return true;
+}
+/* бэкенд (главный поток, рисование): плитки с кадром; мьютекс держится до gcam_paint_unlock (всегда звать) */
+int gcam_paint_lock(GvPaint *o, int max) {
+    if (!GC.mu) return 0;
+    mutex_lock(GC.mu);
+    int n = 0;
+    for (int i = 0; i < GC.n && n < max; i++) {
+        GcTile *t = &GC.t[i];
+        if (!t->buf || !t->bw || t->pw <= 0 || t->ph <= 0) continue;
+        o[n].x = t->px; o[n].y = t->py; o[n].w = t->pw; o[n].h = t->ph;
+        o[n].buf = t->buf; o[n].bw = t->bw; o[n].bh = t->bh;
+        n++;
+    }
+    return n;
+}
+void gcam_paint_unlock(void) { if (GC.mu) mutex_unlock(GC.mu); }
+#endif

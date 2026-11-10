@@ -1378,6 +1378,7 @@ void login_finish(void) {
     if (L.m) { (VT ? VT->multi_cleanup : curl_multi_cleanup)(L.m); L.m = NULL; }
     if (Q.wm) { curl_multi_cleanup(Q.wm); Q.wm = NULL; }
     VT = NULL;
+    impcurl_shutdown();                          /* libcurl-impersonate нужна только для входа: выгрузить (повторный вход загрузит снова) */
     /* SECURITY К2: поток окна капчи не завершился (captcha_close не дождался за 20 с) — он ещё может писать
      * в L.k->ckey: страницы затираем, но не освобождаем (утечка закреплённых страниц лучше записи в чужую память). */
     if (L.k && captcha_busy()) { plat_wipe(L.k, L.ksz); L.k = NULL; }
@@ -1741,7 +1742,7 @@ int login_captcha_probe(void (*check)(bool ok, const char *what)) {
     int used = 0, refused = 0;
     captcha_bridge_stats(&used, &refused);
     got = got && used > 0;
-    char b[480];
+    char b[768];
     snprintf(b, sizeof b, "капча: WebView2 + страница под discord.com + hcaptcha.com через мост (%d соединений, отказано чужим: %d) -> "
              "ответ за %lld мс%s%s (память процесса: %zu -> пик %zu -> %zu КБ)", used, refused, (long long)(now() - t0),
              got ? "" : " - ", got ? "" : err, pb0 / 1024, peak / 1024, plat_private_bytes() / 1024);

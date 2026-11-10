@@ -724,7 +724,7 @@ void update_init(void) {
     ssize_t k = readlink("/proc/self/exe", exe, sizeof exe - 1);
     if (k <= 0) return;
     exe[k] = 0;
-    char p[4200];
+    char p[4096 + 256 + 8];                     /* каталог exe + «/» + имя из readdir (до 255) */
     struct stat st;
     snprintf(p, sizeof p, "%s.old", exe);
     if (!lstat(p, &st) && S_ISREG(st.st_mode)) unlink(p);

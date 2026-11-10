@@ -20,6 +20,7 @@
 #include "img.h"
 #include "login.h"
 #include "share.h"
+#include "cam.h"
 
 #define PANIC_WINDOW_MS 1500
 
@@ -148,6 +149,7 @@ void panic_now(void) {
     if (dry) { dry_hits++; return; }
 #ifdef ASTRA_VIDEO
     share_stop_nowait();                         /* трансляция экрана: только флаг + ожидание <= 150 мс (В-5-б), дальше — токен */
+    cam_stop_nowait();                           /* камера: только флаг (поток захвата закроет её сам; процесс сейчас выйдет) */
 #endif
     secret_destroy();                            /* токен: затереть в памяти — первым делом */
     login_panic();                               /* окно входа: пароль, коды, тикеты */

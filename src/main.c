@@ -9,6 +9,9 @@
 #include "captcha.h"
 #include "login.h"
 #include "impcurl.h"
+#ifdef ASTRA_VIDEO
+#include "cam.h"
+#endif
 #ifndef _WIN32
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -780,6 +783,24 @@ int main(int argc, char **argv) {
 #endif
         }
         /* скрытый: --streamtest=N[,сцена[,ширина,высота,к/с,кбит/с]] — замер трансляции, без сети и файлов */
+        /* скрытый: --camtest[=СЕКУНД[,номер]] — короткая проверка камеры (1..10 с), только числа в консоль, без сети и файлов */
+        else if (arg_is(a, "--camtest", &v)) {
+            int sec = v && *v ? atoi(v) : 3, idx = -1;
+            const char *c = v ? strchr(v, ',') : NULL;
+            if (c) idx = atoi(c + 1);
+            const char *c2 = c ? strchr(c + 1, ',') : NULL;
+            if (c2) cam_quality_set(atoi(c2 + 1));   /* --camtest=СЕК,номер,качество (0 авто 360p, 1 720p, 2 480p, 3 360p) */
+            char id[256] = "";
+            if (idx >= 0) { CamDevice d[16]; int n = cam_list(d, 16); if (idx < n) snprintf(id, sizeof id, "%s", d[idx].id); }
+            return cam_test(sec, id);
+        }
+#ifdef ASTRA_ANON
+        /* скрытый: --anontest=КАТАЛОГ — стенд точности скрытия глаз на наборе BioID (.pgm + .eye), только числа */
+        else if (arg_is(a, "--anontest", &v) && v && *v) {
+            int anon_test(const char *dir);
+            return anon_test(v);
+        }
+#endif
         else if (arg_is(a, "--streamtest", &v) && v && *v) {
             int p[6] = { 10, 0, 1280, 720, 24, 2000 };
             char sc[16] = "";

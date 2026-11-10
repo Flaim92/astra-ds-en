@@ -1,0 +1,18 @@
+pico — детектор лица «Pixel Intensity Comparisons Organized in Decision Trees» (Nenad Markus), MIT (см. LICENSE).
+Источник: https://github.com/nenadmarkus/pico
+Коммит:   7d550c78b2c31a4e1dfc5bcdfe9da013297b5cc8 (2020-09-13)
+Архив ветки master (https://github.com/nenadmarkus/pico/archive/refs/heads/master.zip):
+          SHA-256 19067715d1a7bfd36249a583e353d63654287c9a24f617ba031277cbb3a5d780
+Взято:
+  rnt/cascades/facefinder  SHA-256 d8014993e7298c7b1865d1f8b855d6dbf4ec5c808bf879e2091ab6837abf90cd (каскад лица,
+                           глубина деревьев 6, 468 деревьев) -> facefinder.h: те же значения в виде константных массивов
+                           C (int8 сравнения пикселей, float выходы листьев и пороги точными шестнадцатеричными
+                           литералами), чтобы не читать двоичный файл через приведение указателей. Генератор —
+                           gen_facefinder.py (python gen_facefinder.py facefinder facefinder.h).
+                           facefinder.h SHA-256 4e9aaa8390aa822c3eaff31dfd02fc565d7838ca3463a4713e374cb1f46e74e9
+  LICENSE                  SHA-256 3769f26981094bcd4e45134dc3101f9e2fbde28c2bfe15534557b4c089f2f521 (без изменений)
+  rnt/picornt.c            SHA-256 a3cd46d076304feb0acc38fc9e5ec78ca14c7d69b5ff2d1c8d05b26c9e25b72d — не включён;
+                           run_cascade / run_rotated_cascade / кластеризация переписаны по нему в src/anon.c.
+Каскад зрачков (puploc) не взят: в репозитории pico его нет, а у файла из picojs не указана лицензия; область глаз
+строится по геометрии лица с запасом (src/anon.c).
+Использование: src/anon.c (только «Astra DS Video»), скрытие глаз на своей камере.

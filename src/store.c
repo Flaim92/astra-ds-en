@@ -399,6 +399,7 @@ static void vs_from_json(const cJSON *o, u64 gid) {
     if (user && jid(user, "id") == uid) user_put_obj(user);
     vs_set(gid ? gid : jid(o, "guild_id"), jid(o, "channel_id"), uid, name,
            jbool(o, "self_mute"), jbool(o, "self_deaf"), jbool(o, "mute"), jbool(o, "deaf"));
+    for (int i = 0; i < S.nvs; i++) if (S.vs[i].user_id == uid) { S.vs[i].stream = jbool(o, "self_stream"); S.vs[i].video = jbool(o, "self_video"); }
 }
 int voice_members(u64 channel_id, const VoiceState **out, int max) {
     int n = 0;
@@ -2053,6 +2054,7 @@ void store_event(const char *t, const cJSON *d) {
                 }
                 vs_set(gid, jid(v, "channel_id"), uid, nick ? nick : user_name(uid), jbool(v, "self_mute"),
                        jbool(v, "self_deaf"), jbool(v, "mute"), jbool(v, "deaf"));
+                for (int q = 0; q < S.nvs; q++) if (S.vs[q].user_id == uid && S.vs[q].guild_id == gid) { S.vs[q].stream = jbool(v, "self_stream"); S.vs[q].video = jbool(v, "self_video"); }
             }
         }
         ui_dirty();
@@ -5106,7 +5108,7 @@ static const Sch S_THR[] = { {"id", NULL}, {"type", NULL}, {"name", NULL}, {"par
 static const Sch S_ROLE[] = { {"id", NULL}, {"permissions", NULL}, {"color", NULL}, {"position", NULL}, END };
 static const Sch S_MEMBER[] = { {"user_id", NULL}, {"nick", NULL}, {"roles", NULL}, {"user", S_USER},
     {"communication_disabled_until", NULL}, {"pending", NULL}, END };
-static const Sch S_VS[] = { {"user_id", NULL}, {"channel_id", NULL}, {"self_mute", NULL}, {"self_deaf", NULL},
+static const Sch S_VS[] = { {"user_id", NULL}, {"channel_id", NULL}, {"self_mute", NULL}, {"self_deaf", NULL}, {"self_stream", NULL}, {"self_video", NULL},
     {"mute", NULL}, {"deaf", NULL}, {"member", S_MEMBER}, END };
 static const Sch S_GPROP[] = { {"name", NULL}, {"owner_id", NULL}, {"icon", NULL}, {"banner", NULL}, END };
 static const Sch S_GUILD[] = { {"id", NULL}, {"unavailable", NULL}, {"properties", S_GPROP}, {"name", NULL},

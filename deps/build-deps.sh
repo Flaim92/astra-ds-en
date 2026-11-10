@@ -322,6 +322,50 @@ build_jpeg() {
     [ -f "$PFX/lib/libjpeg.a" ] && [ -f "$PFX/include/jpeglib.h" ]
 }
 
+build_jpegcam() {
+    # Вторая копия libjpeg-turbo 3.2.1 — ТОЛЬКО для камеры «Astra DS Video» (разбор MJPG своей веб-камеры, src/cam.c),
+    # из того же архива с тем же закреплённым SHA-256, но с SIMD (nasm): MJPG 720p30 без SIMD — ~14 % ядра.
+    # Почему не одна копия: камера — локальное доверенное устройство на ПК пользователя, а картинки и аватарки
+    # Discord (src/img.c) — чужие данные из сети; для них остаётся копия без SIMD-ассемблера (меньше поверхность атак).
+    # Обе копии живут в одном exe: у этой все определённые в ней глобальные символы переименованы (camj_*,
+    # objcopy --redefine-syms), заголовки — в prefix/include/jpegcam/, camj.h подставляет новые имена.
+    # Только libjpeg API, статически: без TurboJPEG API, утилит, тестов, арифметического кодирования.
+    fetch libjpeg-turbo-3.2.1.tar.gz https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.1/libjpeg-turbo-3.2.1.tar.gz \
+        c27ad72a68da151177929aa969ae773a2da5ac2af9ce946079314fdac8cece7f
+    command -v nasm > /dev/null || { echo "jpegcam: нужен nasm (SIMD)"; exit 1; }
+    unpack libjpeg-turbo-3.2.1.tar.gz jpegcam
+    local inst=$BLD/jpegcam-inst
+    rm -rf "$inst" "$BLD/jpegcam-b"
+    cmake_static "$BLD/jpegcam" "$BLD/jpegcam-b" -DCMAKE_INSTALL_PREFIX="$inst" -DCMAKE_INSTALL_LIBDIR=lib \
+        -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=OFF -DWITH_TOOLS=OFF -DWITH_TESTS=OFF \
+        -DWITH_SIMD=ON -DREQUIRE_SIMD=ON -DWITH_ARITH_DEC=OFF -DWITH_ARITH_ENC=OFF -DWITH_FUZZ=OFF
+    [ -f "$inst/lib/libjpeg.a" ] && [ -f "$inst/include/jpeglib.h" ]
+    # все глобальные символы, определённые в библиотеке -> camj_<имя>; ссылки на libc и прочее не трогаются
+    # (MinGW: .refptr.<имя> — общие COMDAT-указатели; для своих имён тоже переименовываются, иначе компоновщик слил бы
+    # указатель второй копии с указателем первой)
+    nm -g --defined-only "$inst/lib/libjpeg.a" | awk 'NF >= 3 && $2 ~ /^[A-Z]$/ { print $3 }' | sort -u > "$BLD/jpegcam-all.txt"
+    grep -E '^[A-Za-z_][A-Za-z0-9_]*$' "$BLD/jpegcam-all.txt" | grep -vE '^__' > "$BLD/jpegcam-syms.txt"
+    [ -s "$BLD/jpegcam-syms.txt" ]
+    {
+        awk '{ print $1 " camj_" $1 }' "$BLD/jpegcam-syms.txt"
+        awk '{ print ".refptr." $1 " .refptr.camj_" $1 }' "$BLD/jpegcam-syms.txt"
+    } > "$BLD/jpegcam-redef.txt"
+    objcopy --redefine-syms="$BLD/jpegcam-redef.txt" "$inst/lib/libjpeg.a" "$PFX/lib/libjpegcam.a"
+    rm -rf "$PFX/include/jpegcam"; mkdir -p "$PFX/include/jpegcam"
+    cp "$inst"/include/{jconfig.h,jerror.h,jmorecfg.h,jpeglib.h} "$PFX/include/jpegcam/"
+    {
+        echo "/* camj.h — сгенерировано deps/build-deps.sh (build_jpegcam): libjpeg-turbo с SIMD для камеры, имена camj_*. */"
+        echo "#ifndef CAMJ_H"
+        echo "#define CAMJ_H"
+        awk '{ print "#define " $1 " camj_" $1 }' "$BLD/jpegcam-syms.txt"
+        echo "#include \"jpeglib.h\""
+        echo "#include \"jerror.h\""
+        echo "#endif"
+    } > "$PFX/include/jpegcam/camj.h"
+    # проверка: в переименованной библиотеке не осталось определённого jpeg_* (иначе — конфликт с копией img.c)
+    ! nm -g --defined-only "$PFX/lib/libjpegcam.a" | awk 'NF >= 3 { print $3 }' | grep -qE '^(jpeg_|jsimd_|jinit_)'
+}
+
 build_brotli() {
     # google/brotli 1.2.1 — только ДЕКОДЕР (c/common + c/dec) для сжатых сертификатов TLS (RFC 8879) в
     # туннеле на C (src/tls13.c): ClientHello как у Chrome объявляет brotli, сервер вправе им сжать.
@@ -340,7 +384,65 @@ build_brotli() {
     cp "$b"/c/include/brotli/{decode.h,port.h,shared_dictionary.h,types.h} "$PFX/include/brotli/"
 }
 
-ALL="zlib openssl curl opus speexdsp rnnoise json mlspp libdave xlite jpeg brotli"
+# ---- «Astra DS Video»: декодеры просмотра чужих трансляций (нужны только сборке VIDEO=1) ----
+# dav1d 1.5.4 (AV1, BSD-2). Хэш совпадает с dav1d-1.5.4.tar.xz.sha256 авторов (downloads.videolan.org), 10.11.2026.
+# Сборка — meson 1.12.1 из исходников (python meson.py, без установки); хэш архива meson закреплён по архиву
+# релиза GitHub, скачанному 10.11.2026. Только библиотека: без утилит, тестов и журнала (-Dlogging=false);
+# ассемблер nasm — если есть (скорость декодирования = нагрузка во время просмотра), иначе без него.
+# Только 8 бит (-Dbitdepths=8, -0,7 МБ бинаря): 10-битный AV1 у трансляций Discord не встречается — отказ «не поддерживается».
+build_dav1d() {
+    fetch meson-1.12.1.tar.gz https://github.com/mesonbuild/meson/releases/download/1.12.1/meson-1.12.1.tar.gz \
+        ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743
+    fetch dav1d-1.5.4.tar.xz https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz \
+        686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5
+    unpack meson-1.12.1.tar.gz meson
+    unpack dav1d-1.5.4.tar.xz dav1d
+    local py asm=false
+    py=$(command -v python3 || command -v python)
+    [ "$OS" = win ] && py=$(command -v python)   # python3 в Windows — заглушка магазина
+    command -v nasm > /dev/null && asm=true
+    rm -rf "$BLD/dav1d-b"
+    ( cd "$BLD/dav1d" && "$py" "$BLD/meson/meson.py" setup "$BLD/dav1d-b" --prefix="$PFX" --libdir=lib \
+        --buildtype=release -Db_ndebug=true -Ddefault_library=static -Denable_tools=false -Denable_tests=false \
+        -Denable_examples=false -Dlogging=false -Denable_asm=$asm -Dbitdepths=8 ) > "$BLD/dav1d-b.configure.txt" 2>&1 \
+        || { tail -40 "$BLD/dav1d-b.configure.txt"; exit 1; }
+    ninja -C "$BLD/dav1d-b" -j "$JOBS" > "$BLD/dav1d-b.build.txt" 2>&1 || { grep -m20 -E 'error' "$BLD/dav1d-b.build.txt"; exit 1; }
+    "$py" "$BLD/meson/meson.py" install -C "$BLD/dav1d-b" > /dev/null
+    [ -f "$PFX/lib/libdav1d.a" ] && [ -f "$PFX/include/dav1d/dav1d.h" ]
+}
+
+# FFmpeg 8.1.1 (LGPL-2.1+): только libavcodec + libavutil и только декодеры h264, hevc, vp8, vp9 (+ их парсеры).
+# Хэш сверен 10.11.2026 по GPG-подписи авторов (ffmpeg-8.1.1.tar.xz.asc, ключ FCF9 86EA 15E6 E293 A564
+# 4F10 B432 2F04 D676 58D8 «FFmpeg release signing key»). Без программ, сети, avformat/avfilter/avdevice/
+# swscale/swresample, без потоков (декодер однопоточный, свой поток у зрителя), без автоподключения внешних
+# библиотек и аппаратных ускорителей. Журнал av_log глушится в коде (src/viddec.c).
+build_ffmpeg() {
+    fetch ffmpeg-8.1.1.tar.xz https://ffmpeg.org/releases/ffmpeg-8.1.1.tar.xz \
+        b6863adde98898f42602017462871b5f6333e65aec803fdd7a6308639c52edf3
+    unpack ffmpeg-8.1.1.tar.xz ffmpeg
+    # Патч: таблица зерна плёнки H.274 (676 КБ, static в образе) — в куче по первой нужде. Без патча она всегда
+    # в частной памяти процесса (записываемая секция образа), даже без просмотра. Зерно мы не накладываем
+    # (src/viddec.c: AV_CODEC_EXPORT_DATA_FILM_GRAIN), так что память не выделяется вовсе. Проверка — grep ниже.
+    local h274=$BLD/ffmpeg/libavcodec/h274.c
+    sed -i 's|^static H274FilmGrainDatabase film_grain_db;$|static H274FilmGrainDatabase *film_grain_dbp; /* astra-ds: в куче по первой нужде */\n#define film_grain_db (*film_grain_dbp)|' "$h274"
+    sed -i '/^int ff_h274_apply_film_grain(/,/^{$/ s|^{$|{\n    if (!film_grain_dbp \&\& !(film_grain_dbp = av_mallocz(sizeof(*film_grain_dbp)))) return AVERROR(ENOMEM);|' "$h274"
+    [ "$(grep -c 'film_grain_dbp' "$h274")" = 3 ] || { echo "ffmpeg: патч h274 не применился"; exit 1; }
+    local asm=--disable-x86asm extra=""
+    command -v nasm > /dev/null && asm=--enable-x86asm
+    [ "$OS" = linux ] && extra="--enable-pic"
+    mkdir -p "$BLD/tmp"                          # TMPDIR Windows (C:\...) configure не понимает
+    ( cd "$BLD/ffmpeg" && export TMPDIR="$BLD/tmp" && ./configure --prefix="$PFX" --libdir="$PFX/lib" --incdir="$PFX/include" \
+        --enable-static --disable-shared --disable-everything --disable-autodetect --disable-programs --disable-doc \
+        --disable-network --disable-avdevice --disable-avformat --disable-avfilter --disable-swscale --disable-swresample \
+        --disable-pthreads --disable-w32threads --disable-os2threads --disable-debug --disable-iconv --disable-zlib \
+        --disable-bzlib --disable-lzma --enable-decoder=h264,hevc,vp8,vp9 --enable-parser=h264,hevc,vp8,vp9 \
+        $asm $extra --extra-cflags="$HARDEN" ) > "$BLD/ffmpeg.configure.txt" 2>&1 || { tail -40 "$BLD/ffmpeg.configure.txt"; exit 1; }
+    ( cd "$BLD/ffmpeg" && $MAKE -j "$JOBS" > "$BLD/ffmpeg.build.txt" 2>&1 && $MAKE install > /dev/null 2>&1 ) \
+        || { grep -m20 -E 'error|Error' "$BLD/ffmpeg.build.txt"; tail -20 "$BLD/ffmpeg.build.txt"; exit 1; }
+    [ -f "$PFX/lib/libavcodec.a" ] && [ -f "$PFX/lib/libavutil.a" ]
+}
+
+ALL="zlib openssl curl opus speexdsp rnnoise json mlspp libdave xlite jpeg jpegcam brotli dav1d ffmpeg"
 for step in ${*:-$ALL}; do
     echo "== $step"
     "build_$step"

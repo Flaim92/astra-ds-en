@@ -20,6 +20,7 @@
 /* ---------- ожидание ---------- */
 /* Waitable{0, W_WINMSG} (от term_waitables в режиме окна) — ждать ещё и очередь сообщений окна:
  * MsgWaitForMultipleObjectsEx просыпается и от объектов, и от ввода/перерисовки окна. */
+static _Thread_local HANDLE t_hrt;             /* таймер высокого разрешения потока звонка (plat_timer_hires) */
 void plat_wait(const Waitable *w, int n, int timeout_ms) {
     HANDLE hs[MAXIMUM_WAIT_OBJECTS];
     int k = 0;
@@ -30,6 +31,16 @@ void plat_wait(const Waitable *w, int n, int timeout_ms) {
     }
     DWORD t = timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms;
     if (msgs) { MsgWaitForMultipleObjectsEx((DWORD)k, hs, t, QS_ALLINPUT, MWMO_INPUTAVAILABLE); return; }
+    if (t_hrt && timeout_ms > 0) {               /* срок — таймером высокого разрешения, без timeBeginPeriod(1) для всей системы */
+        LARGE_INTEGER due;
+        due.QuadPart = -(LONGLONG)timeout_ms * 10000;
+        if (SetWaitableTimer(t_hrt, &due, 0, NULL, NULL, FALSE)) {
+            hs[k++] = t_hrt;
+            WaitForMultipleObjects((DWORD)k, hs, FALSE, INFINITE);
+            CancelWaitableTimer(t_hrt);
+            return;
+        }
+    }
     if (k == 0) { Sleep(t == INFINITE ? 1000 : t); return; }
     WaitForMultipleObjects((DWORD)k, hs, FALSE, t);
 }
@@ -185,6 +196,11 @@ long long plat_now_us(void) {
 static HMODULE tm_dll;
 static UINT (WINAPI *tm_begin)(UINT), (WINAPI *tm_end)(UINT);
 void plat_timer_hires(bool on) {
+    /* Windows 10 1803+: таймер высокого разрешения в наборе ожидания этого потока (как streamtest.c) — такт 20 мс
+     * точен без системного timeBeginPeriod(1) (тот ускоряет таймер всей системы и держит winmm.dll). Нет — по-старому. */
+    if (on && !t_hrt) t_hrt = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    if (!on && t_hrt) { CloseHandle(t_hrt); t_hrt = NULL; }
+    if (on && t_hrt) return;
     if (on && !tm_dll) {
         tm_dll = LoadLibraryExW(L"winmm.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (!tm_dll) return;

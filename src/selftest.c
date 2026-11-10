@@ -26,6 +26,9 @@
 #include "img.h"
 #include "login.h"
 #include "golive.h"
+#include "cam.h"
+#include "portal_wl.h"
+#include "share_pw.h"
 
 static int fails, passes, defects;
 /* FAIL печатает строку; с ST_DUMP=1 ещё и экран 120x34 в момент проверки (без цветов) — для разбора. */
@@ -554,7 +557,7 @@ static void t_help(void) {
     if (!ok) scr_print(&s);
     scr_free(&s);
     check(ok, "справка 60x20: Down до конца — «ниже ещё» пропало, последний раздел виден");
-    key(K_PGUP, 0); key(K_PGUP, 0); key(K_PGUP, 0); key(K_PGUP, 0); key(K_PGUP, 0);
+    for (int i = 0; i < 10; i++) key(K_PGUP, 0);   /* справка растёт (Video: строка камеры) — с запасом */
     scr_take(&s, 60, 20);
     ok = scr_has(&s, "МЫШЬ");
     scr_free(&s);
@@ -1085,9 +1088,9 @@ static void evil_msg(u64 id, u64 uid, const char *uname, const char *text) {
     buf_free(&b);
 }
 static void t_evil(void) {
-    static char huge[100001], hugename[1201];
-    memset(huge, 'A', sizeof huge - 1);
-    memset(hugename, 0, sizeof hugename);
+    enum { HUGE_N = 100001, HUGENAME_N = 1201 };   /* в куче, не static: BSS всегда в частной памяти (кодер, 10.11) */
+    char *huge = xcalloc(HUGE_N, 1), *hugename = xcalloc(HUGENAME_N, 1);
+    memset(huge, 'A', HUGE_N - 1);
     for (int i = 0; i < 400; i++) memcpy(hugename + i * 3, "\xe6\x97\xa5", 3);          /* 400 x 日 */
     static const char *const texts[] = {
         "\x1b[2J\x1b]0;взлом\x07\x1b[31m красный? \x1b[?1049h",
@@ -1141,6 +1144,7 @@ static void t_evil(void) {
         key(K_BTAB, 0); key(K_END, 0); key(K_ESC, 0);
     }
     check(all, "вредный ввод на 50x12..200x60 (с прокруткой): сетка ровная, на выходе только SGR, без запрещённых символов");
+    free(huge); free(hugename);
 }
 
 /* Утечки: 1000 переключений каналов/экранов/меню с отрисовкой — частная память не растёт. */
@@ -3072,7 +3076,7 @@ static void t_ready_slim(void) {
     char why[80] = "";
     bool shape = n > 0 && ready_slim_check(copy, n, why, sizeof why);
     bool size_ok = n > 0 && n <= full.len - g_ballast + full.len / 100;
-    char rs[220];
+    char rs[320];
     snprintf(rs, sizeof rs, "READY: отсев — только ключи схемы, без null%s%s; балласт %.2f МБ выброшен (осталось %.2f из %.2f МБ)",
              why[0] ? ": " : "", why, g_ballast / 1048576.0, n / 1048576.0, full.len / 1048576.0);
     check(shape && size_ok, rs);
@@ -3225,6 +3229,123 @@ static void t_slim_fuzz(void) {
     demo_load();
 }
 
+/* ---------- просмотр чужих трансляций, self_stream (тестировщик) ---------- */
+static bool vs_stream_of(u64 cid, u64 uid, bool *found) {
+    const VoiceState *vs[64];
+    int n = voice_members(cid, vs, 64);
+    *found = false;
+    for (int i = 0; i < n && i < 64; i++) if (vs[i]->user_id == uid) { *found = true; return vs[i]->stream; }
+    return false;
+}
+static void t_self_stream(void) {
+    /* (в) self_stream из VOICE_STATE_UPDATE -> VoiceState.stream; отдельный канал 3999, в конце — выход */
+    bool f1, f2, f3, f4;
+    ev("VOICE_STATE_UPDATE", "{\"guild_id\":\"2000\",\"channel_id\":\"3999\",\"user_id\":\"4242\",\"session_id\":\"x\","
+                             "\"self_mute\":false,\"self_deaf\":false,\"mute\":false,\"deaf\":false,\"self_stream\":true}");
+    bool a = vs_stream_of(3999, 4242, &f1);
+    ev("VOICE_STATE_UPDATE", "{\"guild_id\":\"2000\",\"channel_id\":\"3999\",\"user_id\":\"4242\",\"session_id\":\"x\","
+                             "\"self_mute\":true,\"self_deaf\":false,\"mute\":false,\"deaf\":false,\"self_stream\":false}");
+    bool b = vs_stream_of(3999, 4242, &f2);
+    ev("VOICE_STATE_UPDATE", "{\"guild_id\":\"2000\",\"channel_id\":\"3999\",\"user_id\":\"4242\",\"session_id\":\"x\","
+                             "\"self_mute\":false,\"self_deaf\":false,\"mute\":false,\"deaf\":false,\"self_stream\":true}");
+    ev("VOICE_STATE_UPDATE", "{\"guild_id\":\"2000\",\"channel_id\":\"3999\",\"user_id\":\"4242\",\"session_id\":\"x\","
+                             "\"self_mute\":false,\"self_deaf\":false,\"mute\":false,\"deaf\":false}");
+    bool c = vs_stream_of(3999, 4242, &f3);
+    ev("VOICE_STATE_UPDATE", "{\"guild_id\":\"2000\",\"channel_id\":null,\"user_id\":\"4242\",\"session_id\":\"x\"}");
+    vs_stream_of(3999, 4242, &f4);
+    check(f1 && a, "self_stream: VOICE_STATE_UPDATE self_stream:true -> VoiceState.stream");
+    check(f2 && !b, "self_stream: self_stream:false -> stream снят");
+    check(f3 && !c, "self_stream: поля нет -> stream false");
+    check(!f4, "self_stream: выход из канала (channel_id null) убирает участника");
+}
+#ifdef ASTRA_VIDEO
+static void t_gowatch(void) {
+    bool d = O.demo;
+    O.demo = true;                              /* gw_send не зовётся, voice_watch_start -> false без сети */
+    u64 me = S.me_id;
+    S.me_id = 1000;
+    char err[128] = "";
+    GoWatchState w;
+    GoLiveState g;
+    golive_stop();
+    golive_unwatch();
+    /* (а) ключ guild/call и фаза */
+    check(!golive_watch(2000, 0, 55, err, sizeof err) && err[0], "просмотр: без канала — отказ с текстом");
+    err[0] = 0;
+    check(!golive_watch(2000, 3010, 0, err, sizeof err) && err[0], "просмотр: без пользователя — отказ с текстом");
+    bool ok = golive_watch(2000, 3010, 55, err, sizeof err);
+    golive_wstate(&w);
+    check(ok && w.phase == GW_WAIT && w.user == 55, "просмотр guild: golive_watch -> GW_WAIT, user=55");
+    /* ключ проверяем по реакции: guild:2000:3010:55 — наш, остальные — нет */
+    ev("STREAM_DELETE", "{\"stream_key\":\"guild:2000:3010:56\",\"reason\":\"x\"}");
+    ev("STREAM_DELETE", "{\"stream_key\":\"call:3010:55\",\"reason\":\"x\"}");
+    ev("STREAM_DELETE", "{\"stream_key\":\"guild:2000:3010:5\",\"reason\":\"x\"}");
+    golive_wstate(&w);
+    check(w.phase == GW_WAIT, "просмотр guild: STREAM_DELETE чужого ключа (другой автор / call / префикс) — мимо");
+    /* (б) STREAM_SERVER_UPDATE до STREAM_CREATE не подключает (нет rtc_server_id) */
+    ev("STREAM_SERVER_UPDATE", "{\"stream_key\":\"guild:2000:3010:55\",\"endpoint\":\"c-ams01.discord.media:443\",\"token\":\"tok\"}");
+    golive_wstate(&w);
+    check(w.phase == GW_WAIT, "просмотр: SERVER_UPDATE без STREAM_CREATE — ждём (rtc_server_id нет)");
+    ev("STREAM_CREATE", "{\"stream_key\":\"guild:2000:3010:55\",\"rtc_server_id\":\"777\"}");
+    ev("STREAM_SERVER_UPDATE", "{\"stream_key\":\"guild:2000:3010:55\",\"endpoint\":\"c-ams01.discord.media:443\",\"token\":\"tok\"}");
+    golive_wstate(&w);
+    check(w.phase == GW_CONNECTING, "просмотр: STREAM_CREATE запомнил rtc_server_id -> SERVER_UPDATE -> GW_CONNECTING");
+    /* своя трансляция параллельно: события зрителя её не трогают, её события не трогают зрителя */
+    check(golive_start(2000, 3010, err, sizeof err), "просмотр + своя трансляция: golive_start");
+    ev("STREAM_CREATE", "{\"stream_key\":\"guild:2000:3010:1000\",\"rtc_server_id\":\"888\"}");
+    golive_state(&g);
+    golive_wstate(&w);
+    check(g.phase == GL_WAIT_SERVER && !strcmp(g.rtc_server_id, "888") && w.phase == GW_CONNECTING,
+          "просмотр + своя: STREAM_CREATE своего ключа -> GL, зритель не тронут");
+    ev("STREAM_DELETE", "{\"stream_key\":\"guild:2000:3010:55\",\"reason\":\"stream_ended\"}");
+    golive_wstate(&w);
+    golive_state(&g);
+    check(w.phase == GW_FAILED && !strcmp(w.err, "трансляция завершена"), "просмотр: STREAM_DELETE -> GW_FAILED «трансляция завершена»");
+    check(g.phase == GL_WAIT_SERVER && !g.err[0], "просмотр: STREAM_DELETE зрителя не останавливает свою трансляцию");
+    golive_stop();
+    golive_wstate(&w);
+    check(w.phase == GW_FAILED, "своя трансляция остановлена — состояние зрителя прежнее");
+    golive_unwatch();
+    golive_wstate(&w);
+    check(w.phase == GW_OFF && !w.err[0] && !w.user, "просмотр: golive_unwatch -> GW_OFF, ошибка и автор стёрты");
+    /* call-ключ и переключение между трансляциями */
+    ok = golive_watch(0, 3500, 77, err, sizeof err);
+    golive_wstate(&w);
+    check(ok && w.phase == GW_WAIT && w.user == 77, "просмотр call: golive_watch(0, ...) -> GW_WAIT");
+    ev("STREAM_CREATE", "{\"stream_key\":\"call:3500:77\",\"rtc_server_id\":\"901\"}");
+    ev("STREAM_SERVER_UPDATE", "{\"stream_key\":\"call:3500:77\",\"endpoint\":\"c-fra01.discord.media:443\",\"token\":\"t2\"}");
+    golive_wstate(&w);
+    check(w.phase == GW_CONNECTING, "просмотр call: ключ call:3500:77 — свои события");
+    ok = golive_watch(0, 3500, 78, err, sizeof err);   /* переключиться на другого автора */
+    golive_wstate(&w);
+    bool sw = ok && w.phase == GW_WAIT && w.user == 78;
+    ev("STREAM_DELETE", "{\"stream_key\":\"call:3500:77\",\"reason\":\"x\"}");
+    golive_wstate(&w);
+    check(sw && w.phase == GW_WAIT, "просмотр: переключение на другого автора — прежний закрыт, его события мимо");
+    ev("STREAM_CREATE", "{\"stream_key\":\"call:3500:78\",\"rtc_server_id\":\"902\"}");
+    ev("STREAM_SERVER_UPDATE", "{\"stream_key\":\"call:3500:78\",\"endpoint\":\"c-fra01.discord.media:443\",\"token\":\"t3\"}");
+    golive_wstate(&w);
+    check(w.phase == GW_CONNECTING, "просмотр: после переключения события нового автора работают");
+    ok = golive_watch(2000, 3010, 55, err, sizeof err);   /* с call — снова на сервер */
+    ev("STREAM_SERVER_UPDATE", "{\"stream_key\":\"guild:2000:3010:55\",\"endpoint\":\"c-ams01.discord.media:443\",\"token\":\"tok\"}");
+    golive_wstate(&w);
+    check(ok && w.phase == GW_WAIT, "просмотр: переключение сбрасывает rtc_server_id прежнего (SERVER_UPDATE без CREATE — ждём)");
+    /* мусорные ключи и события без полей */
+    ev("STREAM_CREATE", "{\"stream_key\":\"GUILD:2000:3010:55\\\"}\",\"rtc_server_id\":\"1\"}");
+    ev("STREAM_CREATE", "{\"rtc_server_id\":\"1\"}");
+    ev("STREAM_SERVER_UPDATE", "{\"stream_key\":\"guild:2000:3010:55\"}");
+    ev("STREAM_SERVER_UPDATE", "{\"stream_key\":7}");
+    golive_wstate(&w);
+    check(w.phase == GW_WAIT, "просмотр: ключ с чужими символами, без ключа, без полей — мимо");
+    golive_unwatch();
+    golive_unwatch();                           /* повторно — безопасно */
+    golive_wstate(&w);
+    check(w.phase == GW_OFF, "просмотр: двойной golive_unwatch — без сбоя");
+    S.me_id = me;
+    O.demo = d;
+}
+#endif
+
 int selftest(void) {
     term_puts("Astra DS --selftest\n");
     ui_lang_init(0);                            /* проверки — по русскому интерфейсу, независимо от языка системы */
@@ -3278,13 +3399,31 @@ int selftest(void) {
     demo_en_selftest(check);
 #ifdef ASTRA_VIDEO
     golive_selftest(check);
+    {
+        int voice_cam_selftest(void (*check)(bool ok, const char *what));
+        term_puts("\n  камера (cam.c, voice_cam.c, без камеры и сети):\n");
+        cam_selftest(check);
+        voice_cam_selftest(check);
+    }
+#ifdef ASTRA_ANON
+    { int anon_selftest(void (*ck)(bool ok, const char *what)); term_puts("\n  камера: скрытие глаз (anon.c):\n"); anon_selftest(check); }
 #endif
+#ifndef _WIN32
+    term_puts("\n  демонстрация экрана в Wayland (PipeWire, без портала):\n"); share_pw_selftest(check);
+#endif
+    term_puts("\n  просмотр трансляций (тестировщик):\n"); t_gowatch();
+    { int ui_cam_selftest(void (*ck)(bool ok, const char *what)); term_puts("\n  камера: интерфейс (дизайнер):\n"); ui_cam_selftest(check); }
+#endif
+    term_puts("\n  self_stream (тестировщик):\n"); t_self_stream();
     term_puts("\n  очередь 1:\n");          t_queue1();
     term_puts("\n  реакции и пересылка (store):\n"); t_rv_fwd();
     term_puts("\n  поиск:\n");               t_search();
     term_puts("\n  отправка файла:\n");      t_file();
     term_puts("\n  кнопки входа и старта (тестировщик):\n"); t_login_buttons();
     term_puts("\n  таблица перевода ui_en.h (тестировщик):\n"); t_tr_table();
+#if defined(ASTRA_VIDEO) && !defined(_WIN32)
+    term_puts("\n  портал Wayland (xdg-desktop-portal):\n"); portal_wl_selftest(check);
+#endif
 
     term_puts("\n  голосовой тракт:\n");
     voice_selftest(check);

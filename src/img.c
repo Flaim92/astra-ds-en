@@ -35,14 +35,27 @@ void net_curl_common(CURL *e);                  /* net.c: TLS 1.2+, провер
  * Эти функции заменяют jmemnobs.c из libjpeg.a (тот же интерфейс jmemsys.h): компоновщик берёт
  * наши, и объект jmemnobs.o из архива не подтягивается. Размер блока храним сами (не доверяем
  * размеру при освобождении). Предел — DEC_MEM_MAX на все блоки сразу. */
-typedef struct { size_t n, pad; } JHdr;         /* 16 байт: выравнивание данных сохраняется */
+typedef struct { size_t n, pad; } JHdr;         /* 16 байт: выравнивание данных сохраняется; pad 1 — блок потока со своим пределом */
 static size_t s_jmem, s_jpeak;
+/* Поток со своим пределом (камера «Astra DS Video»: разбор MJPG 720p в своём потоке): свой счёт, общий предел
+ * картинок не трогается и не делится между потоками. */
+static _Thread_local size_t t_jlim, t_jmem;
+void img_jpeg_thread_limit(size_t max);
+void img_jpeg_thread_limit(size_t max) { t_jlim = max; }
 
 static void *jm_get(size_t n) {
+    if (t_jlim) {
+        if (n > t_jlim || t_jmem + n > t_jlim) return NULL;
+        JHdr *h = malloc(sizeof(JHdr) + n);
+        if (!h) return NULL;
+        h->n = n; h->pad = 1;
+        t_jmem += n;
+        return h + 1;
+    }
     if (n > DEC_MEM_MAX || s_jmem + n > DEC_MEM_MAX) return NULL;   /* libjpeg: «нет памяти» -> отказ */
     JHdr *h = malloc(sizeof(JHdr) + n);
     if (!h) return NULL;
-    h->n = n;
+    h->n = n; h->pad = 0;
     s_jmem += n;
     if (s_jmem > s_jpeak) s_jpeak = s_jmem;
     return h + 1;
@@ -50,7 +63,8 @@ static void *jm_get(size_t n) {
 static void jm_free(void *p) {
     if (!p) return;
     JHdr *h = (JHdr *)p - 1;
-    s_jmem -= h->n;
+    if (h->pad == 1) t_jmem -= h->n;
+    else s_jmem -= h->n;
     wipe(p, h->n);
     free(h);
 }
@@ -70,7 +84,8 @@ void *jpeg_get_large(j_common_ptr c, size_t n) { (void)c; return jm_get(n); }
 void jpeg_free_large(j_common_ptr c, void *p, size_t n) { (void)c; (void)n; jm_free(p); }
 size_t jpeg_mem_available(j_common_ptr c, size_t min_need, size_t max_need, size_t already) {
     (void)c; (void)min_need; (void)already;
-    size_t left = s_jmem < DEC_MEM_MAX ? DEC_MEM_MAX - s_jmem : 0;
+    size_t lim = t_jlim ? t_jlim : DEC_MEM_MAX, used = t_jlim ? t_jmem : s_jmem;
+    size_t left = used < lim ? lim - used : 0;
     return max_need < left ? max_need : left;
 }
 void jpeg_open_backing_store(j_common_ptr c, struct backing_store_struct *info, long total) {

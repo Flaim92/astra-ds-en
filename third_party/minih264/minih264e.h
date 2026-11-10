@@ -223,6 +223,14 @@ typedef struct H264E_run_param_tag
     // token to pass to NALU callback
     void *nalu_callback_token;
 
+    // [mincord] Optional per-macroblock map (frame.nmb entries, raster order), used for P frames only:
+    // non-zero = macroblock is unchanged since the reference: the usual P_Skip test (predicted MV) only;
+    // if it fails - P16x16 with MV (0,0) and residual, without motion search and without intra modes.
+    const unsigned char *mb_static;
+
+    // [mincord] Non-zero: P frame made of P_Skip macroblocks only (picture unchanged); reference kept as is.
+    int skip_frame;
+
 } H264E_run_param_t;
 
 /**
@@ -729,6 +737,7 @@ typedef struct H264E_persist_tag
     struct
     {
         int disable_deblock;        // Disable deblock filter flags
+        int skip_frame_done;        // [mincord] last frame was all-skip: reference unchanged
     } speed;
 
     int most_recent_ref_frame_idx;  // Last updated long-term reference
@@ -10146,6 +10155,19 @@ static void inter_choose_mode(h264e_enc_t *enc)
             }
         }
 
+        // [mincord] Unchanged macroblock (P_Skip test above failed): no motion search and no intra -
+        // P16x16 with MV (0,0), mvd = 0 - pred, residual coded as usual (quality keeps converging).
+        if (enc->run_param.mb_static && enc->run_param.mb_static[enc->mb.num])
+        {
+            point_t z = point(0, 0);
+            interpolate_luma(ref_yuv, ref_stride, mb_abs_mv(enc, z), point(16, 16), enc->pbest);
+            enc->mb.type = 0;
+            enc->mb.cost = 0;
+            enc->mb.mv[0] = z;
+            enc->mb.mvd[0] = mv_sub(z, mv_pred_16x16);
+            return;
+        }
+
         if (enc->run_param.encode_speed < 1) // enable 8x16, 16x8 and 8x8 partitions
         {
             mb_inter_partition(sad4, prefered_modes);
@@ -10561,7 +10583,7 @@ static void mb_encode(h264e_enc_t *enc, int enc_type)
     }
 #endif
 
-    if (enc->mb.type >= 0)
+    if (enc->mb.type >= 0 && !(enc->slice.type == SLICE_TYPE_P && enc->run_param.mb_static && enc->run_param.mb_static[enc->mb.num]))
     {
         intra_choose_16x16(enc, left, top, avail);
         if (enc->run_param.encode_speed < 2 || enc->slice.type != SLICE_TYPE_P) // enable intra4x4 on P slices
@@ -11291,6 +11313,16 @@ static int H264E_encode_one(H264E_persist_t *enc, const H264E_run_param_t *opt,
         }
     }
 
+    enc->speed.skip_frame_done = 0;
+    if (enc->run_param.skip_frame && !long_term_idx_use && long_term_idx_update == 0)
+    {
+        // [mincord] picture unchanged: all macroblocks P_Skip (MV 0 everywhere), reference stays as is
+        encode_slice_header(enc, frame_type, long_term_idx_use, long_term_idx_update, pps_id, enc_type);
+        enc->mb.skip_run = enc->frame.nmb;
+        UE(enc->mb.skip_run);
+        nal_end(enc);
+        enc->speed.skip_frame_done = 1;
+    } else
     if (enc->param.vbv_size_bytes && !long_term_idx_use && long_term_idx_update <= 0 &&
         enc->rc.vbv_bits - enc->run_param.desired_frame_bytes*8 > enc->param.vbv_size_bytes*8)
     {
@@ -11403,7 +11435,8 @@ static int H264E_encode_one(H264E_persist_t *enc, const H264E_run_param_t *opt,
 
     if (long_term_idx_update != -1)
     {
-        pix_copy_recon_pic_to_ref(enc);
+        if (!enc->speed.skip_frame_done)    // [mincord] all-skip frame: reconstruction == reference
+            pix_copy_recon_pic_to_ref(enc);
 
         if (++enc->frame.num >= enc->param.gop && enc->param.gop && (opt->frame_type == H264E_FRAME_TYPE_DEFAULT))
         {

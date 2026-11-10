@@ -1082,6 +1082,7 @@ static const struct { const char *ru, *en; } TR_EN[] = {
     { "выше", "higher" },
     { "голос", "voice" },
     { "голос закрыт (код %d)", "voice closed (code %d)" },
+    { "голос не восстановился (код %d): войдите в канал заново", "voice did not recover (code %d): join the channel again" },
     { "голос не восстановился: войдите в канал заново", "voice did not recover: join the channel again" },
     { "голос не принят", "voice not accepted" },
     { "голос не снят", "voice not removed" },

@@ -10,7 +10,7 @@
  * это не допускается: пока источник перекрыт другим окном (по _NET_CLIENT_LIST_STACKING), свёрнут или на другом
  * рабочем столе — зрители видят последний чистый кадр (пауза с пояснением), после — сразу ключевой кадр.
  * Весь экран: видно всё, включая окно Astra DS (в X11 окно нельзя исключить из захвата).
- * Звук трансляции на Linux пока не передаётся. Буферы с содержимым экрана затираются перед освобождением. */
+ * Звук трансляции — через PulseAudio/PipeWire (см. ниже). Буферы с содержимым экрана затираются перед освобождением. */
 #if defined(ASTRA_VIDEO) && !defined(_WIN32)
 #include <dlfcn.h>
 #include <pthread.h>
@@ -27,6 +27,11 @@
 #include "mc.h"
 #include "share.h"
 #include "golive.h"
+#include <stdint.h>
+#include <opus/opus.h>
+#if __has_include(<pulse/pulseaudio.h>)
+#include <pulse/pulseaudio.h>
+#endif
 
 #define H264E_SVC_API 0
 #define H264E_MAX_THREADS 0
@@ -315,10 +320,300 @@ static bool win_covered(Display *d, Window w, int x, int y, int ww, int hh, char
     return hit;
 }
 
+/* ======================= Звук трансляции (как в Windows-версии) =======================
+ * Окно — звук процесса окна и его дочерних; весь экран — весь звук системы, кроме нашего процесса (голоса звонка
+ * в эфир не попадают, эха нет). PulseAudio или PipeWire (pipewire-pulse): libpulse подгружается через dlopen на
+ * время эфира, в зависимости сборки не входит. Для каждого подходящего потока воспроизведения (sink input)
+ * открывается запись «монитора этого потока» (pa_stream_set_monitor_stream), потоки смешиваются.
+ * Opus 48 кГц стерео, 20 мс, 128 кбит/с -> voice_stream_audio. Буферы затираются. */
+static volatile int sa_stop;
+static pthread_t sa_thr;
+static bool sa_on;
+static long sa_pid;                              /* процесс окна-источника; 0 — весь экран */
+static void sa_status(bool on, const char *err) {
+    pthread_mutex_lock(&sh_mu);
+    sh.audio = on;
+    snprintf(sh.audio_err, sizeof sh.audio_err, "%s", err);
+    pthread_mutex_unlock(&sh_mu);
+}
+#if __has_include(<pulse/pulseaudio.h>)
+#define SA_MAX 8
+#define SA_FRAME 1920                            /* 20 мс: 960 отсчётов x 2 канала */
+#define SA_RING (SA_FRAME * 25)                  /* 0,5 с */
+typedef struct {
+    pa_stream *s;
+    uint32_t idx;
+    bool used, seen;
+    int16_t ring[SA_RING];
+    size_t r, n;                                 /* начало и число отсчётов в кольце */
+} SaSt;
+static struct {
+    void *lib;
+    pa_threaded_mainloop *(*ml_new)(void);
+    void (*ml_free)(pa_threaded_mainloop *);
+    int (*ml_start)(pa_threaded_mainloop *);
+    void (*ml_stop)(pa_threaded_mainloop *);
+    void (*ml_lock)(pa_threaded_mainloop *);
+    void (*ml_unlock)(pa_threaded_mainloop *);
+    pa_mainloop_api *(*ml_api)(pa_threaded_mainloop *);
+    pa_context *(*ctx_new)(pa_mainloop_api *, const char *);
+    void (*ctx_unref)(pa_context *);
+    int (*ctx_connect)(pa_context *, const char *, pa_context_flags_t, const pa_spawn_api *);
+    void (*ctx_disconnect)(pa_context *);
+    pa_context_state_t (*ctx_state)(const pa_context *);
+    pa_operation *(*inputs)(pa_context *, pa_sink_input_info_cb_t, void *);
+    pa_operation *(*sinks)(pa_context *, pa_sink_info_cb_t, void *);
+    void (*op_unref)(pa_operation *);
+    pa_stream *(*st_new)(pa_context *, const char *, const pa_sample_spec *, const pa_channel_map *);
+    void (*st_unref)(pa_stream *);
+    int (*st_record)(pa_stream *, const char *, const pa_buffer_attr *, pa_stream_flags_t);
+    int (*st_disconnect)(pa_stream *);
+    int (*st_monitor)(pa_stream *, uint32_t);
+    void (*st_read_cb)(pa_stream *, pa_stream_request_cb_t, void *);
+    int (*st_peek)(pa_stream *, const void **, size_t *);
+    int (*st_drop)(pa_stream *);
+    pa_stream_state_t (*st_state)(const pa_stream *);
+    const char *(*pl_gets)(const pa_proplist *, const char *);
+    pa_threaded_mainloop *ml;
+    pa_context *ctx;
+    pthread_mutex_t mu;                          /* кольца и результаты опроса */
+    SaSt st[SA_MAX];
+    struct { uint32_t idx, sink; long pid; } in[32];
+    int nin;
+    struct { uint32_t idx; char mon[192]; } sk[16];
+    int nsk;
+    bool eol_in, eol_sk;
+} SA = { .mu = PTHREAD_MUTEX_INITIALIZER };
+
+static bool sa_load(void) {
+    SA.lib = dlopen("libpulse.so.0", RTLD_NOW | RTLD_LOCAL);
+    if (!SA.lib) return false;
+    bool ok = true;
+#define SY(f, name) do { *(void **)(&SA.f) = dlsym(SA.lib, name); if (!SA.f) ok = false; } while (0)
+    SY(ml_new, "pa_threaded_mainloop_new"); SY(ml_free, "pa_threaded_mainloop_free"); SY(ml_start, "pa_threaded_mainloop_start");
+    SY(ml_stop, "pa_threaded_mainloop_stop"); SY(ml_lock, "pa_threaded_mainloop_lock"); SY(ml_unlock, "pa_threaded_mainloop_unlock");
+    SY(ml_api, "pa_threaded_mainloop_get_api"); SY(ctx_new, "pa_context_new"); SY(ctx_unref, "pa_context_unref");
+    SY(ctx_connect, "pa_context_connect"); SY(ctx_disconnect, "pa_context_disconnect"); SY(ctx_state, "pa_context_get_state");
+    SY(inputs, "pa_context_get_sink_input_info_list"); SY(sinks, "pa_context_get_sink_info_list"); SY(op_unref, "pa_operation_unref");
+    SY(st_new, "pa_stream_new"); SY(st_unref, "pa_stream_unref"); SY(st_record, "pa_stream_connect_record");
+    SY(st_disconnect, "pa_stream_disconnect"); SY(st_monitor, "pa_stream_set_monitor_stream"); SY(st_read_cb, "pa_stream_set_read_callback");
+    SY(st_peek, "pa_stream_peek"); SY(st_drop, "pa_stream_drop"); SY(st_state, "pa_stream_get_state"); SY(pl_gets, "pa_proplist_gets");
+#undef SY
+    return ok;
+}
+/* pid — сам процесс root или его потомок (до 8 уровней): звук браузера и игр идёт из дочерних процессов. */
+static bool sa_under(long pid, long root) {
+    for (int lvl = 0; lvl < 8 && pid > 1; lvl++) {
+        if (pid == root) return true;
+        char p[64], b[512];
+        snprintf(p, sizeof p, "/proc/%ld/stat", pid);
+        FILE *f = fopen(p, "r");
+        if (!f) return false;
+        size_t n = fread(b, 1, sizeof b - 1, f);
+        fclose(f);
+        b[n] = 0;
+        const char *q = strrchr(b, ')');         /* имя процесса может содержать пробелы и скобки */
+        long pp = 0;
+        if (!q || sscanf(q + 1, " %*c %ld", &pp) != 1) return false;
+        pid = pp;
+    }
+    return false;
+}
+static bool sa_wanted(long pid) {
+    if (sa_pid < 0) return false;
+    if (pid <= 0) return sa_pid == 0;            /* процесс неизвестен: только для «всего экрана» */
+    if (sa_pid) return sa_under(pid, sa_pid);
+    return pid != (long)getpid();
+}
+static void sa_in_cb(pa_context *c, const pa_sink_input_info *i, int eol, void *u) {
+    (void)c; (void)u;
+    pthread_mutex_lock(&SA.mu);
+    if (eol || !i) SA.eol_in = true;
+    else if (SA.nin < 32) {
+        const char *ps = i->proplist ? SA.pl_gets(i->proplist, "application.process.id") : NULL;
+        SA.in[SA.nin].idx = i->index; SA.in[SA.nin].sink = i->sink; SA.in[SA.nin].pid = ps ? atol(ps) : 0;
+        SA.nin++;
+    }
+    pthread_mutex_unlock(&SA.mu);
+}
+static void sa_sk_cb(pa_context *c, const pa_sink_info *i, int eol, void *u) {
+    (void)c; (void)u;
+    pthread_mutex_lock(&SA.mu);
+    if (eol || !i) SA.eol_sk = true;
+    else if (SA.nsk < 16 && i->monitor_source_name) {
+        SA.sk[SA.nsk].idx = i->index;
+        snprintf(SA.sk[SA.nsk].mon, sizeof SA.sk[SA.nsk].mon, "%s", i->monitor_source_name);
+        SA.nsk++;
+    }
+    pthread_mutex_unlock(&SA.mu);
+}
+static void sa_read(pa_stream *s, size_t nbytes, void *u) {
+    (void)nbytes;
+    SaSt *t = u;
+    const void *data = NULL;
+    size_t n = 0;
+    while (SA.st_peek(s, &data, &n) == 0 && n) {
+        if (data) {
+            pthread_mutex_lock(&SA.mu);
+            const int16_t *p = data;
+            for (size_t k = 0; k < n / 2; k++) {
+                if (t->n == SA_RING) { t->r = (t->r + 1) % SA_RING; t->n--; }   /* переполнение: теряем самое старое */
+                t->ring[(t->r + t->n) % SA_RING] = p[k];
+                t->n++;
+            }
+            pthread_mutex_unlock(&SA.mu);
+        }
+        SA.st_drop(s);
+    }
+}
+/* Под замком цикла PulseAudio: сверить список потоков воспроизведения с открытыми записями. */
+static void sa_sync(void) {
+    static const pa_sample_spec ss = { PA_SAMPLE_S16LE, 48000, 2 };
+    pthread_mutex_lock(&SA.mu);
+    for (int k = 0; k < SA_MAX; k++) SA.st[k].seen = false;
+    for (int i = 0; i < SA.nin; i++) {
+        if (!sa_wanted(SA.in[i].pid)) continue;
+        int slot = -1, freeslot = -1;
+        for (int k = 0; k < SA_MAX; k++) {
+            if (SA.st[k].used && SA.st[k].idx == SA.in[i].idx) slot = k;
+            if (!SA.st[k].used && freeslot < 0) freeslot = k;
+        }
+        if (slot >= 0) { SA.st[slot].seen = true; continue; }
+        const char *mon = NULL;
+        for (int j = 0; j < SA.nsk; j++) if (SA.sk[j].idx == SA.in[i].sink) mon = SA.sk[j].mon;
+        if (freeslot < 0 || !mon) continue;
+        SaSt *t = &SA.st[freeslot];
+        t->r = t->n = 0;
+        pa_stream *s = SA.st_new(SA.ctx, "astra-share", &ss, NULL);
+        if (!s) continue;
+        pa_buffer_attr at = { (uint32_t)-1, (uint32_t)-1, (uint32_t)-1, (uint32_t)-1, SA_FRAME * 2 };
+        SA.st_monitor(s, SA.in[i].idx);
+        SA.st_read_cb(s, sa_read, t);
+        if (SA.st_record(s, mon, &at, (pa_stream_flags_t)(PA_STREAM_ADJUST_LATENCY | PA_STREAM_DONT_MOVE)) < 0) { SA.st_unref(s); continue; }
+        t->s = s; t->idx = SA.in[i].idx; t->used = t->seen = true;
+    }
+    for (int k = 0; k < SA_MAX; k++) {           /* поток воспроизведения исчез или запись оборвалась — закрыть */
+        SaSt *t = &SA.st[k];
+        if (!t->used) continue;
+        pa_stream_state_t st = SA.st_state(t->s);
+        if (t->seen && (st == PA_STREAM_READY || st == PA_STREAM_CREATING)) continue;
+        pa_stream *s = t->s;
+        t->used = false; t->s = NULL;
+        pthread_mutex_unlock(&SA.mu);            /* обратный вызов чтения берёт тот же замок */
+        SA.st_read_cb(s, NULL, NULL);
+        SA.st_disconnect(s);
+        SA.st_unref(s);
+        pthread_mutex_lock(&SA.mu);
+        wipe_mem(t->ring, sizeof t->ring);
+        t->r = t->n = 0;
+    }
+    pthread_mutex_unlock(&SA.mu);
+}
+static void *sa_main(void *arg) {
+    (void)arg;
+    OpusEncoder *enc = NULL;
+    bool started = false;
+    if (!sa_load()) { sa_status(false, "нет PulseAudio/PipeWire (libpulse)"); goto done; }
+    int oe = 0;
+    enc = opus_encoder_create(48000, 2, OPUS_APPLICATION_AUDIO, &oe);
+    if (!enc || oe) { sa_status(false, "кодер звука не запустился"); goto done; }
+    opus_encoder_ctl(enc, OPUS_SET_BITRATE(128000));
+    SA.ml = SA.ml_new();
+    if (!SA.ml) { sa_status(false, "звук: нет цикла PulseAudio"); goto done; }
+    SA.ctx = SA.ctx_new(SA.ml_api(SA.ml), "Astra DS");
+    if (!SA.ctx || SA.ctx_connect(SA.ctx, NULL, PA_CONTEXT_NOAUTOSPAWN, NULL) < 0 || SA.ml_start(SA.ml) < 0) {
+        sa_status(false, "звуковой сервер недоступен");
+        goto done;
+    }
+    started = true;
+    for (int i = 0; i < 300 && !sa_stop; i++) {  /* до 3 с на соединение */
+        SA.ml_lock(SA.ml);
+        pa_context_state_t cs = SA.ctx_state(SA.ctx);
+        SA.ml_unlock(SA.ml);
+        if (cs == PA_CONTEXT_READY) break;
+        if (cs == PA_CONTEXT_FAILED || cs == PA_CONTEXT_TERMINATED || i == 299) { sa_status(false, "звуковой сервер недоступен"); goto done; }
+        struct timespec ts = { 0, 10 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    sa_status(true, "");
+    {
+        double next = now_msf();
+        int tick = 0;
+        bool asked = false;
+        u32 ts48 = 0;
+        static int32_t mix[SA_FRAME];
+        static int16_t pcm[SA_FRAME];
+        static u8 pkt[1500];
+        while (!sa_stop) {
+            if (tick % 50 == 0) {                /* раз в секунду: какие программы сейчас играют звук */
+                pthread_mutex_lock(&SA.mu);
+                SA.nin = SA.nsk = 0; SA.eol_in = SA.eol_sk = false;
+                pthread_mutex_unlock(&SA.mu);
+                SA.ml_lock(SA.ml);
+                pa_operation *o1 = SA.sinks(SA.ctx, sa_sk_cb, NULL), *o2 = SA.inputs(SA.ctx, sa_in_cb, NULL);
+                if (o1) SA.op_unref(o1);
+                if (o2) SA.op_unref(o2);
+                SA.ml_unlock(SA.ml);
+                asked = true;
+            }
+            if (asked) {
+                pthread_mutex_lock(&SA.mu);
+                bool ready = SA.eol_in && SA.eol_sk;
+                pthread_mutex_unlock(&SA.mu);
+                if (ready) { SA.ml_lock(SA.ml); sa_sync(); SA.ml_unlock(SA.ml); asked = false; }
+            }
+            bool any = false;
+            memset(mix, 0, sizeof mix);
+            pthread_mutex_lock(&SA.mu);
+            for (int k = 0; k < SA_MAX; k++) {
+                SaSt *t = &SA.st[k];
+                if (!t->used || !t->n) continue;
+                size_t take = t->n < SA_FRAME ? t->n & ~(size_t)1 : SA_FRAME;
+                for (size_t q = 0; q < take; q++) mix[q] += t->ring[(t->r + q) % SA_RING];
+                t->r = (t->r + take) % SA_RING; t->n -= take;
+                if (t->n > SA_FRAME * 4) { size_t d = t->n - SA_FRAME * 2; t->r = (t->r + d) % SA_RING; t->n -= d; }   /* отставание: догнать */
+                if (take) any = true;
+            }
+            pthread_mutex_unlock(&SA.mu);
+            if (any) {
+                for (int q = 0; q < SA_FRAME; q++) pcm[q] = (int16_t)(mix[q] > 32767 ? 32767 : mix[q] < -32768 ? -32768 : mix[q]);
+                int n = opus_encode(enc, pcm, SA_FRAME / 2, pkt, (opus_int32)sizeof pkt);
+                if (n > 2) voice_stream_audio(pkt, (size_t)n, ts48);
+            }
+            ts48 += SA_FRAME / 2;
+            tick++;
+            next += 20.0;
+            double now = now_msf();
+            if (next > now) { struct timespec ts = { 0, (long)((next - now) * 1e6) }; nanosleep(&ts, NULL); }
+            else if (now - next > 500.0) next = now;
+        }
+        wipe_mem(mix, sizeof mix); wipe_mem(pcm, sizeof pcm); wipe_mem(pkt, sizeof pkt);
+    }
+done:
+    if (started) {
+        SA.ml_lock(SA.ml);
+        for (int k = 0; k < SA_MAX; k++) if (SA.st[k].used) { SA.st_read_cb(SA.st[k].s, NULL, NULL); SA.st_disconnect(SA.st[k].s); SA.st_unref(SA.st[k].s); SA.st[k].used = false; SA.st[k].s = NULL; }
+        SA.ctx_disconnect(SA.ctx);
+        SA.ml_unlock(SA.ml);
+        SA.ml_stop(SA.ml);
+    }
+    if (SA.ctx) { SA.ctx_unref(SA.ctx); SA.ctx = NULL; }
+    if (SA.ml) { SA.ml_free(SA.ml); SA.ml = NULL; }
+    for (int k = 0; k < SA_MAX; k++) { wipe_mem(SA.st[k].ring, sizeof SA.st[k].ring); SA.st[k].r = SA.st[k].n = 0; }
+    if (enc) opus_encoder_destroy(enc);
+    if (SA.lib) { dlclose(SA.lib); SA.lib = NULL; }
+    pthread_mutex_lock(&sh_mu); sh.audio = false; pthread_mutex_unlock(&sh_mu);
+    return NULL;
+}
+#else
+static void *sa_main(void *arg) { (void)arg; sa_status(false, "собрано без libpulse-dev: звука трансляции нет"); return NULL; }
+#endif
+
 static void *sh_main(void *arg) {
     (void)arg;
     Cap c;
     memset(&c, 0, sizeof c);
+    sa_on = false;
     const char *why = "трансляция остановлена";
     H264E_persist_t *enc = NULL;
     H264E_scratch_t *scr = NULL;
@@ -362,8 +657,11 @@ static void *sh_main(void *arg) {
     pthread_mutex_lock(&sh_mu);
     sh.w = SH_OW; sh.h = SH_OH; sh.fps = fps;
     sh.audio = false;
-    snprintf(sh.audio_err, sizeof sh.audio_err, "%s", sa_want ? "звук на Linux пока не передаётся" : "без звука");
+    snprintf(sh.audio_err, sizeof sh.audio_err, "%s", sa_want ? "" : "без звука");
     pthread_mutex_unlock(&sh_mu);
+    sa_stop = 0;
+    sa_pid = sh_win ? prop_long(c.d, sh_win, "_NET_WM_PID", -1) : 0;   /* -1: процесс окна неизвестен — без звука, чужой не берём */
+    if (sa_want) sa_on = !pthread_create(&sa_thr, NULL, sa_main, NULL);
 
     H264E_run_param_t rp;
     memset(&rp, 0, sizeof rp);
@@ -477,6 +775,7 @@ static void *sh_main(void *arg) {
     }
     if (sh_stop) why = "трансляция остановлена";
 out:
+    if (sa_on) { sa_stop = 1; pthread_join(sa_thr, NULL); sa_on = false; }   /* звук: до конца, буферы затирает сам */
     cap_img_free(&c);
     wipe_mem(c.y, ysz); wipe_mem(c.u, csz); wipe_mem(c.v, csz);
     if (enc) wipe_mem(enc, (size_t)szp);

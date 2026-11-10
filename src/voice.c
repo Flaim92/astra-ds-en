@@ -50,6 +50,7 @@ static struct {
     atomic_bool vl_fail;                        /* голос не прошёл через туннель: сообщить vless.c из главного потока */
     bool via_vless;                             /* звонок поднят через туннель */
     int rejoins;                                /* повторных входов подряд без успеха */
+    atomic_int last_vclose;                     /* код закрытия голосового ws (для сообщения об ошибке) */
     char gw_sess[96];                           /* сессия gateway, в которой отправлен op 4 */
     Vol vols[64]; int nvols;
     char dev[2][96];                            /* №140: выбранные устройства (0 — микрофон, 1 — вывод); "" — как в O */
@@ -1340,6 +1341,7 @@ static void ws_lost(VW *w) {
         if (code == 4006 || code == 4009 || (was_resuming && code >= 4000)) {
             /* RESUME не принят (сессия устарела): новый вход через gateway, op 4 — в главном потоке */
             status_set(VS_CONNECTING, ui_tr("сессия голоса устарела: вход заново"));
+            atomic_store(&V.last_vclose, code);
             atomic_store(&V.need_rejoin, true);
             atomic_store(&V.stop, true);
             wake_signal(g_wake);
@@ -1683,7 +1685,11 @@ static void voice_rejoin(void) {
     if (++V.rejoins > 2) {
         stop_thread();
         if (!O.demo) gw_voice_state(g, 0, false, false);
-        status_set(VS_FAILED, ui_tr("голос не восстановился: войдите в канал заново"));
+        int cc = atomic_load(&V.last_vclose);
+        char e[128];
+        if (cc) snprintf(e, sizeof e, ui_tr("голос не восстановился (код %d): войдите в канал заново"), cc);
+        else snprintf(e, sizeof e, "%s", ui_tr("голос не восстановился: войдите в канал заново"));
+        status_set(VS_FAILED, e);
         return;
     }
     voice_join(g, c);
@@ -1707,16 +1713,23 @@ void voice_toggle_deaf(void) { atomic_store(&V.deaf, !atomic_load(&V.deaf)); res
 void voice_on_state(u64 guild, u64 channel, u64 user, const char *session_id) {
     if (user != S.me_id || V.st.phase == VS_IDLE) return;
     if (!channel) {
-        /* нас отключили (или мы вышли с другого устройства) */
+        /* нас отключили (или мы вышли с другого устройства). Но если мы сами вышли из-за сбоя (VS_FAILED),
+         * это подтверждение выхода НЕ должно гасить панель — иначе ошибку не успеть прочитать (issue #2). */
+        bool keep_failed = V.st.phase == VS_FAILED;
         stop_thread();
         mutex_lock(V.mu);
+        VoicePhase kp = V.st.phase;
+        u64 kc = V.st.channel_id, kg = V.st.guild_id;
+        char ke[sizeof V.st.error];
+        memcpy(ke, V.st.error, sizeof ke);
         memset(&V.st, 0, sizeof V.st);
+        if (keep_failed) { V.st.phase = kp; V.st.channel_id = kc; V.st.guild_id = kg; memcpy(V.st.error, ke, sizeof ke); }
         mutex_unlock(V.mu);
         wipe(V.token, sizeof V.token);
         wipe(V.session, sizeof V.session);
         V.have_session = V.have_server = false;
         V.gw_sess[0] = 0;
-        ui_notice(ui_tr("вы отключены от голосового канала"));
+        if (!keep_failed) ui_notice(ui_tr("вы отключены от голосового канала"));
         return;
     }
     (void)guild;

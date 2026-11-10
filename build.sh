@@ -42,8 +42,8 @@ if [ "${VIDEO:-0}" = 1 ]; then
     DEFS="$DEFS -DASTRA_VIDEO"
     EXE=${EXE/astra-ds/astra-ds-video}
 fi
-SRC="src/util.c src/update.c src/secret.c src/net.c src/store.c src/ui.c src/cli.c src/voice.c src/voicefx.c src/panic.c src/vless.c src/img.c src/login.c src/captcha.c src/demo.c src/selftest.c src/main.c $PLAT_SRC"
-[ "${VIDEO:-0}" = 1 ] && SRC="$SRC src/streamtest.c"      # обычная сборка его не компилирует вовсе
+SRC="src/util.c src/update.c src/secret.c src/net.c src/store.c src/ui.c src/cli.c src/voice.c src/voicefx.c src/panic.c src/vless.c src/img.c src/login.c src/captcha.c src/impcurl.c src/demo.c src/selftest.c src/main.c $PLAT_SRC"
+[ "${VIDEO:-0}" = 1 ] && SRC="$SRC src/streamtest.c src/share_x11.c src/golive.c"      # обычная сборка его не компилирует вовсе
 # Туннель VLESS: VLESS_IMPL=c (по умолчанию) — свой на C (src/xlite_c.c + src/tls13.c, декодер brotli
 # для сжатых сертификатов), без среды Go; VLESS_IMPL=go — libxlite.a (Xray-core на Go, tools/xlite).
 VLESS_IMPL=${VLESS_IMPL:-c}
@@ -64,15 +64,21 @@ done
 # cJSON — сторонний код: без -Werror, но с теми же флагами защиты
 gcc $CFLAGS -w -c third_party/cJSON.c -o $OUT/obj/cJSON.o
 objs+=("$OUT/obj/cJSON.o")
-# Windows: значок (ID 1) и манифест asInvoker — ресурсом в exe
+# Windows: значок (ID 1), манифест asInvoker и libcurl-impersonate.dll (RCDATA 10) — ресурсом в exe
 if [ "$OS" = win ]; then
     windres -O coff -o $OUT/obj/astra_res.o src/astra.rc
     objs+=("$OUT/obj/astra_res.o")
+else
+    # Linux: libcurl-impersonate.so запекается секцией в ELF (символы _binary_libcurl_impersonate_so_*).
+    # cd в каталог, чтобы имя символа было чистым (без путей сборки). Грузится в impcurl.c через memfd+dlopen.
+    ( cd third_party/impcurl && ld -r -b binary -o "$OLDPWD/$OUT/obj/impcurl_blob.o" libcurl-impersonate.so )
+    objcopy --rename-section .data=.rodata,alloc,load,readonly,data,contents "$OUT/obj/impcurl_blob.o" "$OUT/obj/impcurl_blob.o" 2>/dev/null || true
+    objs+=("$OUT/obj/impcurl_blob.o")
 fi
 
 [ "${1:-}" = check ] && { echo "== объекты собраны"; exit 0; }
 
-DEPLIBS="-L$PFX/lib $XLITE_LIB -ldave -lmlspp -lhpke -lbytes -ltls_syntax -lcurl -lopus -ljpeg"
+DEPLIBS="-L$PFX/lib $XLITE_LIB -ldave -lmlspp -lhpke -lbytes -ltls_syntax -lcurl -lopus -lspeexdsp -lrnnoise -ljpeg"
 if [ "$OS" = linux ]; then DEPLIBS="$DEPLIBS -lssl"; fi
 DEPLIBS="$DEPLIBS -lcrypto -lz"
 g++ -o "$EXE" "${objs[@]}" $LDFLAGS $DEPLIBS $SYSLIBS

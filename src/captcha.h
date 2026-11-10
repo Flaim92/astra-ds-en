@@ -22,6 +22,9 @@ bool captcha_open(const char *sitekey, const char *rqdata, char *out, size_t cap
 int captcha_result(char *err, size_t errn);
 void captcha_close(void);                       /* закрыть окно, дождаться потока, освободить и удалить профиль */
 bool captcha_busy(void);                        /* окно открыто или поток ещё не завершён */
-void captcha_bridge_stats(int *used, int *refused);   /* самопроверка: соединений через мост / отказов (не hcaptcha.com) */
+void captcha_bridge_stats(int *used, int *refused);
+#ifndef _WIN32
+int captcha_helper_main(int argc, char **argv);   /* Linux: процесс-помощник окна проверки (--captcha-helper) */
+#endif   /* самопроверка: соединений через мост / отказов (не hcaptcha.com) */
 
 #endif

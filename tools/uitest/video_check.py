@@ -31,6 +31,35 @@ def snap(keys, size='120x34'):
     return t, info
 
 
+def cpu_tail(keys, tail=5.0):
+    """CPU клиента (% одного ядра) за последние tail секунд прогона: опрос дочернего процесса через psutil."""
+    import threading, time, psutil
+    smp, done = [], threading.Event()
+
+    def poll():
+        me = psutil.Process()
+        while not done.is_set():
+            for ch in me.children():
+                try:
+                    ct = ch.cpu_times()
+                    smp.append((time.perf_counter(), ct.user + ct.system))
+                except psutil.Error:
+                    pass
+            time.sleep(0.2)
+    th = threading.Thread(target=poll)
+    th.start()
+    try:
+        snap(keys)
+    finally:
+        done.set()
+        th.join()
+    if len(smp) < 3:
+        return float('nan')
+    end = smp[-1][0] - 0.6                         # без снимка и выхода в самом конце
+    w = [s for s in smp if end - tail <= s[0] <= end]
+    return 100.0 * (w[-1][1] - w[0][1]) / max(w[-1][0] - w[0][0], 0.1)
+
+
 def has(t, s):
     return any(s in l for l in t)
 
@@ -98,6 +127,30 @@ def main():
     print('  память (медиана 3 прогонов, частная): ' + ', '.join('%s %d КБ' % kv for kv in m.items()))
     ok('эфир 720p в пределах цели 9,6 МБ (%d КБ; потолок 10 МБ)' % m['эфир 720p'], m['эфир 720p'] <= 9830)
     ok('эфир 480p в пределах 10 МБ (%d КБ)' % m['эфир 480p'], m['эфир 480p'] <= 10240)
+    # CPU в эфире (по просьбе дизайнера): последние 5 с из 7-секундного ожидания, медиана 3 прогонов
+    c = {}
+    for name, keys in (('звонок без эфира', j + ',wait:7000'), ('эфир 720p', live + ',wait:7000'),
+                       ('эфир 480p', l480 + ',wait:7000')):
+        c[name] = statistics.median(cpu_tail(keys) for _ in range(3))
+    print('  CPU (%% одного ядра, медиана 3): ' + ', '.join('%s %.1f %%' % kv for kv in c.items()))
+    ok('CPU эфира 720p разумный (<= 25 %% ядра; %.1f %%)' % c['эфир 720p'], c['эфир 720p'] <= 25)
+    # 10 запусков/остановок подряд: эфир снова поднимается, память возвращается, без падения
+    stop = ',click:%d:%d,wait:500' % ind if ind else ''
+    again = ',click:%d:%d,wait:300,click:%d:%d,wait:1500' % (x, row, btn[0] + 2, btn[1])
+    cyc = live + (stop + again) * 9
+    r5 = [snap(cyc) for _ in range(3)]               # сбой был плавающим (~1 из 3) — смотрим все три прогона
+    up = sum(has(t, 'ЭФИР') for t, _ in r5)
+    ok('10-й запуск эфира подряд работает (%d из 3 прогонов)' % up, up == 3)
+    m5 = statistics.median(i['mem_kb'] for _, i in r5)
+    print('  память после 10 запусков: %d КБ (один запуск %d КБ, разница %+d)' % (m5, m['эфир 720p'], m5 - m['эфир 720p']))
+    ok('память после 10 запусков вернулась (разница <= 256 КБ)', m5 - m['эфир 720p'] <= 256)
+    r6 = [snap(cyc + stop) for _ in range(3)]
+    down = sum(not has(t, 'ЭФИР') for t, _ in r6)
+    m6 = statistics.median(i['mem_kb'] for _, i in r6)
+    print('  после 10-й остановки: %d КБ, по прогонам %s (звонок без эфира %d КБ, остаток %+d)' %
+          (m6, [i['mem_kb'] for _, i in r6], m['звонок без эфира'], m6 - m['звонок без эфира']))
+    ok('после 10-й остановки эфира нет, клиент жив (%d из 3)' % down, down == 3)
+    ok('остаток памяти после стопа <= 256 КБ к звонку (%+d)' % (m6 - m['звонок без эфира']), m6 - m['звонок без эфира'] <= 256)
     print('Итог: %d ok, %d FAIL' % (sum(res), len(res) - sum(res)))
     return 0 if all(res) else 1
 

@@ -167,6 +167,19 @@ int plat_ui_lang(void) {                        /* язык интерфейса
     WORD p = PRIMARYLANGID(l);
     return p == LANG_RUSSIAN || p == LANG_UKRAINIAN || p == LANG_BELARUSIAN ? 0 : 1;
 }
+long long plat_thread_cpu_us(void) {
+    FILETIME c, e, k, u;
+    if (!GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u)) return 0;
+    ULARGE_INTEGER a = { .LowPart = k.dwLowDateTime, .HighPart = k.dwHighDateTime }, b = { .LowPart = u.dwLowDateTime, .HighPart = u.dwHighDateTime };
+    return (long long)((a.QuadPart + b.QuadPart) / 10);
+}
+long long plat_now_us(void) {
+    static LARGE_INTEGER f;
+    LARGE_INTEGER c;
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (long long)(c.QuadPart / f.QuadPart * 1000000 + c.QuadPart % f.QuadPart * 1000000 / f.QuadPart);
+}
 /* такт звонка — точнее 15,6 мс. Ревью 18 С1: winmm.dll не в статическом импорте (+~200 КБ всегда) — грузится
  * только на время звонка и выгружается после (вызовы — из одного потока звонка) */
 static HMODULE tm_dll;

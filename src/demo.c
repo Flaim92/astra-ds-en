@@ -392,6 +392,30 @@ void demo_profile(u64 uid, u64 guild_id) {
 static u64 next_id = 10000;
 u64 demo_new_id(void) { return 50000 + next_id++; }
 
+/* selftest: английский READY демо — без кириллицы в строках (кроме ключей таблицы), имена и сервер по-английски */
+int demo_en_selftest(void (*check)(bool ok, const char *what)) {
+    bool d = O.demo, e = g_lang_en;
+    O.demo = true;
+    g_lang_en = true;
+    size_t n = 0;
+    char *t = demo_en_json(READY, sizeof READY - 1, &n);
+    int cyr = 0;
+    for (size_t i = 0; t && i < n; i++) if ((unsigned char)t[i] == 0xD0 || (unsigned char)t[i] == 0xD1) cyr++;
+    bool ok = t && !cyr && strstr(t, "\"Cozy Corner\"") && strstr(t, "\"Night Owl\"") && strstr(t, "Mallory");
+    free(t);
+    char fl[] = "[{\"content\":\"флуд номер 42\"}]";
+    t = demo_en_json(fl, strlen(fl), &n);
+    bool ok2 = t && n == strlen("[{\"content\":\"flood message 42\"}]") && !memcmp(t, "[{\"content\":\"flood message 42\"}]", n);
+    free(t);
+    g_lang_en = false;
+    bool ok3 = !demo_en_json(fl, strlen(fl), &n);   /* русский интерфейс — без подмены */
+    O.demo = d;
+    g_lang_en = e;
+    char w[256];
+    snprintf(w, sizeof w, "i18n: английский демо-набор (READY без кириллицы: осталось %d байт), «флуд номер N», по-русски — без подмены", cyr);
+    check(ok && ok2 && ok3, w);
+    return 0;
+}
 void demo_load(void) {
     cJSON *j = json_parse(READY, sizeof READY - 1);
     if (j) store_ready(j);

@@ -4,6 +4,7 @@
 #include <string.h>
 #include <math.h>
 #include "mc.h"
+#include "golive.h"                              /* только при ASTRA_VIDEO; иначе пусто */
 
 Store S;
 static int notify_of(const Channel *c);
@@ -2060,6 +2061,10 @@ void store_event(const char *t, const cJSON *d) {
         u64 uid = jid(d, "user_id");
         if (uid == S.me_id) voice_on_state(jid(d, "guild_id"), jid(d, "channel_id"), uid, jstr(d, "session_id"));
         ui_dirty();
+#ifdef ASTRA_VIDEO
+    } else if (!strcmp(t, "STREAM_CREATE") || !strcmp(t, "STREAM_SERVER_UPDATE") || !strcmp(t, "STREAM_DELETE")) {
+        golive_on_event(t, d);                  /* «Astra DS Video»: трансляция экрана */
+#endif
     } else if (!strcmp(t, "VOICE_SERVER_UPDATE")) {
         u64 gid = jid(d, "guild_id");
         if (!gid) gid = jid(d, "channel_id");
@@ -3790,7 +3795,7 @@ bool gdm_remove(u64 cid, u64 uid, char *err, size_t errn) {
     Channel *c = dm_chan(cid, err, errn, true);
     if (!c) return false;
     if (gdm_owner(cid) != S.me_id) { snprintf(err, errn, ui_tr("исключать может только владелец группы")); return false; }
-    if (uid == S.me_id) { snprintf(err, errn, ui_tr("чтобы уйти, выберите «Выйти из группы»")); return false; }
+    if (uid == S.me_id) { snprintf(err, errn, ui_tr("чтобы уйти, выберите 'Покинуть группу'")); return false; }
     if (O.demo) {
         for (int i = 0; i < c->nrecip; i++) if (c->recipients[i] == uid) { c->recipients[i] = c->recipients[--c->nrecip]; break; }
         ui_dirty();
@@ -5863,6 +5868,9 @@ static const char *const WANTED[] = {
     "CHANNEL_RECIPIENT_REMOVE", "GUILD_CREATE", "GUILD_UPDATE", "GUILD_DELETE", "GUILD_ROLE_CREATE",
     "GUILD_ROLE_UPDATE", "GUILD_ROLE_DELETE", "GUILD_MEMBER_UPDATE", "VOICE_STATE_UPDATE", "VOICE_SERVER_UPDATE",
     "CALL_CREATE", "CALL_UPDATE", "CALL_DELETE", "USER_GUILD_SETTINGS_UPDATE",
+#ifdef ASTRA_VIDEO
+    "STREAM_CREATE", "STREAM_SERVER_UPDATE", "STREAM_DELETE",
+#endif
     "RELATIONSHIP_ADD", "RELATIONSHIP_UPDATE", "RELATIONSHIP_REMOVE", "CHANNEL_PINS_UPDATE",
     "MESSAGE_POLL_VOTE_ADD", "MESSAGE_POLL_VOTE_REMOVE",
     "THREAD_CREATE", "THREAD_UPDATE", "THREAD_DELETE", "THREAD_LIST_SYNC", "THREAD_MEMBER_UPDATE", "THREAD_MEMBERS_UPDATE",

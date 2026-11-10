@@ -35,9 +35,13 @@
 #include "plat.h"
 #include "login.h"
 #include "captcha.h"
+#include "impcurl.h"
 
 /* Временно здесь, до переноса в mc.h координатором (раздел net.c): */
 void net_curl_common(CURL *e);
+
+/* libcurl-impersonate: выбранный на этот вход curl для auth-эндпоинтов. NULL — обычный curl. */
+static const ImpCurl *VT;
 
 #define API "https://discord.com/api/v9"
 #define RA_URL "wss://remote-auth-gateway.discord.gg/?v=2"
@@ -83,7 +87,8 @@ static struct {
     bool sms_sent, undelete;
     char fp[80];                                /* X-Fingerprint (не секрет) */
     bool fp_tried;
-    char cookie[4][2][96];                      /* куки Discord из ответов (__dcfduid, __sdcfduid, __cfruid, _cfuvid), только в памяти */
+    char cookie[4][2][256];                     /* куки Discord из ответов (__dcfduid, __sdcfduid, __cfruid, _cfuvid), только в памяти.
+                                                   256: _cfuvid/__sdcfduid длиннее 96 — иначе отбрасывались и MFA видел «нового посетителя» CF */
     /* капча: что повторить после проверки */
     int cap_kind;                               /* R_* запроса, на который пришла капча; 0 — нет */
     bool cap_key, cap_tried, cap_open;
@@ -323,8 +328,8 @@ static size_t rest_header(char *p, size_t sz, size_t n, void *ud) {
 
 static void rest_abort(void) {
     if (L.e) {
-        if (L.m) curl_multi_remove_handle(L.m, L.e);
-        curl_easy_cleanup(L.e);
+        if (L.m) (VT ? VT->multi_remove_handle : curl_multi_remove_handle)(L.m, L.e);
+        (VT ? VT->easy_cleanup : curl_easy_cleanup)(L.e);
         L.e = NULL;
     }
     if (L.hdr) { curl_slist_free_all(L.hdr); L.hdr = NULL; }
@@ -401,7 +406,7 @@ static struct curl_slist *headers(int kind) {
         snprintf(fh, sizeof fh, "X-Fingerprint: %s", L.fp);
         h = curl_slist_append(h, fh);
     }
-    char ck[512];
+    char ck[1024];
     size_t cn = 0;
     ck[0] = 0;
     for (int i = 0; i < 4; i++) if (L.cookie[i][0][0]) {
@@ -433,11 +438,35 @@ static void rest_start(int kind) {
     L.rlen = 0;
     L.rover = false;
     if (!build(kind, path, sizeof path, &method)) { rest_abort(); on_resp(kind, -1); return; }
-    if (!L.m) L.m = curl_multi_init();
-    CURL *e = L.m ? curl_easy_init() : NULL;
+    /* Выбор curl — один раз на весь вход. Если impercurl есть, идём через него
+     * (Chrome 152 ClientHello + HTTP/1.1): так Discord принимает auth-запросы. */
+    if (!L.m) VT = impcurl_vt();
+    if (!L.m) L.m = VT ? VT->multi_init() : curl_multi_init();
+    CURL *e = L.m ? (VT ? VT->easy_init() : curl_easy_init()) : NULL;
     if (!e) { rest_abort(); on_resp(kind, 0); return; }
-    net_curl_common(e);
-    if (!net_route(e, &L.via)) { curl_easy_cleanup(e); L.kind = R_NONE; L.want |= (unsigned)kind; L.route_wait = true; return; }
+    if (VT) {
+        /* Импер-curl: TLS, cipher, ALPN, cert-compression — внутри DLL. Нам нужны только
+         * маршрут (VLESS) и общие настройки curl. Явно HTTP/1.1 — как в mfa_h1.py. */
+        VT->easy_setopt(e, CURLOPT_IMPERSONATE, "chrome152");
+        VT->easy_setopt(e, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_1_1);
+        VT->easy_setopt(e, CURLOPT_SSL_VERIFYPEER, 1L);
+        VT->easy_setopt(e, CURLOPT_SSL_VERIFYHOST, 2L);
+        VT->easy_setopt(e, CURLOPT_NOSIGNAL, 1L);
+        VT->easy_setopt(e, CURLOPT_FOLLOWLOCATION, 0L);
+        VT->easy_setopt(e, CURLOPT_CONNECTTIMEOUT, 10L);
+        /* UA согласован с X-Super-Properties (net_super_header): Chrome 152. */
+        extern const char *net_user_agent(void);
+        VT->easy_setopt(e, CURLOPT_USERAGENT, net_user_agent());
+        const char *proxy = vless_state() == VL_OFF ? "" : vless_proxy_url();
+        if (!proxy) { VT->easy_cleanup(e); L.kind = R_NONE; L.want |= (unsigned)kind; L.route_wait = true; return; }
+        VT->easy_setopt(e, CURLOPT_PROXY, proxy);
+        VT->easy_setopt(e, CURLOPT_NOPROXY, "");
+        if (proxy[0]) VT->easy_setopt(e, CURLOPT_SOCKS5_AUTH, (long)CURLAUTH_BASIC);
+        L.via = proxy[0] != 0;
+    } else {
+        net_curl_common(e);
+        if (!net_route(e, &L.via)) { curl_easy_cleanup(e); L.kind = R_NONE; L.want |= (unsigned)kind; L.route_wait = true; return; }
+    }
     snprintf(url, sizeof url, API "%s", path);
     struct curl_slist *h = headers(kind);
     L.hdr = h;
@@ -447,36 +476,38 @@ static void rest_start(int kind) {
         L.n_auth.next = h;
         head = &L.n_auth;
     }
-    curl_easy_setopt(e, CURLOPT_URL, url);
-    curl_easy_setopt(e, CURLOPT_HTTPHEADER, head);
-    curl_easy_setopt(e, CURLOPT_CUSTOMREQUEST, method);
-    curl_easy_setopt(e, CURLOPT_ACCEPT_ENCODING, "");
-    curl_easy_setopt(e, CURLOPT_TIMEOUT, 20L);
-    curl_easy_setopt(e, CURLOPT_WRITEFUNCTION, rest_write);
-    curl_easy_setopt(e, CURLOPT_WRITEDATA, NULL);
-    curl_easy_setopt(e, CURLOPT_HEADERFUNCTION, rest_header);
+#define SO(opt, val) (VT ? VT->easy_setopt(e, (opt), (val)) : curl_easy_setopt(e, (opt), (val)))
+    SO(CURLOPT_URL, url);
+    SO(CURLOPT_HTTPHEADER, head);
+    SO(CURLOPT_CUSTOMREQUEST, method);
+    SO(CURLOPT_ACCEPT_ENCODING, "");
+    SO(CURLOPT_TIMEOUT, 20L);
+    SO(CURLOPT_WRITEFUNCTION, rest_write);
+    SO(CURLOPT_WRITEDATA, NULL);
+    SO(CURLOPT_HEADERFUNCTION, rest_header);
     if (!strcmp(method, "POST")) {               /* тело не копируется curl: отправляется из закреплённой памяти */
-        curl_easy_setopt(e, CURLOPT_POSTFIELDS, L.k->body);
-        curl_easy_setopt(e, CURLOPT_POSTFIELDSIZE, (long)strlen(L.k->body));
+        SO(CURLOPT_POSTFIELDS, L.k->body);
+        SO(CURLOPT_POSTFIELDSIZE, (long)strlen(L.k->body));
     }
+#undef SO
     L.e = e;
-    if (curl_multi_add_handle(L.m, e) != CURLM_OK) { rest_abort(); on_resp(kind, 0); }
+    if ((VT ? VT->multi_add_handle(L.m, e) : curl_multi_add_handle(L.m, e)) != CURLM_OK) { rest_abort(); on_resp(kind, 0); }
 }
 
 static void rest_step(void) {
     int running = 0;
-    curl_multi_perform(L.m, &running);
+    (VT ? VT->multi_perform : curl_multi_perform)(L.m, &running);
     CURLMsg *msg;
     int left;
-    while ((msg = curl_multi_info_read(L.m, &left))) {
+    while ((msg = (VT ? VT->multi_info_read : curl_multi_info_read)(L.m, &left))) {
         if (msg->msg != CURLMSG_DONE || msg->easy_handle != L.e) continue;
         long status = 0;
         CURLcode rc = msg->data.result;
-        if (rc == CURLE_OK) curl_easy_getinfo(L.e, CURLINFO_RESPONSE_CODE, &status);
+        if (rc == CURLE_OK) (VT ? VT->easy_getinfo : curl_easy_getinfo)(L.e, CURLINFO_RESPONSE_CODE, &status);
         if (L.via) vless_report_failure(status > 0 ? NULL : net_path_error((int)rc) ? ui_tr("вход") : NULL);
         int kind = L.kind;
-        curl_multi_remove_handle(L.m, L.e);
-        curl_easy_cleanup(L.e);
+        (VT ? VT->multi_remove_handle : curl_multi_remove_handle)(L.m, L.e);
+        (VT ? VT->easy_cleanup : curl_easy_cleanup)(L.e);
         L.e = NULL;
         curl_slist_free_all(L.hdr);
         L.hdr = NULL;
@@ -654,7 +685,10 @@ static void handle_auth(const cJSON *j, long status, int kind) {
     if (kind == R_MFA && (code == 60008 || status == 401 || field_of(field) == LF_CODE)) {
         wipe(L.k->code, sizeof L.k->code);
         L.stage = LG_MFA;
-        set_err(LF_CODE, "%s", code == 60008 || !fe ? ui_tr("Неверный код. Попробуйте ещё раз.") : ui_tr("Код не принят Discord"));
+        if (code == 60008) { set_err(LF_CODE, "%s", ui_tr("Неверный код. Попробуйте ещё раз.")); return; }
+        char m[160];                            /* иное: показать ответ Discord как есть (без секретов) */
+        copy_san(m, sizeof m, emsg ? emsg : "");
+        set_err(LF_CODE, ui_tr("Discord не принял код: %s (код %lld, HTTP %ld)"), m[0] ? m : "-", (long long)code, status);
         return;
     }
     if (!strcmp(ecode, "INVALID_LOGIN") || !strcmp(ecode, "PASSWORD_DOES_NOT_MATCH") || (code == 50035 && field_of(field) == LF_PASSWORD)) {
@@ -1341,8 +1375,9 @@ void login_finish(void) {
     rest_abort();
     qr_close_ws();
     qr_drop_key();
-    if (L.m) { curl_multi_cleanup(L.m); L.m = NULL; }
+    if (L.m) { (VT ? VT->multi_cleanup : curl_multi_cleanup)(L.m); L.m = NULL; }
     if (Q.wm) { curl_multi_cleanup(Q.wm); Q.wm = NULL; }
+    VT = NULL;
     /* SECURITY К2: поток окна капчи не завершился (captcha_close не дождался за 20 с) — он ещё может писать
      * в L.k->ckey: страницы затираем, но не освобождаем (утечка закреплённых страниц лучше записи в чужую память). */
     if (L.k && captcha_busy()) { plat_wipe(L.k, L.ksz); L.k = NULL; }
@@ -1365,8 +1400,10 @@ void login_service(void) {
         else {
             L.route_wait = false;
             int kind = 0;
-            if (L.want & R_RA) kind = R_RA;
-            else if ((L.want & R_LOGIN) && !L.fp_tried) { L.fp_tried = true; kind = R_FP; L.want |= R_FP; }
+            /* отпечаток посетителя и куки — до первого запроса входа, в том числе до обмена QR: без них капча,
+             * которую Discord просит на обмене, привязывалась к «никому» и её ответ отвергался (invalid-response) */
+            if ((L.want & (R_LOGIN | R_RA)) && !L.fp_tried) { L.fp_tried = true; kind = R_FP; L.want |= R_FP; }
+            else if (L.want & R_RA) kind = R_RA;
             else for (int b = 2; b <= R_TOKEN; b <<= 1) if (L.want & (unsigned)b) { kind = b; break; }
             if (kind) {
                 L.want &= ~(unsigned)kind;

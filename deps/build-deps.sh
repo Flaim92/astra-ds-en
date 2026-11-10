@@ -173,6 +173,50 @@ build_opus() {
         -DOPUS_INSTALL_PKG_CONFIG_MODULE=OFF -DOPUS_DRED=OFF -DOPUS_DEEP_PLC=OFF -DOPUS_OSCE=OFF
 }
 
+# Шумоподавление микрофона (разовое разрешение координатора 10.11.2026: только эти две функции).
+# SpeexDSP 1.2.1 — только препроцессор (preprocess + filterbank + kiss_fft), плавающая точка; хэш — по
+# SHA256SUMS.txt авторов (downloads.xiph.org/releases/speex). BSD-3, см. third_party/LICENSE.
+build_speexdsp() {
+    fetch speexdsp-1.2.1.tar.gz https://downloads.xiph.org/releases/speex/speexdsp-1.2.1.tar.gz \
+        8c777343e4a6399569c72abc38a95b24db56882c83dbdb6c6424a5f4aeb54d3d
+    unpack speexdsp-1.2.1.tar.gz speexdsp
+    local b=$BLD/speexdsp o=$BLD/speexdsp-o
+    rm -rf "$o"; mkdir -p "$o" "$PFX/include/speex"
+    cat > "$b/include/speex/speexdsp_config_types.h" <<'EOT'
+#ifndef __SPEEX_TYPES_H__
+#define __SPEEX_TYPES_H__
+#include <stdint.h>
+typedef int16_t spx_int16_t;
+typedef uint16_t spx_uint16_t;
+typedef int32_t spx_int32_t;
+typedef uint32_t spx_uint32_t;
+#endif
+EOT
+    for f in preprocess filterbank fftwrap kiss_fft kiss_fftr mdf; do   # mdf: preprocess ссылается на speex_echo_get_residual
+        gcc $CFLAGS -std=gnu99 -DFLOATING_POINT -DUSE_KISS_FFT -DEXPORT= -I"$b/include" -I"$b/libspeexdsp" \
+            -c "$b/libspeexdsp/$f.c" -o "$o/$f.o"
+    done
+    rm -f "$PFX/lib/libspeexdsp.a"
+    ar rcs "$PFX/lib/libspeexdsp.a" "$o"/*.o
+    cp "$b"/include/speex/{speex_preprocess.h,speexdsp_types.h,speexdsp_config_types.h} "$PFX/include/speex/"
+}
+
+# RNNoise 0.2 (тег v0.2, релизный архив со встроенной моделью rnnoise_data.c), без x86-SIMD (переносимый C).
+# Автор не публикует хэш архива: SHA256 закреплён по архиву, скачанному с GitHub 10.11.2026. BSD-3.
+build_rnnoise() {
+    fetch rnnoise-0.2.tar.gz https://github.com/xiph/rnnoise/releases/download/v0.2/rnnoise-0.2.tar.gz \
+        90fce4b00b9ff24c08dbfe31b82ffd43bae383d85c5535676d28b0a2b11c0d37
+    unpack rnnoise-0.2.tar.gz rnnoise
+    local b=$BLD/rnnoise o=$BLD/rnnoise-o
+    rm -rf "$o"; mkdir -p "$o"
+    for f in denoise rnn pitch kiss_fft celt_lpc nnet nnet_default parse_lpcnet_weights rnnoise_data rnnoise_tables; do
+        gcc $CFLAGS -std=gnu11 -I"$b/include" -I"$b/src" -c "$b/src/$f.c" -o "$o/$f.o"
+    done
+    rm -f "$PFX/lib/librnnoise.a"
+    ar rcs "$PFX/lib/librnnoise.a" "$o"/*.o
+    cp "$b/include/rnnoise.h" "$PFX/include/"
+}
+
 build_json() {
     fetch json.hpp https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp \
         aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63
@@ -296,7 +340,7 @@ build_brotli() {
     cp "$b"/c/include/brotli/{decode.h,port.h,shared_dictionary.h,types.h} "$PFX/include/brotli/"
 }
 
-ALL="zlib openssl curl opus json mlspp libdave xlite jpeg brotli"
+ALL="zlib openssl curl opus speexdsp rnnoise json mlspp libdave xlite jpeg brotli"
 for step in ${*:-$ALL}; do
     echo "== $step"
     "build_$step"

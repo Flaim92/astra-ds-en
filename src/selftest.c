@@ -25,6 +25,7 @@
 #include "plat.h"
 #include "img.h"
 #include "login.h"
+#include "golive.h"
 
 static int fails, passes, defects;
 /* FAIL печатает строку; с ST_DUMP=1 ещё и экран 120x34 в момент проверки (без цветов) — для разбора. */
@@ -2745,6 +2746,58 @@ static void t_file(void) {
     check(!file_sending(NULL), "файл: в демо очередь отправки пуста");
 }
 
+/* ---- тестировщик: таблица перевода ui_en.h (предложение ревьюера). В каждой паре одинаковые printf-спецификаторы
+ * (иначе английская строка с другим %-набором — неопределённое поведение snprintf), таблица строго по strcmp
+ * (иначе двоичный поиск в tr() не находит пару — строка остаётся русской), и каждая пара находится через ui_tr. ---- */
+#include "ui_en.h"
+extern bool g_lang_en;
+/* Следующий спецификатор после p: в buf длина+тип («lld», «s», «.1f» -> «f»), возврат — позиция после него или NULL. */
+static const char *tr_next_conv(const char *p, char *buf, size_t n) {
+    for (; (p = strchr(p, '%')); ) {
+        p++;
+        if (*p == '%') { p++; continue; }
+        while (*p && strchr("-+ #0", *p)) p++;
+        if (*p == '*') p++; else while (*p >= '0' && *p <= '9') p++;
+        if (*p == '.') { p++; if (*p == '*') p++; else while (*p >= '0' && *p <= '9') p++; }
+        size_t k = 0;
+        while (*p && strchr("hlzjt", *p) && k + 2 < n) buf[k++] = *p++;
+        if (*p && strchr("diouxXcspfFeEgG", *p)) { buf[k++] = *p++; buf[k] = 0; return p; }
+        buf[k] = 0; return p;                                  /* неизвестный тип — сравнится как есть */
+    }
+    return NULL;
+}
+static bool tr_same_convs(const char *a, const char *b) {
+    char ca[8], cb[8];
+    for (;;) {
+        a = tr_next_conv(a, ca, sizeof ca);
+        b = tr_next_conv(b, cb, sizeof cb);
+        if (!a || !b) return !a && !b;
+        if (strcmp(ca, cb)) return false;
+    }
+}
+static void t_tr_table(void) {
+    size_t n = sizeof TR_EN / sizeof *TR_EN, fmt = 0, ord = 0, miss = 0;
+    bool e = g_lang_en;
+    g_lang_en = true;
+    for (size_t i = 0; i < n; i++) {
+        if (!tr_same_convs(TR_EN[i].ru, TR_EN[i].en)) {
+            if (fmt++ < 3) { char m[160]; snprintf(m, sizeof m, "    формат различается: %.60s\n", TR_EN[i].ru); term_puts(m); }
+        }
+        if (i && strcmp(TR_EN[i - 1].ru, TR_EN[i].ru) >= 0) {
+            if (ord++ < 3) { char m[160]; snprintf(m, sizeof m, "    порядок: %.60s\n", TR_EN[i].ru); term_puts(m); }
+        }
+        /* по содержимому: ui_tr отдаёт указатель из таблицы ui.c, а здесь своя копия ui_en.h */
+        if (strcmp(ui_tr(TR_EN[i].ru), TR_EN[i].en)) {
+            if (miss++ < 3) { char m[160]; snprintf(m, sizeof m, "    не находится: %.60s\n", TR_EN[i].ru); term_puts(m); }
+        }
+    }
+    g_lang_en = e;
+    check(n > 100, "ui_en.h: таблица перевода не пуста");
+    check(!fmt, "ui_en.h: у каждой пары одинаковые printf-спецификаторы");
+    check(!ord, "ui_en.h: таблица строго по strcmp (двоичный поиск)");
+    check(!miss, "ui_en.h: каждая пара находится через ui_tr в EN");
+}
+
 /* ---- тестировщик: щелчок по КАЖДОЙ кнопке экрана входа и стартового VLESS (ошибка 09.11: номера кнопок B_LG_*
  * совпали с B_LANG — щелчок по галочке переключал язык). Каждая кнопка делает своё, язык меняет только RU|EN. ---- */
 extern bool g_lang_en;
@@ -3222,11 +3275,16 @@ int selftest(void) {
     term_puts("\n  слеш-команды и модерация:\n"); t_slash_mod();
     term_puts("\n  файл со спойлером:\n");  t_send_ex();
     term_puts("\n  автообновление:\n");     update_selftest(check);
+    demo_en_selftest(check);
+#ifdef ASTRA_VIDEO
+    golive_selftest(check);
+#endif
     term_puts("\n  очередь 1:\n");          t_queue1();
     term_puts("\n  реакции и пересылка (store):\n"); t_rv_fwd();
     term_puts("\n  поиск:\n");               t_search();
     term_puts("\n  отправка файла:\n");      t_file();
     term_puts("\n  кнопки входа и старта (тестировщик):\n"); t_login_buttons();
+    term_puts("\n  таблица перевода ui_en.h (тестировщик):\n"); t_tr_table();
 
     term_puts("\n  голосовой тракт:\n");
     voice_selftest(check);
@@ -3997,6 +4055,290 @@ static int live_join(void) {
     return 0;
 }
 
+#ifdef ASTRA_VIDEO
+#include "share.h"
+/* Окно-источник для трансляции: своё, крупный текст и секунды (не исключается из захвата — это и есть картинка). */
+#ifdef _WIN32
+static HWND lvs_hwnd;
+static volatile LONG lvs_quit;
+static i64 lvs_t0;
+static LRESULT CALLBACK lvs_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    if (m == WM_TIMER) { if (now_ms() - lvs_t0 > 200000) PostQuitMessage(0); InvalidateRect(h, NULL, TRUE); return 0; }
+    if (m == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT r;
+        GetClientRect(h, &r);
+        HBRUSH bg = CreateSolidBrush(RGB(0x20, 0x40, 0x80));
+        FillRect(dc, &r, bg);
+        DeleteObject(bg);
+        HFONT f = CreateFontW(72, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        HGDIOBJ of = SelectObject(dc, f);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 255, 255));
+        WCHAR t[96];
+        long s = (long)((now_ms() - lvs_t0) / 1000);
+        _snwprintf(t, 95, L"Astra DS stream test\n%02ld:%02ld", s / 60, s % 60);
+        t[95] = 0;
+        DrawTextW(dc, t, -1, &r, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+        SelectObject(dc, of);
+        DeleteObject(f);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    return DefWindowProcW(h, m, wp, lp);
+}
+static int lvs_thread(void *arg) {
+    (void)arg;
+    lvs_quit = 0;
+    WNDCLASSW wc = { .lpfnWndProc = lvs_proc, .hInstance = GetModuleHandleW(NULL), .lpszClassName = L"AstraStreamTest",
+                     .hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW) };
+    RegisterClassW(&wc);
+    lvs_t0 = now_ms();
+    HWND h = CreateWindowExW(0, wc.lpszClassName, L"Astra DS stream test", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                             100, 100, 1280, 720, NULL, NULL, wc.hInstance, NULL);
+    SetTimer(h, 1, 500, NULL);
+    if (h) SetForegroundWindow(h);              /* захват дизайнера ставит на паузу, когда источник не на переднем плане */
+    lvs_hwnd = h;
+    MSG m;
+    while (!lvs_quit && GetMessageW(&m, NULL, 0, 0) > 0) { TranslateMessage(&m); DispatchMessageW(&m); }
+    if (h) DestroyWindow(h);
+    lvs_hwnd = NULL;
+    return 0;
+}
+/* --streamsrc (только Video, скрытый): окно-источник для MC_LIVE=golive, живёт до 200 с или до завершения */
+int stream_source_main(void) {
+    lvs_thread(NULL);
+    return 0;
+}
+#endif
+/* MC_LIVE_SYNTH=1: синтетические кадры 1280x720 24 к/с прямо в кодер (без захвата окон и пауз) — проверка ровно
+ * пути кодер -> golive_frame -> DAVE -> RTP. Кодер — тот же minih264 (реализация собрана в streamtest.c). */
+#ifdef _WIN32
+#define H264E_SVC_API 0
+#define H264E_MAX_THREADS 0
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#pragma GCC diagnostic ignored "-Wstrict-prototypes"
+#endif
+#include "../third_party/minih264/minih264e.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+static volatile LONG syn_stop;
+static volatile LONG syn_frames, syn_bytes_kb;
+/* цифра 0-9 семисегментно, сегменты — прямоугольники в Y */
+static void syn_rect(u8 *y, int x0, int y0, int w, int h, u8 v) {
+    for (int r = y0; r < y0 + h && r < 720; r++) if (r >= 0) for (int c = x0; c < x0 + w && c < 1280; c++) if (c >= 0) y[r * 1280 + c] = v;
+}
+static void syn_digit(u8 *y, int x, int yy, int d) {
+    static const u8 seg[10] = { 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
+    int s = seg[d % 10], W = 90, H = 160, T = 18;
+    if (s & 1) syn_rect(y, x, yy, W, T, 235);
+    if (s & 2) syn_rect(y, x + W - T, yy, T, H / 2, 235);
+    if (s & 4) syn_rect(y, x + W - T, yy + H / 2, T, H / 2, 235);
+    if (s & 8) syn_rect(y, x, yy + H - T, W, T, 235);
+    if (s & 16) syn_rect(y, x, yy + H / 2, T, H / 2, 235);
+    if (s & 32) syn_rect(y, x, yy, T, H / 2, 235);
+    if (s & 64) syn_rect(y, x, yy + H / 2 - T / 2, W, T, 235);
+}
+static int syn_thread(void *arg) {
+    (void)arg;
+    const int W = 1280, Hh = 720, FPS = 30;
+    H264E_create_param_t cp;
+    memset(&cp, 0, sizeof cp);
+    cp.width = W; cp.height = Hh; cp.gop = FPS * 2; cp.vbv_size_bytes = 2000 * 1000 / 8;
+    int szp = 0, szs = 0;
+    if (H264E_sizeof(&cp, &szp, &szs)) return 1;
+    H264E_persist_t *enc = malloc((size_t)szp);
+    H264E_scratch_t *scr = malloc((size_t)szs);
+    u8 *yb = malloc((size_t)W * Hh), *ub = malloc((size_t)W * Hh / 4), *vb = malloc((size_t)W * Hh / 4);
+    if (!enc || !scr || !yb || !ub || !vb || H264E_init(enc, &cp)) { free(enc); free(scr); free(yb); free(ub); free(vb); return 1; }
+    memset(ub, 128, (size_t)W * Hh / 4);
+    memset(vb, 90, (size_t)W * Hh / 4);
+    H264E_run_param_t rp;
+    memset(&rp, 0, sizeof rp);
+    rp.encode_speed = 8; rp.qp_min = 18; rp.qp_max = 51;
+    rp.desired_frame_bytes = 2000 * 1000 / 8 / FPS;
+    H264E_io_yuv_t io;
+    io.yuv[0] = yb; io.yuv[1] = ub; io.yuv[2] = vb;
+    io.stride[0] = W; io.stride[1] = W / 2; io.stride[2] = W / 2;
+    i64 t0 = now_ms();
+    for (int f = 0; !syn_stop; f++) {
+        memset(yb, 60, (size_t)W * Hh);
+        syn_rect(yb, (f * 12) % (W - 80), 0, 80, Hh, 200);          /* бегущая полоса */
+        int s = (int)((now_ms() - t0) / 1000);
+        syn_digit(yb, 480, 280, s / 100); syn_digit(yb, 590, 280, s / 10); syn_digit(yb, 700, 280, s);
+        rp.frame_type = f % FPS == 0 ? H264E_FRAME_TYPE_KEY : H264E_FRAME_TYPE_DEFAULT;   /* ключевой раз в секунду */
+        unsigned char *out = NULL;
+        int n = 0;
+        if (!H264E_encode(enc, scr, &rp, &io, &out, &n) && n > 0) {
+            if (f == 0) {
+                char nl[300] = "";
+                size_t o = 0;
+                for (int i = 0; i + 3 < n && o < sizeof nl - 32; i++)
+                    if (out[i] == 0 && out[i + 1] == 0 && out[i + 2] == 1) {
+                        int sc = i > 0 && out[i - 1] == 0 ? 4 : 3;
+                        o += (size_t)snprintf(nl + o, sizeof nl - o, " [%d@%d sc%d]", out[i + 3] & 31, i, sc);
+                    }
+                say("  синтетика: ключевой кадр %d Б, NAL (тип@смещение, старт-код):%s; хвост %02x %02x\n", n, nl, out[n - 2], out[n - 1]);
+            }
+            golive_frame(out, (size_t)n, rp.frame_type == H264E_FRAME_TYPE_KEY, (u32)((now_ms() - t0) * 90));
+            InterlockedIncrement(&syn_frames);
+            InterlockedExchangeAdd(&syn_bytes_kb, n / 1024);
+        }
+        i64 due = t0 + (i64)(f + 1) * 1000 / FPS, nw = now_ms();
+        if (due > nw) Sleep((DWORD)(due - nw));
+    }
+    free(enc); free(scr); free(yb); free(ub); free(vb);
+    return 0;
+}
+#endif
+static const char *const gl_phase_name[] = { "OFF", "CREATING", "WAIT_SERVER", "CONNECTING", "LIVE", "FAILED" };
+static void lv_golive_print(const char *tag) {
+    GoLiveState g;
+    golive_state(&g);
+    VStreamInfo vi;
+    voice_stream_info(&vi);
+    ShareState sh;
+    share_state(&sh);
+    char ops[400] = "";
+    size_t o = 0;
+    for (int i = 0; i < 40; i++) if (vi.ops[i] && o < sizeof ops - 16) o += (size_t)snprintf(ops + o, sizeof ops - o, " %d:%u", i, vi.ops[i]);
+    say("  [%s] golive %s%s | соединение: %s сессия=%d ssrc_видео=%d udp=%d DAVE=%s(v%d) пакетов=%lld очередь=%d | ops:%s\n",
+        tag, gl_phase_name[g.phase >= 0 && g.phase <= 5 ? g.phase : 0], g.paused ? " (пауза)" : "",
+        vi.running ? "идёт" : "нет", vi.session_ready, vi.have_vssrc, vi.udp, vi.dave ? (vi.dave_on ? "готов" : "ждём") : "нет", vi.dave_ver,
+        vi.packets, vi.queued, ops[0] ? ops : " -");
+    say("        кадры: в эфир %lld (ключевых %lld, %lld КБ), отброшено %lld | захват: %s %dx%d@%d, %.1f к/с, %.2f Мбит/с%s%s%s\n",
+        g.frames, g.keyframes, g.bytes / 1024, g.dropped, sh.active ? "идёт" : "нет", sh.w, sh.h, sh.fps, sh.fps_out, sh.mbps,
+        sh.reason[0] ? " (" : "", sh.reason, sh.reason[0] ? ")" : "");
+    if (sh.paused) say("        пауза захвата: %s%s%s\n", sh.pause_why[0] ? sh.pause_why : "?", sh.cover[0] ? " — перекрыло: " : "", sh.cover);
+    say("        сервер трансляции: %s:%d, curl %d, закрытие WS %d; DAVE видео: зашифровано %lld, ошибок %lld; PLI %lld, NACK %lld, RTX %lld\n", vi.host[0] ? vi.host : "-", vi.port,
+        vi.curl_rc, vi.ws_close, vi.dave_ok, vi.dave_fail, vi.pli, vi.nack, vi.rtx);
+    if (g.err[0]) say("        ошибка: %s\n", g.err);
+}
+/* MC_LIVE=golive: звонок другу в ЛС -> он принимает -> трансляция своего окна 720p24 90 с -> стоп, выход */
+static int live_golive(void) {
+    if (!lv_friend()) { term_puts("  задайте MC_LIVE_FRIEND\n"); return 1; }
+    term_puts("\n  Go Live: звонок в ЛС, трансляция своего окна 90 с\n");
+    int type = 0;
+    u64 uid = lv_find_user(lv_friend(), &type);
+    if (type != REL_FRIEND) { say("  %s — не друг (тип %d) — стоп\n", lv_friend(), type); return 2; }
+    for (int i = 0; i < S.nchans; i++) if (S.chans[i].type == CH_DM && S.chans[i].nrecip == 1 && S.chans[i].recipients[0] == uid) LV_DM = S.chans[i].id;
+    if (!LV_DM) { dm_open(uid); LV_WAIT(S.open_ch != 0, 20000); LV_DM = S.open_ch; }
+    if (!LV_DM) { term_puts("  ЛС не открылась — стоп\n"); return 2; }
+    say("  звоню (ЛС %llu), жду до 60 с, пока примут...\n", (unsigned long long)LV_DM);
+    call_start(LV_DM);
+    VoiceStatus vs;
+    i64 end = now_ms() + 60000;
+    int last_ph = -1;
+    do {
+        lv_pump(200);
+        voice_status(&vs);
+        if ((int)vs.phase != last_ph) {
+            last_ph = (int)vs.phase;
+            char vh[128];
+            int vp, vc, vw;
+            voice_diag(vh, sizeof vh, &vp, &vc, &vw);
+            say("  голос: фаза %d%s%s | сервер %s:%d, curl %d, закрытие WS %d\n", (int)vs.phase, vs.error[0] ? " — " : "", vs.error,
+                vh[0] ? vh : "-", vp, vc, vw);
+        }
+    } while (vs.phase != VS_CONNECTED && vs.phase != VS_FAILED && now_ms() < end);
+    if (vs.phase != VS_CONNECTED) { say("  звонок не соединился (фаза %d) — выход\n", (int)vs.phase); voice_leave(); lv_pump(2000); return 1; }
+    say("  звонок соединён (DAVE %s)\n", vs.dave ? "да" : "нет");
+    uintptr_t src = 0;
+    const char *synth_env = getenv("MC_LIVE_SYNTH");
+    bool synth = synth_env && *synth_env == '1';
+#ifdef _WIN32
+    PlatThread *synt = NULL;
+    /* окно-источник — дочерним процессом этой же программы (--streamsrc): свои окна в список источников не входят */
+    PROCESS_INFORMATION pi = {0};
+    if (synth) {
+        term_puts("  источник: синтетические кадры 1280x720 30 к/с (MC_LIVE_SYNTH=1), захват экрана не используется\n");
+    } else {
+        WCHAR exe[MAX_PATH], cmd[MAX_PATH + 32];
+        GetModuleFileNameW(NULL, exe, MAX_PATH);
+        _snwprintf(cmd, MAX_PATH + 31, L"\"%ls\" --streamsrc", exe);
+        cmd[MAX_PATH + 31] = 0;
+        STARTUPINFOW si = { .cb = sizeof si };
+        if (!CreateProcessW(exe, cmd, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi)) say("  окно-источник: процесс не запустился\n");
+        else {                                  /* в Job Object с KILL_ON_JOB_CLOSE: окно не переживёт сценарий */
+            static HANDLE job;
+            if (!job) {
+                job = CreateJobObjectW(NULL, NULL);
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = {0};
+                li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                if (job) SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li);
+            }
+            if (job) AssignProcessToJobObject(job, pi.hProcess);
+            ResumeThread(pi.hThread);
+        }
+    for (int i = 0; i < 60 && !src; i++) {
+        lv_pump(100);
+        char titles[24][80];
+        uintptr_t ids[24];
+        int nw = share_windows(titles, ids, 24);
+        for (int k = 0; k < nw; k++) {
+            DWORD wp = 0;
+            GetWindowThreadProcessId((HWND)ids[k], &wp);
+            if (pi.dwProcessId && wp == pi.dwProcessId) src = ids[k];
+        }
+    }
+    say("  окно-источник: %s\n", src ? "найдено в списке источников" : "НЕТ (весь экран)");
+    if (src) { AllowSetForegroundWindow(pi.dwProcessId); ShowWindow((HWND)src, SW_RESTORE); SetForegroundWindow((HWND)src); }
+    }
+#endif
+    char err[160] = "";
+    if (!synth && !share_start(0, src, err, sizeof err)) say("  share_start: %s\n", err);
+    if (!golive_start(0, LV_DM, err, sizeof err)) say("  golive_start: %s\n", err);
+#ifdef _WIN32
+    if (synth) { syn_stop = 0; synt = thread_start(syn_thread, NULL); }
+#endif
+    i64 t0 = now_ms(), next = t0, not_conn_since = 0;
+    int lastg = -1, lastv = (int)VS_CONNECTED;
+    while (now_ms() - t0 < 90000) {
+        lv_pump(200);
+        voice_status(&vs);
+        GoLiveState g;
+        golive_state(&g);
+        if (g.phase != lastg) { lastg = g.phase; lv_golive_print("фаза"); }
+#ifdef _WIN32
+        if (src && GetForegroundWindow() != (HWND)src && now_ms() % 3000 < 200) SetForegroundWindow((HWND)src);
+#endif
+        if (now_ms() >= next) { next += 5000; char tg[32]; snprintf(tg, sizeof tg, "%3lld с", (long long)((now_ms() - t0) / 1000)); lv_golive_print(tg); }
+        /* прогон 6: при старте трансляции звонок на время пересогласования DAVE уходит в VS_DAVE (3) — это не обрыв.
+         * Прерываем только на IDLE/FAILED или если звонок не CONNECTED дольше 15 с. */
+        if ((int)vs.phase != lastv) {
+            lastv = (int)vs.phase;
+            char vh[128];
+            int vp, vc, vw;
+            voice_diag(vh, sizeof vh, &vp, &vc, &vw);
+            say("  голос в эфире: фаза %d%s%s | сервер %s:%d, curl %d, закрытие WS %d\n", lastv, vs.error[0] ? " — " : "", vs.error,
+                vh[0] ? vh : "-", vp, vc, vw);
+        }
+        if (vs.phase == VS_IDLE || vs.phase == VS_FAILED) { say("  звонок прервался (фаза %d %s)\n", (int)vs.phase, vs.error); break; }
+        if (vs.phase != VS_CONNECTED) { if (!not_conn_since) not_conn_since = now_ms(); }
+        else not_conn_since = 0;
+        if (not_conn_since && now_ms() - not_conn_since > 15000) { say("  звонок не CONNECTED дольше 15 с (фаза %d) — стоп\n", (int)vs.phase); break; }
+    }
+    lv_golive_print("итог");
+#ifdef _WIN32
+    if (synt) { syn_stop = 1; thread_join(synt); say("  синтетика: кадров %ld, %ld КБ\n", (long)syn_frames, (long)syn_bytes_kb); }
+#endif
+    golive_stop();
+    share_stop();
+#ifdef _WIN32
+    if (pi.hProcess) { TerminateProcess(pi.hProcess, 0); CloseHandle(pi.hProcess); CloseHandle(pi.hThread); }
+#endif
+    lv_pump(1500);
+    voice_leave();
+    lv_pump(2000);
+    term_puts("  трансляция остановлена, из звонка вышли\n");
+    return 0;
+}
+#endif
+
 int selftest_live(void) {
     term_puts("Astra DS --livetest: записи на живом аккаунте (свой тестовый сервер; MC_LIVE=dm — ЛС с MC_LIVE_FRIEND)\n");
     g_headless = true;
@@ -4025,6 +4367,9 @@ int selftest_live(void) {
     if (mode && !strcmp(mode, "wave2")) rc |= live_wave2();
     if (mode && !strcmp(mode, "join")) rc |= live_join();
     if (mode && !strcmp(mode, "swap")) rc |= live_swap();
+#ifdef ASTRA_VIDEO
+    if (mode && !strcmp(mode, "golive")) rc |= live_golive();
+#endif
     if (mode && !strcmp(mode, "friends")) { g_readonly = true; rc |= live_friends(); }   /* только чтение */
     say("\n  записей: %d, ошибок ответа: %d, остановлено сторожем: %d\n", lv_writes, lv_errors, lv_blocked);
     say("Итог: %d ok, %d FAIL\n", passes, fails);

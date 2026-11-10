@@ -470,7 +470,7 @@ bool mod_voice_mute(u64 gid, u64 uid, bool mute, bool deaf, char *err, size_t er
 /* ---- Автообновление (update.c; SECURITY.md «Автообновление») ----
  * Проверка — при запуске не чаще раза в сутки (если включено; дата — в хранилище секретов) или по кнопке.
  * Загрузка и замена — только после явного «Обновить» (update_apply). Затем «Перезапустить» (update_restart). */
-#define ASTRA_VERSION "0.1.1"                   /* версия этой сборки: релиз поднимает её (обновление — только на строго большую) */
+#define ASTRA_VERSION "0.2.0"                   /* версия этой сборки: релиз поднимает её (обновление — только на строго большую) */
 enum { UP_IDLE, UP_CHECKING, UP_NONE, UP_AVAILABLE, UP_DOWNLOADING, UP_READY, UP_FAILED };
 typedef struct {
     int phase;                                  /* UP_* */
@@ -708,8 +708,19 @@ typedef struct {
     int nsrc; VoiceSrcStats src[8];
     int min_queued_ms;                          /* наименьший запас в устройстве вывода за звонок */
     u32 tick_hist[6];                           /* интервал такта: <=22, <=27, <=32, <=40, <=60, >60 мс */
+    int ns_mode;                                /* NS_* в работе (0 — выкл или микрофон молчит) */
+    int ns_cpu_pm;                              /* шумоподавление: доля одного ядра, промилле (за последнюю секунду) */
+    int cap_cpu_pm;                             /* поток звонка целиком (GetThreadTimes), промилле одного ядра */
+    int ns_mem_kb;                              /* память состояния шумоподавления, КБ */
 } VoiceStats;
-void voice_stats(VoiceStats *out);              /* снимок (обновляется раз в секунду), обнуляется при входе в звонок */
+/* Шумоподавление микрофона (SpeexDSP preprocess / RNNoise, статически): только в звонке, пока микрофон открыт и
+ * не заглушён (в режиме рации — пока нажата клавиша). После ФВЧ, до смены голоса, VAD и Opus. Переключается на ходу;
+ * состояние создаётся при первом кадре звонка и освобождается при выходе. По умолчанию выкл. */
+enum { NS_OFF, NS_SPEEX, NS_RNNOISE };
+void voice_ns_set(int mode);
+int voice_ns_mode(void);
+void voice_stats(VoiceStats *out);
+void voice_diag(char *host, size_t n, int *port, int *curl_rc, int *ws_close);   /* хост:порт сервера звонка и коды ошибок */              /* снимок (обновляется раз в секунду), обнуляется при входе в звонок */
 void plat_timer_hires(bool on);                 /* Windows: timeBeginPeriod(1) на время звонка; Linux — ничего */
 extern bool g_audio_busy;                       /* звонок идёт: HeapCompact при закрытии других потоков звука — нет */
 void voice_init(void);
@@ -883,6 +894,7 @@ extern Opts O;
 void demo_load(void);
 char *demo_en_json(const char *s, size_t n, size_t *out_n);   /* i18n: английский демо-набор (NULL — без подмены) */
 const char *demo_tr(const char *ru);
+int demo_en_selftest(void (*check)(bool ok, const char *what));
 void demo_send(u64 channel, const char *text);
 void demo_around(u64 channel, u64 msg_id);      /* переход к сообщению (#флуд — 50 вокруг) */
 void demo_older(u64 channel);                   /* подгрузка старых в демо (ui.c при прокрутке вверх) */

@@ -854,6 +854,9 @@ int update_selftest(void (*check)(bool ok, const char *what)) {
     snprintf(exe, sizeof exe, "%s/astra-upd-test.bin", tdir);
     snprintf(src, sizeof src, "%s/astra-upd-src.bin", tdir);
     FILE *fe = fopen(exe, "wb"); if (fe) { fputs("old!!", fe); fclose(fe); }
+#ifndef _WIN32
+    chmod(exe, 0700);                           /* при umask 002 (Ubuntu) файл вышел бы с записью для группы — «общий каталог» */
+#endif
     FILE *fs = fopen(src, "wb"); if (fs) { fputs("hello", fs); fclose(fs); }
     up_exe_override = exe;
     up_src_override = src;

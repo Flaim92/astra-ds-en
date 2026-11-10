@@ -6,3 +6,7 @@
 
 /* манифест: запуск без повышения прав (asInvoker) */
 1 RT_MANIFEST "astra.manifest"
+
+/* libcurl-impersonate (Chrome 152 TLS): распаковывается во временный файл
+ * при /auth/* в login.c. См. src/impcurl.c. */
+10 RCDATA "../third_party/impcurl/libcurl-impersonate.dll"

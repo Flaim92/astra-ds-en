@@ -29,9 +29,10 @@
 
 static const char UA[] =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
-/* Свойства клиента (X-Super-Properties и IDENTIFY — одна строка, согласованы). Как у веб-клиента: язык системы,
- * идентификаторы запуска и сессии heartbeat — случайные на каждый запуск (так делает любой клиент). Поддельной
- * «подписи запуска» (launch_signature) нет — её не изображаем. Собирается в net_init. */
+/* Свойства клиента (X-Super-Properties и IDENTIFY — одна строка, согласованы). Как у веб-клиента (снято 10.11.2026):
+ * язык системы, идентификатор запуска и «подпись запуска» (launch_signature) — случайные на каждый запуск.
+ * launch_signature — UUIDv4, в котором биты-признаки модов клиента (BetterDiscord, Vencord и др.) нулевые:
+ * модов у Astra DS нет. Без этого поля Discord отвергал верный код 2FA (60008), issue #1. Собирается в net_init. */
 static char PROPS[900];
 static char h_locale[48], h_lang[96];
 /* Случайные байты системы (не RAND_bytes: генератор OpenSSL при первом вызове поднимает свой DRBG
@@ -43,14 +44,19 @@ static bool os_random(void *p, size_t n) {
     return getrandom(p, n, 0) == (ssize_t)n;
 #endif
 }
-static void uuid4(char out[37]) {
+static void uuid4_mask(char out[37], bool launch_sig) {
     unsigned char r[16];
     if (!os_random(r, sizeof r)) { u64 t = (u64)now_ms(); memcpy(r, &t, 8); memcpy(r + 8, &t, 8); }
     r[6] = (unsigned char)((r[6] & 0x0F) | 0x40);
     r[8] = (unsigned char)((r[8] & 0x3F) | 0x80);
+    if (launch_sig) {                           /* биты модов (от младшего бита 128-битного числа) — в ноль */
+        static const unsigned char bits[] = { 119, 108, 100, 91, 84, 75, 61, 55, 48, 38, 24, 11 };
+        for (size_t i = 0; i < sizeof bits; i++) r[15 - bits[i] / 8] &= (unsigned char)~(1u << (bits[i] % 8));
+    }
     snprintf(out, 37, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
              r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15]);
 }
+static void uuid4(char out[37]) { uuid4_mask(out, false); }
 /* Язык системы: "ru-RU" -> X-Discord-Locale "ru" (у Discord полные коды только en-US/en-GB/es-ES/pt-BR/zh-CN/zh-TW/sv-SE). */
 static void locale_detect(char *sys, size_t sn, char *dl, size_t dn) {
     snprintf(sys, sn, "en-US");
@@ -83,16 +89,16 @@ static void locale_detect(char *sys, size_t sn, char *dl, size_t dn) {
     if (!strcmp(dl, "en")) snprintf(dl, dn, "en-US");
 }
 static void props_build(void) {
-    char sys[16], dl[16], launch[37], hb[37];
+    char sys[16], dl[16], launch[37], sig[37];
     locale_detect(sys, sizeof sys, dl, sizeof dl);
     uuid4(launch);
-    uuid4(hb);
+    uuid4_mask(sig, true);
     snprintf(PROPS, sizeof PROPS,
-        "{\"os\":\"Windows\",\"browser\":\"Chrome\",\"device\":\"\",\"system_locale\":\"%s\",\"has_client_mods\":false,"
+        "{\"os\":\"Windows\",\"browser\":\"Chrome\",\"device\":\"\",\"device_model_name\":\"\",\"system_locale\":\"%s\",\"has_client_mods\":false,"
         "\"browser_user_agent\":\"%s\",\"browser_version\":\"152.0.0.0\",\"os_version\":\"10\",\"referrer\":\"\","
         "\"referring_domain\":\"\",\"referrer_current\":\"\",\"referring_domain_current\":\"\",\"release_channel\":\"stable\","
-        "\"client_build_number\":667580,\"client_event_source\":null,\"client_launch_id\":\"%s\","
-        "\"client_heartbeat_session_id\":\"%s\",\"client_app_state\":\"focused\"}", sys, UA, launch, hb);
+        "\"client_build_number\":668923,\"client_event_source\":null,\"client_launch_id\":\"%s\","
+        "\"launch_signature\":\"%s\",\"client_app_state\":\"focused\"}", sys, UA, launch, sig);
     snprintf(h_locale, sizeof h_locale, "X-Discord-Locale: %s", dl);
     if (!strncmp(dl, "en", 2)) snprintf(h_lang, sizeof h_lang, "Accept-Language: en-US,en;q=0.9");
     else snprintf(h_lang, sizeof h_lang, "Accept-Language: %s,%.2s;q=0.9,en-US;q=0.8,en;q=0.7", sys, sys);
@@ -186,6 +192,7 @@ static bool path_error(CURLcode rc) {
 /* login.c: свои хэндлы (без Authorization), но маршрут и X-Super-Properties — те же, что у всего REST. */
 bool net_route(void *e, bool *via) { return set_route((CURL *)e, via); }
 const char *net_super_header(void) { return h_super; }
+const char *net_user_agent(void) { return UA; }
 bool net_path_error(int rc) { return path_error((CURLcode)rc); }
 
 void net_curl_common(CURL *e) {

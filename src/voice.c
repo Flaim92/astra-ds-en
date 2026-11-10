@@ -10,9 +10,17 @@
 #include <opus/opus.h>
 #include <dave/dave.h>
 #include <openssl/evp.h>
+#include <speex/speex_preprocess.h>
+#include <rnnoise.h>
 #include "mc.h"
 #include "plat.h"
-#include "socks.c"                               /* SOCKS5 UDP для VLESS: static, отдельно не компилируется */
+#include "socks.c"
+#ifdef ASTRA_VIDEO
+#include "golive.h"
+#include "share.h"
+#define VS_PT_H264 105                           /* трансляция: H264 и его RTX — нумерация официального клиента */
+#define VS_PT_RTX 106                            /* (AV1 101/102, H265 103/104, H264 105/106, VP8 107/108) */
+#endif                               /* SOCKS5 UDP для VLESS: static, отдельно не компилируется */
 
 PlatWake *g_wake;
 
@@ -50,6 +58,7 @@ static struct {
     atomic_int call_level;                      /* уровень микрофона в звонке (0..100) — для теста микрофона */
     atomic_int ptt_vk;                          /* №141: клавиша рации (0 — по-старому, F8 переключает) */
     atomic_bool hpf_off;                        /* №143: фильтр 90 Гц выключен */
+    atomic_int ns_mode;                         /* шумоподавление: NS_* (по умолчанию NS_OFF) */
     atomic_bool vad_auto;                       /* №142: авточувствительность */
     atomic_int vad_auto_db;
 } V;
@@ -80,7 +89,19 @@ void voice_init(void) {
     daveSetLogSinkCallback(dave_log_noop);
 }
 
+static _Thread_local bool t_stream;             /* этот поток — соединение трансляции (не трогает статус звонка) */
+static struct { char host[128]; int port, curl_rc, ws_close; } g_vdiag;   /* звонок: куда шли и чем кончилось (без секретов) */
+void voice_diag(char *host, size_t n, int *port, int *curl_rc, int *ws_close) {
+    snprintf(host, n, "%s", g_vdiag.host);
+    *port = g_vdiag.port; *curl_rc = g_vdiag.curl_rc; *ws_close = g_vdiag.ws_close;
+}
+#ifdef ASTRA_VIDEO
+static atomic_uint vs_ops[40];                  /* трансляция: сколько пришло сообщений шлюза по номеру op (livetest) */
+#endif
 static void status_set(VoicePhase ph, const char *err) {
+#ifdef ASTRA_VIDEO
+    if (t_stream) { golive_vstatus((int)ph, err); return; }
+#endif
     mutex_lock(V.mu);
     V.st.phase = ph;
     if (err) snprintf(V.st.error, sizeof V.st.error, "%s", err);
@@ -210,6 +231,11 @@ typedef struct {
     bool dave_ready, dave_on;
     double vf_cur, vf_floor; int vf_n; bool vf_init;   /* №142: авточувствительность — состояние звонка (ревью 14 М2) */
     double hp_x1, hp_x2, hp_y1, hp_y2;          /* №143: состояние фильтра 90 Гц */
+    int ns_cur;                                 /* шумоподавление: что создано сейчас (NS_*) */
+    SpeexPreprocessState *ns_sp[2];             /* SpeexDSP: две половины кадра по 480 (своё состояние на поток) */
+    DenoiseState *ns_rn;
+    int ns_kb;                                  /* память состояния, КБ */
+    long long ns_us, cpu_us0, wall_us0;         /* учёт времени за секунду */
     i64 last_tick; int min_q; u32 tick_hist[6]; i64 next_stats;   /* ревью 17: такт и запас вывода */
     u64 users[64]; int nusers;
     /* звук */
@@ -249,14 +275,24 @@ typedef struct {
     int16_t *pcm;                                /* декодер источников, 5760 стерео-кадров (раньше — три static) */
     int16_t *mix_out;
     char *ws_buf;                                /* VW_WSBUF байт */
+    atomic_bool *stopf;                          /* флаг выхода этого соединения: &V.stop (звонок) или поток трансляции */
+    int vport;                                   /* порт из endpoint (0/80/443 — в URL не пишется, как раньше) */
+    int last_curl;                               /* код curl последней неудачной попытки WebSocket (диагностика) */
+#ifdef ASTRA_VIDEO
+    bool stream;                                 /* соединение трансляции экрана (voice_stream.c) */
+    u32 vssrc, vrtx, vts;
+    u16 vseq;
+    long long vsent, vbytes, vdave_ok, vdave_fail, vpli, vnack, vrtx_sent;
+    u16 vrtx_seq;
+    i64 next_sr;
+#endif
 } VW;
 #define VW_WSBUF 65536
 
 static void vw_error(VW *w, const char *msg) {
-    (void)w;
     status_set(VS_FAILED, msg);
-    atomic_store(&V.need_leave, true);
-    atomic_store(&V.stop, true);
+    if (!t_stream) atomic_store(&V.need_leave, true);
+    atomic_store(w->stopf, true);
 }
 /* Сбой, который при VLESS означает «через туннель не идёт»: сообщить vless.c (из главного потока). */
 static void vw_net_error(VW *w, const char *direct, const char *tunnel) {
@@ -364,6 +400,12 @@ static void dave_execute(VW *w) {
     DAVEKeyRatchetHandle r = daveSessionGetKeyRatchet(w->dave, me);
     if (r) {
         daveEncryptorSetKeyRatchet(w->denc, r);
+#ifdef ASTRA_VIDEO
+        if (w->stream) {
+            daveEncryptorAssignSsrcToCodec(w->denc, w->vssrc, DAVE_CODEC_H264);
+            daveEncryptorAssignSsrcToCodec(w->denc, w->ssrc, DAVE_CODEC_OPUS);   /* звук трансляции (audio_ssrc) */
+        } else
+#endif
         daveEncryptorAssignSsrcToCodec(w->denc, w->ssrc, DAVE_CODEC_OPUS);
         daveKeyRatchetDestroy(r);
     }
@@ -714,6 +756,60 @@ static void hpf_run(VW *w, int16_t *s, int n) {
     }
 }
 void voice_hpf(bool on) { atomic_store(&V.hpf_off, !on); }
+/* ---------- шумоподавление ---------- */
+#define NS_N 480                                 /* 10 мс при 48 кГц: кадр RNNoise; SpeexDSP — тем же размером */
+void voice_ns_set(int mode) { atomic_store(&V.ns_mode, mode == NS_SPEEX || mode == NS_RNNOISE ? mode : NS_OFF); }
+int voice_ns_mode(void) { return atomic_load(&V.ns_mode); }
+static void ns_free(VW *w) {
+    for (int i = 0; i < 2; i++) if (w->ns_sp[i]) { speex_preprocess_state_destroy(w->ns_sp[i]); w->ns_sp[i] = NULL; }
+    if (w->ns_rn) { rnnoise_destroy(w->ns_rn); w->ns_rn = NULL; }
+    w->ns_cur = NS_OFF;
+    w->ns_kb = 0;
+}
+static void ns_make(VW *w, int mode) {
+    size_t m0 = plat_private_bytes();
+    if (mode == NS_SPEEX) {
+        /* одно состояние на поток 480-сэмпловых кадров: обе половины кадра 20 мс идут через него по очереди */
+        w->ns_sp[0] = speex_preprocess_state_init(NS_N, 48000);
+        if (w->ns_sp[0]) {
+            int on = 1, off = 0, lvl = -25;
+            speex_preprocess_ctl(w->ns_sp[0], SPEEX_PREPROCESS_SET_DENOISE, &on);
+            speex_preprocess_ctl(w->ns_sp[0], SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &lvl);
+            speex_preprocess_ctl(w->ns_sp[0], SPEEX_PREPROCESS_SET_AGC, &off);
+            speex_preprocess_ctl(w->ns_sp[0], SPEEX_PREPROCESS_SET_VAD, &off);
+            speex_preprocess_ctl(w->ns_sp[0], SPEEX_PREPROCESS_SET_DEREVERB, &off);
+        }
+        w->ns_cur = w->ns_sp[0] ? NS_SPEEX : NS_OFF;
+    } else if (mode == NS_RNNOISE) {
+        w->ns_rn = rnnoise_create(NULL);        /* встроенная модель */
+        w->ns_cur = w->ns_rn ? NS_RNNOISE : NS_OFF;
+    }
+    size_t m1 = plat_private_bytes();
+    /* RNNoise — своим размером; SpeexDSP размера не сообщает: 80936 Б — сумма speex_alloc для 480 @ 48 кГц
+     * (замер 10.11.2026 сборкой с OVERRIDE_SPEEX_ALLOC), если прирост частной памяти не виден */
+    int d = (int)(m1 > m0 ? (m1 - m0) / 1024 : 0);
+    w->ns_kb = mode == NS_RNNOISE ? rnnoise_get_size() / 1024 : d > 79 ? d : 79;
+}
+/* кадр 20 мс микрофона (FRAME сэмплов) — на месте */
+static void ns_run(VW *w, int16_t *s) {
+    int want = atomic_load(&V.ns_mode);
+    if (want != w->ns_cur) { ns_free(w); if (want) ns_make(w, want); }
+    if (!w->ns_cur) return;
+    long long t0 = plat_now_us();
+    for (int h = 0; h < FRAME; h += NS_N) {
+        if (w->ns_cur == NS_SPEEX) speex_preprocess_run(w->ns_sp[0], s + h);
+        else {
+            float in[NS_N], out[NS_N];
+            for (int i = 0; i < NS_N; i++) in[i] = s[h + i];
+            rnnoise_process_frame(w->ns_rn, out, in);
+            for (int i = 0; i < NS_N; i++) {
+                float v = out[i];
+                s[h + i] = (int16_t)(v > 32767.f ? 32767 : v < -32768.f ? -32768 : (int)lrintf(v));
+            }
+        }
+    }
+    w->ns_us += plat_now_us() - t0;
+}
 /* «Приглушать другие программы во время звонка»: по умолчанию выкл. (Windows приглушает их на 80 % для устройств
  * «для связи»); действует со следующего открытия устройства (вход в звонок) */
 static atomic_bool g_duck_others;
@@ -731,6 +827,11 @@ static void capture_tick(VW *w) {
         w->cap_frames++;
         if (muted) { w->level = 0; continue; }
         if (atomic_load(&V.hpf_off) == false) hpf_run(w, mono, FRAME);   /* №143: срез ниже 90 Гц */
+        {   /* шумоподавление: в режиме рации — только пока клавиша нажата */
+            int pkn = atomic_load(&V.ptt_vk);
+            bool ptt_mode = pkn || O.ptt;
+            if (!ptt_mode || (pkn ? plat_key_down(pkn) : atomic_load(&V.ptt))) ns_run(w, mono);
+        }
         voicefx_process(mono, FRAME);            /* смена голоса — до VAD и Opus (и в демо-петле) */
         double sum = 0;
         for (int i = 0; i < FRAME; i++) sum += (double)mono[i] * mono[i];
@@ -787,6 +888,17 @@ static void capture_tick(VW *w) {
 /* ---------- голосовой gateway ---------- */
 static void vw_identify(VW *w) {
     char b[700];
+#ifdef ASTRA_VIDEO
+    if (w->stream) {                            /* трансляция: видео, поток screen */
+        snprintf(b, sizeof b,
+            "{\"op\":0,\"d\":{\"server_id\":\"%llu\",\"user_id\":\"%llu\",\"session_id\":\"%s\",\"token\":\"%s\","
+            "\"video\":true,\"streams\":[{\"type\":\"screen\",\"rid\":\"100\",\"quality\":100}],\"max_dave_protocol_version\":%u}}",
+            (unsigned long long)w->server_id, (unsigned long long)w->me, w->session, w->token, (unsigned)daveMaxSupportedProtocolVersion());
+        ws_text(w, b);
+        wipe(b, sizeof b);
+        return;
+    }
+#endif
     snprintf(b, sizeof b,
         "{\"op\":0,\"d\":{\"server_id\":\"%llu\",\"user_id\":\"%llu\",\"session_id\":\"%s\",\"token\":\"%s\","
         "\"video\":false,\"max_dave_protocol_version\":%u}}",
@@ -816,8 +928,8 @@ static bool ip_discovery(VW *w, const char *ip, int port) {
     if (w->via_socks) {
         /* при VLESS: сначала UDP ASSOCIATE; без него UDP не уходит вовсе */
         char e[96];
-        if (!socks_open_udp(&w->sx, w->sx_ip, w->sx_port, w->sx_user, w->sx_pass, ip, port, w->udp, &V.stop, e, sizeof e)) {
-            if (!atomic_load(&V.stop)) {
+        if (!socks_open_udp(&w->sx, w->sx_ip, w->sx_port, w->sx_user, w->sx_pass, ip, port, w->udp, w->stopf, e, sizeof e)) {
+            if (!atomic_load(w->stopf)) {
                 char m[200];                     /* VoiceStatus.error обрежет до 127 байт сам */
                 snprintf(m, sizeof m, ui_tr("VLESS: UDP голоса не поднят (%s)"), e);
                 vw_net_error(w, m, m);
@@ -831,10 +943,10 @@ static bool ip_discovery(VW *w, const char *ip, int port) {
     req[4] = (unsigned char)(w->ssrc >> 24); req[5] = (unsigned char)(w->ssrc >> 16);
     req[6] = (unsigned char)(w->ssrc >> 8); req[7] = (unsigned char)w->ssrc;
     w->udp_wait = sockwait_new(w->udp);
-    for (int attempt = 0; attempt < 5 && !atomic_load(&V.stop); attempt++) {
+    for (int attempt = 0; attempt < 5 && !atomic_load(w->stopf); attempt++) {
         vudp_send(w, req, sizeof req);
         i64 until = now_ms() + 1000;
-        while (now_ms() < until && !atomic_load(&V.stop)) {
+        while (now_ms() < until && !atomic_load(w->stopf)) {
             Waitable wt = sockwait_get(w->udp_wait);
             plat_wait(&wt, 1, 100);
             sockwait_clear(w->udp_wait);
@@ -849,6 +961,17 @@ static bool ip_discovery(VW *w, const char *ip, int port) {
                 int myport = r[72] << 8 | r[73];
                 char b[256];
                 snprintf(b, sizeof b, "{\"op\":1,\"d\":{\"protocol\":\"udp\",\"data\":{\"address\":\"%s\",\"port\":%d,\"mode\":\"aead_aes256_gcm_rtpsize\"}}}", myip, myport);
+#ifdef ASTRA_VIDEO
+                if (w->stream) {
+                    char c[1200];
+                    snprintf(c, sizeof c, "{\"op\":1,\"d\":{\"protocol\":\"udp\",\"data\":{\"address\":\"%s\",\"port\":%d,\"mode\":\"aead_aes256_gcm_rtpsize\"},"
+                             "\"codecs\":[{\"name\":\"opus\",\"type\":\"audio\",\"priority\":1000,\"payload_type\":120},"
+                             "{\"name\":\"H264\",\"type\":\"video\",\"priority\":1000,\"payload_type\":%d,\"rtx_payload_type\":%d,\"encode\":true,\"decode\":true}]}}",
+                             myip, myport, VS_PT_H264, VS_PT_RTX);
+                    ws_text(w, c);
+                    return true;
+                }
+#endif
                 ws_text(w, b);
                 return true;
             }
@@ -864,6 +987,9 @@ static void vw_text(VW *w, const char *text, size_t len) {
     const cJSON *d = jget(j, "d");
     const cJSON *sq = jget(j, "seq");
     if (cJSON_IsNumber(sq)) w->last_seq = (int)sq->valuedouble;
+#ifdef ASTRA_VIDEO
+    if (t_stream && op >= 0 && op < 40) atomic_fetch_add(&vs_ops[op], 1);
+#endif
     switch (op) {
     case 8:
         w->hb_interval = jint(d, "heartbeat_interval", 13750);
@@ -883,6 +1009,7 @@ static void vw_text(VW *w, const char *text, size_t len) {
         break;
     case 6:
         w->hb_acked = true;
+        if (t_stream) break;
         mutex_lock(V.mu);
         V.st.ping = (int)(now_ms() - w->hb_sent);
         mutex_unlock(V.mu);
@@ -890,12 +1017,19 @@ static void vw_text(VW *w, const char *text, size_t len) {
     case 2: {
         if (w->udp >= 0) break;                  /* повторный READY: сокет уже есть */
         w->ssrc = (u32)jint(d, "ssrc", 0);
+#ifdef ASTRA_VIDEO
+        if (w->stream) {
+            const cJSON *s0 = cJSON_GetArrayItem(jget(d, "streams"), 0);
+            w->vssrc = (u32)jint(s0, "ssrc", 0);
+            w->vrtx = (u32)jint(s0, "rtx_ssrc", 0);
+        }
+#endif
         const char *ip = jstr(d, "ip");
         int port = (int)jint(d, "port", 0);
         bool mode_ok = false;
         const cJSON *m;
         cJSON_ArrayForEach(m, jget(d, "modes")) if (cJSON_IsString(m) && !strcmp(m->valuestring, "aead_aes256_gcm_rtpsize")) mode_ok = true;
-        if (!mode_ok) { vw_error(w, ui_tr("сервер не поддерживает AES-GCM")); atomic_store(&V.stop, true); break; }
+        if (!mode_ok) { vw_error(w, ui_tr("сервер не поддерживает AES-GCM")); atomic_store(w->stopf, true); break; }
         if (!ip || !port || !ip_discovery(w, ip, port))
             vw_net_error(w, ui_tr("UDP не отвечает (файрвол/NAT?)"), ui_tr("VLESS: голосовой UDP не проходит через туннель (UDP на сервере выключен?)"));
         break;
@@ -904,8 +1038,14 @@ static void vw_text(VW *w, const char *text, size_t len) {
         const char *mode = jstr(d, "mode");
         const cJSON *k = jget(d, "secret_key");
         if (!mode || strcmp(mode, "aead_aes256_gcm_rtpsize") || cJSON_GetArraySize(k) != 32) {
-            vw_error(w, ui_tr("неверное описание сессии")); atomic_store(&V.stop, true); break;
+            vw_error(w, ui_tr("неверное описание сессии")); atomic_store(w->stopf, true); break;
         }
+#ifdef ASTRA_VIDEO
+        if (w->stream) {
+            const char *vc = jstr(d, "video_codec");
+            if (vc && strcmp(vc, "H264")) { vw_error(w, ui_tr("сервер трансляции выбрал другой видеокодек")); atomic_store(w->stopf, true); break; }
+        }
+#endif
         int i = 0;
         const cJSON *x;
         cJSON_ArrayForEach(x, k) w->key[i++] = (unsigned char)x->valuedouble;
@@ -913,6 +1053,22 @@ static void vw_text(VW *w, const char *text, size_t len) {
         u16 dv = (u16)jint(d, "dave_protocol_version", 0);
         if (dv > 0) { dave_init(w, dv); dave_send_kp(w); status_set(VS_DAVE, NULL); }
         else status_set(VS_CONNECTED, ui_tr("звонок без E2EE: микрофон не передаётся"));
+#ifdef ASTRA_VIDEO
+        if (w->stream) {
+            ShareState sh;
+            share_state(&sh);
+            int vw = sh.w > 0 ? sh.w : 1280, vh = sh.h > 0 ? sh.h : 720, vf = sh.fps > 0 ? sh.fps : 30;   /* как официальный: 720p30 */
+            char v[640];
+            snprintf(v, sizeof v, "{\"op\":12,\"d\":{\"audio_ssrc\":%u,\"video_ssrc\":%u,\"rtx_ssrc\":%u,\"streams\":[{\"type\":\"video\","
+                     "\"rid\":\"100\",\"ssrc\":%u,\"active\":true,\"quality\":100,\"rtx_ssrc\":%u,\"max_bitrate\":3500000,"
+                     "\"max_framerate\":%d,\"max_resolution\":{\"type\":\"fixed\",\"width\":%d,\"height\":%d}}]}}",
+                     (unsigned)w->ssrc, (unsigned)w->vssrc, (unsigned)w->vrtx, (unsigned)w->vssrc, (unsigned)w->vrtx, vf, vw, vh);
+            ws_text(w, v);
+            snprintf(v, sizeof v, "{\"op\":5,\"d\":{\"speaking\":1,\"delay\":0,\"ssrc\":%u}}", (unsigned)w->ssrc);
+            ws_text(w, v);                      /* как у них: setSpeaking(true) вместе с видео */
+            break;
+        }
+#endif
         char b[96];
         snprintf(b, sizeof b, "{\"op\":5,\"d\":{\"speaking\":1,\"delay\":0,\"ssrc\":%u}}", (unsigned)w->ssrc);
         ws_text(w, b);
@@ -960,6 +1116,9 @@ static void vw_binary(VW *w, const unsigned char *b, size_t n) {
     if (n < 3) return;
     w->last_seq = b[0] << 8 | b[1];
     u8 op = b[2];
+#ifdef ASTRA_VIDEO
+    if (t_stream && op < 40) atomic_fetch_add(&vs_ops[op], 1);
+#endif
     const unsigned char *p = b + 3;
     size_t pn = n - 3;
     if (!w->dave) return;
@@ -1018,6 +1177,7 @@ static bool vw_read_ws(VW *w) {
         if (meta->flags & CURLWS_CLOSE) {
             w->ws_dead = true;
             w->ws_close = got >= 2 ? ((unsigned char)buf[0] << 8 | (unsigned char)buf[1]) : 1005;
+            if (!t_stream) g_vdiag.ws_close = w->ws_close;
             return false;
         }
         if (meta->flags & (CURLWS_PING | CURLWS_PONG)) continue;
@@ -1077,8 +1237,8 @@ static void publish(VW *w) {
 }
 
 static int abort_cb(void *p, curl_off_t a, curl_off_t b, curl_off_t c, curl_off_t d) {
-    (void)p; (void)a; (void)b; (void)c; (void)d;
-    return atomic_load(&V.stop) ? 1 : 0;          /* выход из звонка прерывает подключение */
+    (void)a; (void)b; (void)c; (void)d;
+    return atomic_load((atomic_bool *)p) ? 1 : 0;   /* выход из звонка (или трансляции) прерывает подключение */
 }
 
 /* Подключить голосовой WebSocket (TLS + Upgrade). Через туннель — прокси из vless.c (копия в w->proxy);
@@ -1087,6 +1247,10 @@ static int abort_cb(void *p, curl_off_t a, curl_off_t b, curl_off_t c, curl_off_
 static bool ws_connect(VW *w, long connect_timeout, bool *proxy_bad) {
     char url[200];
     snprintf(url, sizeof url, "wss://%s/?v=8", w->host);
+    /* Прогоны Go Live 4–5 (10.11): сервер звонка c-bom09…:2083 — порт из endpoint не 443, а мы его отбрасывали.
+     * Теперь — как у трансляции: порт из endpoint, если он не 80/443 (с 80/443 URL прежний). */
+    if (w->vport > 0 && w->vport != 443 && w->vport != 80) snprintf(url, sizeof url, "wss://%s:%d/?v=8", w->host, w->vport);
+    if (!t_stream) { snprintf(g_vdiag.host, sizeof g_vdiag.host, "%s", w->host); g_vdiag.port = w->vport; }
     *proxy_bad = false;
     w->ws = curl_easy_init();
     if (!w->ws) return false;
@@ -1107,8 +1271,12 @@ static bool ws_connect(VW *w, long connect_timeout, bool *proxy_bad) {
     curl_easy_setopt(w->ws, CURLOPT_TIMEOUT, connect_timeout + 5);    /* TLS + Upgrade целиком */
     curl_easy_setopt(w->ws, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(w->ws, CURLOPT_XFERINFOFUNCTION, abort_cb);
+    curl_easy_setopt(w->ws, CURLOPT_XFERINFODATA, (void *)w->stopf);
     net_set_ca(w->ws);
-    if (curl_easy_perform(w->ws) != CURLE_OK) {
+    CURLcode prc = curl_easy_perform(w->ws);
+    if (prc != CURLE_OK) {
+        w->last_curl = (int)prc;
+        if (!t_stream) g_vdiag.curl_rc = (int)prc;
         curl_easy_cleanup(w->ws);
         w->ws = NULL;
         return false;
@@ -1302,6 +1470,16 @@ static int voice_thread(void *arg) {
             for (int i = 0; i < w->nsrc && i < 8; i++) { V.stats.src[i] = w->src[i].st; V.stats.src[i].user = w->src[i].user; }
             V.stats.nsrc = w->nsrc < 8 ? w->nsrc : 8;
             V.stats.min_queued_ms = w->min_q;
+            {
+                long long cpu = plat_thread_cpu_us(), wall = plat_now_us();
+                if (w->wall_us0 && wall > w->wall_us0) {
+                    V.stats.cap_cpu_pm = (int)((cpu - w->cpu_us0) * 1000 / (wall - w->wall_us0));
+                    V.stats.ns_cpu_pm = (int)(w->ns_us * 1000 / (wall - w->wall_us0));
+                }
+                w->cpu_us0 = cpu; w->wall_us0 = wall; w->ns_us = 0;
+                V.stats.ns_mode = w->ns_cur;
+                V.stats.ns_mem_kb = w->ns_kb;
+            }
             memcpy(V.stats.tick_hist, w->tick_hist, sizeof w->tick_hist);
             mutex_unlock(V.mu);
         }
@@ -1363,6 +1541,7 @@ out:
     free(w->mix_acc);
     free(w->mix_out);
     free(w->pcm);
+    ns_free(w);                                 /* шумоподавление — только на время звонка */
     if (w->ws_buf) { wipe(w->ws_buf, VW_WSBUF); free(w->ws_buf); }   /* там были кадры голосового gateway */
     json_done();
     wipe(w, sizeof *w);
@@ -1415,6 +1594,7 @@ static void maybe_start(void) {
     }
     V.via_vless = vl != VL_OFF;
     VW *w = xcalloc(1, sizeof *w);
+    w->stopf = &V.stop;
     w->via_socks = V.via_vless;
     memcpy(w->proxy, px, sizeof px);
     memcpy(w->sx_ip, sip, sizeof sip);
@@ -1440,6 +1620,12 @@ static void maybe_start(void) {
         status_set(VS_FAILED, safe ? ui_tr("голосовой сервер не из discord.media") : ui_tr("неверные данные голосовой сессии"));
         return;
     }
+    {
+        const char *pc = strchr(V.endpoint, ':');
+        int port = pc ? atoi(pc + 1) : 0;
+        w->vport = port > 0 && port < 65536 ? port : 0;
+    }
+    memset(&g_vdiag, 0, sizeof g_vdiag);
     wipe(V.token, sizeof V.token);
     status_set(VS_CONNECTING, NULL);
     mt_stop_thread();                           /* тест микрофона уступает устройство звонку */
@@ -2221,6 +2407,59 @@ int voice_selftest(void (*check)(bool ok, const char *what)) {
         snprintf(w, sizeof w, "приём: после кадра тишины без PLC-хвоста; залп больше кольца — срез целыми кадрами (сдвиг %d)", moved);
         check(m1 && m2, w);
     }
+    {   /* шумоподавление: «речь» (гармоники с плавающим тоном 120..180 Гц, слоги 180 мс / паузы 120 мс) + белый
+         * шум, 4 с кадрами по 20 мс. Чистый синус оба подавителя честно считают стационарным шумом, поэтому — слоги.
+         * Оценка по последним 2 с: шум — энергия в паузах (вых/вх), «речь» — энергия в слогах (вых/чистая),
+         * обрывы, процессор и память. */
+        int was = voice_ns_mode();
+        enum { NSEC = 4, NS_TOTAL = 48000 * NSEC };
+        int16_t *in = xmalloc(NS_TOTAL * sizeof(int16_t)), *out = xmalloc(NS_TOTAL * sizeof(int16_t));
+        int16_t *clean = xmalloc(NS_TOTAL * sizeof(int16_t));
+        ct_rng = 7;
+        double ph = 0;
+        for (int i = 0; i < NS_TOTAL; i++) {
+            double t = i / 48000.0, f0 = 150 + 30 * sin(2 * 3.14159265358979 * 0.7 * t);
+            ph += 2 * 3.14159265358979 * f0 / 48000.0;
+            int q = i % 14400;                  /* 300 мс: 180 слог + 120 пауза, края 10 мс */
+            double env = q >= 8640 ? 0 : q < 480 ? q / 480.0 : q > 8160 ? (8640 - q) / 480.0 : 1;
+            double v = 0;
+            for (int h = 1; h <= 10; h++) v += sin(h * ph) / h;
+            clean[i] = (int16_t)(env * 3500 * v);
+            in[i] = (int16_t)(clean[i] + (int)(ct_rand() % 3001) - 1500);
+        }
+        for (int mode = NS_OFF; mode <= NS_RNNOISE; mode++) {
+            VW t = {0};
+            voice_ns_set(mode);
+            memcpy(out, in, NS_TOTAL * sizeof(int16_t));
+            long long c0 = plat_thread_cpu_us(), u0 = plat_now_us();
+            for (int f = 0; f + FRAME <= NS_TOTAL; f += FRAME) ns_run(&t, out + f);
+            long long c1 = plat_thread_cpu_us(), u1 = plat_now_us();
+            int kb = t.ns_kb, cur = t.ns_cur;
+            ns_free(&t);
+            /* последние 2 с: паузы (середина, без краёв 20 мс) — шум; слоги — «речь» */
+            double gin = 0, gout = 0, sc = 0, sout = 0;
+            int from = NS_TOTAL - 96000, jumps = 0;
+            for (int i = from; i < NS_TOTAL; i++) {
+                int q = i % 14400;
+                if (q >= 8640 + 960 && q < 14400 - 960) { gin += (double)in[i] * in[i]; gout += (double)out[i] * out[i]; }
+                if (q >= 960 && q < 8640 - 960) { sc += (double)clean[i] * clean[i]; sout += (double)out[i] * out[i]; }
+                if (i > from && abs(out[i] - out[i - 1]) > 12000) jumps++;
+            }
+            double noise_db = 10 * log10((gout + 1) / (gin + 1)), tone_db = 10 * log10((sout + 1) / (sc + 1));
+            int cpu_pm = u1 > u0 ? (int)((c1 - c0) * 1000 / (NSEC * 1000000LL)) : 0;
+            char w[300];
+            static const char *const nm[] = { "выкл", "SpeexDSP", "RNNoise" };
+            snprintf(w, sizeof w, "шумоподавление %s: шум в паузах %+.1f дБ, «речь» %+.1f дБ, обрывов %d; процессор %.1f %% ядра "
+                     "(%lld мс на 4 с), память %d КБ", nm[mode], noise_db, tone_db, jumps, cpu_pm / 10.0, (c1 - c0) / 1000, kb);
+            if (mode == NS_OFF) check(cur == NS_OFF && !memcmp(in, out, NS_TOTAL * sizeof(int16_t)), "шумоподавление выкл: звук не меняется");
+            else check(cur == mode && noise_db < -6 && tone_db > -6 && jumps == 0, w);
+        }
+        free(in);
+        free(out);
+        free(clean);
+        voice_ns_set(was);
+        check(voice_ns_mode() == was, "шумоподавление: выбор восстановлен (по умолчанию выкл)");
+    }
     {   /* №143: ФВЧ 90 Гц — 30 Гц гасит, 1 кГц пропускает */
         VW t = {0};
         int16_t a[4800], b[4800];
@@ -2386,3 +2625,7 @@ int voice_selftest(void (*check)(bool ok, const char *what)) {
     panic_selftest(check);
     return 0;
 }
+
+#ifdef ASTRA_VIDEO
+#include "voice_stream.c"                       /* соединение трансляции экрана: тот же код шлюза и DAVE, свой поток */
+#endif

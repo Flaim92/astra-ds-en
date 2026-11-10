@@ -64,19 +64,19 @@ def screens():
     inp = W.at(ch, '#general', last=True)
     out += [('канал', ch, Z, None), ('ctrl+k', ch + ',ctrl+k,wait:50', Z, None), ('поиск', ch + ',ctrl+f,t:привет,enter,wait:300', Z, None),
             ('файл', ch + ',ctrl+o,wait:50', Z, None), ('эмодзи', ch + ',click:' + W.at(ch, ':)', last=True) + ',wait:50', Z, None),
-            ('меню-сообщения', ch + ',rclick:' + W.at(ch, 'привет! в #новости', dx=20) + ',wait:50', Z, None),
-            ('карточка', ch + ',click:' + W.at(ch, '<Алиса>', dx=1) + ',wait:100', Z, None),
+            ('меню-сообщения', ch + ',rclick:' + W.at(ch, 'hi! something funny in #news', dx=20) + ',wait:50', Z, None),
+            ('карточка', ch + ',click:' + W.at(ch, '<Alice>', dx=1) + ',wait:100', Z, None),
             ('закреплённые', ch + ',click:' + W.at(ch, '-o', dx=1) + ',wait:100', Z, None),
             ('входящие', ch + ',click:' + W.at(ch, '[_]', dx=1) + ',wait:100', Z, None),
             ('меню-сервера', S + ',click:12:0,wait:50', Z, None),
             ('меню-канала', S + ',rclick:' + W.at(S, 'general') + ',wait:50', Z, None),
             ('добавить-сервер', 'click:' + W.at('wait:50', '[ +  ]', tol=0) + ',wait:50', Z, None),
             ('статус', 'click:12:32,wait:50', Z, None),
-            ('ЛС', 'click:' + W.at('wait:50', 'Алиса', last=True) + ',wait:150', Z, None),
-            ('новая-ЛС', 'click:' + W.at('wait:50', 'Учёба', dx=0) .replace(':', ':', 1) + ',wait:50', Z, None)]
-    for chn in ('игры', 'вопросы', 'медленный', 'музыка'):
+            ('ЛС', 'click:' + W.at('wait:50', 'Alice', last=True) + ',wait:150', Z, None),
+            ('новая-ЛС', 'click:' + W.at('wait:50', 'Study', dx=0) .replace(':', ':', 1) + ',wait:50', Z, None)]
+    for chn in ('games', 'questions', 'slow', 'music'):  # демо в EN переведено
         out.append(('#' + chn, S + ',click:' + W.at(S, chn, tol=0) + ',wait:200', Z, None))
-    v = S + ',click:' + W.at(S, '<) ОБЩИЙ', dx=3) + ',wait:300'
+    v = S + ',click:' + W.at(S, '<) GENERAL', dx=3) + ',wait:300'
     out.append(('голос-экран', v, Z, None))
     g = 'click:' + W.at('wait:50', '(*)', dx=1) + ',wait:50'
     for n in range(6):

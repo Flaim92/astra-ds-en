@@ -151,6 +151,16 @@ PlatThread *thread_start(int (*fn)(void *), void *arg) {
 }
 void thread_join(PlatThread *t) { if (t) { pthread_join(t->t, NULL); free(t); } }
 void plat_timer_hires(bool on) { (void)on; }
+long long plat_thread_cpu_us(void) {
+    struct timespec t;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t)) return 0;
+    return (long long)t.tv_sec * 1000000 + t.tv_nsec / 1000;
+}
+long long plat_now_us(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000000 + t.tv_nsec / 1000;
+}
 int plat_ui_lang(void) {                        /* LC_ALL / LC_MESSAGES / LANG: ru/uk/be -> русский; C/POSIX/пусто — русский (как раньше) */
     const char *l = getenv("LC_ALL");
     if (!l || !*l) l = getenv("LC_MESSAGES");

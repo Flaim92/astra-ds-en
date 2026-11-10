@@ -13,7 +13,10 @@
 #include "ui_en.h"
 #ifdef ASTRA_VIDEO
 #include "share.h"
+#include "golive.h"
 static ShareState SHS;                           /* снимок состояния трансляции (ui_tick) */
+static int GL_phase, GL_prev;                    /* фаза Go Live для индикатора */
+static char GL_err[128];
 static bool sh_prev_streamer, sh_running;
 static u64 sh_ch;
 #endif
@@ -106,7 +109,7 @@ enum {
     B_PING, B_PINS, B_INBOX, B_PRESENT, B_STATUS, B_CARD_BLOCK, B_CARD_ADD, B_NEWMSG,
     B_PINS_MORE, B_INBOX_T0, B_INBOX_T1, B_ACK_ALL, B_EP_X, B_EMOJI, B_CAP_GO, B_CAP_NO,
     B_ADDSRV, B_GMENU, B_GINVITE, B_ADDFRIEND, B_TXT_EXP, B_TXT_DL, B_STARTASK, B_RV_X, B_EPH_HIDE, B_EMBEDS, B_MRETRY, B_MDISCARD,
-    B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS,
+    B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS, B_NS_OFF, B_NS_SPX, B_NS_RNN,
     B_SP_PREV, B_SP_NEXT
 };
 enum { MI_REPLY = 1, MI_EDIT, MI_DELETE, MI_REACT, MI_COPY,
@@ -3495,8 +3498,21 @@ static int draw_status(int x0, int x1, int y) {
     if (ram) left -= 11;
 #ifdef ASTRA_VIDEO
     if (sh_running) {                            /* постоянный индикатор эфира; щелчок — остановить */
-        char lv[96];
-        snprintf(lv, sizeof lv, TR(" (o) ЭФИР %dp %.0f к/с %.1f Мбит/с "), SHS.h, SHS.fps_out, SHS.mbps);
+        char lv[160];                            /* 96 не хватало: «окно свёрнуто - зрители видят последний кадр» обрезалось */
+        if (GL_phase == GL_FAILED) {
+            char *e = san(GL_err, true);
+            snprintf(lv, sizeof lv, TR(" (o) ЭФИР: ошибка - %s "), e);
+            free(e);
+        } else if (SHS.minimized) {              /* как в Discord: свёрнуто — поток идёт, зрители видят последний кадр */
+            snprintf(lv, sizeof lv, "%s", TR(" (o) ЭФИР: окно свёрнуто - зрители видят последний кадр "));
+        } else if (SHS.paused) {                 /* поток идёт: зрители видят последний чистый кадр */
+            char *c = san(SHS.cover, true);
+            if (*c) snprintf(lv, sizeof lv, TR(" (o) ЭФИР: окно перекрыто (%s) - показан последний кадр "), c);
+            else snprintf(lv, sizeof lv, TR(" (o) ЭФИР: %s - показан последний кадр "), SHS.pause_why[0] ? tr(SHS.pause_why) : TR("окно перекрыто"));
+            free(c);
+        } else if (GL_phase != GL_LIVE) snprintf(lv, sizeof lv, "%s", TR(" (o) ЭФИР: подключение... "));
+        else if (SHS.audio) snprintf(lv, sizeof lv, TR(" (o) ЭФИР %dp %.0f к/с %.1f Мбит/с, со звуком "), SHS.h, SHS.fps_out, SHS.mbps);
+        else snprintf(lv, sizeof lv, TR(" (o) ЭФИР %dp %.0f к/с %.1f Мбит/с "), SHS.h, SHS.fps_out, SHS.mbps);
         int xs = x;
         st_seg(&x, y, &left, lv, C_WHITE, AT_B, C_RED);
         hit_add(xs, y, x - xs, 1, A_BTN, B_SHARE, 0, HV_RED);
@@ -3574,8 +3590,10 @@ static void draw_help(int W, int H) {
     int bx = W - 4;
     g_text(bx, 0, "[x]", 3, C_TEXT, AT_B);
     hit_add(bx, 0, 3, 1, A_BTN, B_HELP_CLOSE, 0, HV_RED);
-    int rx = g_rtext(bx - 2, 0, rtag, W / 3, rfg, 0);
-    g_text(1, 0, TR("справка: Up/Down листать, F1 или Esc закрыть"), rx - 3, C_WHITE, AT_B);
+    int rmax = W / 3, rx;
+    if (vw(rtag) > rmax) { rx = bx - 1 - rmax; g_texte(rx, 0, rtag, rmax, rfg, 0); }   /* длинный ярлык — с «...», не посреди слова */
+    else rx = g_rtext(bx - 2, 0, rtag, rmax, rfg, 0);
+    g_texte(1, 0, TR("справка: Up/Down листать, F1 или Esc закрыть"), rx - 3, C_WHITE, AT_B);
     int body_h = H - 2;
     bool two = W - 2 >= 96;
     int hcolw = two ? (W - 2 - 2) / 2 : W - 2, kw;
@@ -3813,11 +3831,13 @@ static char sh_t[24][80];
 static const char *sh_names[25];
 static uintptr_t sh_ids[24];
 static int sh_n;
-static const char *const SH_MODES[] = { "720p 24 к/с (около 10 МБ, нагрузка выше)", "480p 15 к/с - облегчённый" };
+static const char *const SH_MODES[] = { "720p 30 к/с, 1,8 Мбит/с", "720p 30 к/с, экономный поток 1 Мбит/с" };
 static void share_ui_stop(const char *why) {
     if (!sh_running) return;
+    golive_stop();
     share_stop();
     sh_running = false;
+    GL_phase = GL_prev = GL_OFF;
     streamer_set(sh_prev_streamer);
     if (why && *why) ui_notice("%s", tr(why));
     U.dirty = true;
@@ -3982,6 +4002,19 @@ static void draw_settings(int W, int H) {
         g_button(x, y + 2, voice_duck_others_on() ? TR("[x] Приглушать другие программы во время звонка") : TR("[ ] Приглушать другие программы во время звонка"),
                  w, voice_duck_others_on() ? 1 : 0, B_DUCK);
         y += 4;
+        {   /* шумоподавление микрофона: выбор как переключатель, на ходу */
+            static const char *const nsl[3] = { "Выкл", "SpeexDSP (легче)", "RNNoise (лучше)" };
+            int nm = voice_ns_mode(), cx = x, cy = y + 1;
+            g_text(x, y, TR("ШУМОПОДАВЛЕНИЕ"), w, C_MUTED, AT_B);
+            for (int i = 0; i < 3; i++) {
+                char b[64];
+                snprintf(b, sizeof b, "%s %s", nm == i ? "(o)" : "( )", tr(nsl[i]));
+                int bl = vw(b) + 4;
+                if (cx > x && cx + bl > x + w) { cx = x; cy++; }
+                cx += g_button(cx, cy, b, x + w - cx, nm == i ? 1 : 0, B_NS_OFF + i) + 1;
+            }
+            y = cy + 2;
+        }
         VoiceFx fx = voicefx_get();
         g_text(x, y, TR("СМЕНА ГОЛОСА"), w, C_MUTED, AT_B);
         snprintf(t, sizeof t, TR("Голос: %s (F11)"), fx == VFX_LOW ? TR("ниже") : fx == VFX_HIGH ? TR("выше") : TR("как есть"));
@@ -4044,6 +4077,26 @@ static void draw_settings(int W, int H) {
         if (g_gw_ping > 0) snprintf(t, sizeof t, TR("%d мс"), g_gw_ping); else snprintf(t, sizeof t, TR("нет данных"));
         y += set_row(x, y, w, TR("ПИНГ ШЛЮЗА"), t, g_gw_ping <= 0 ? C_MUTED : g_gw_ping < 100 ? C_GREEN : g_gw_ping < 250 ? C_GOLD : C_RED);
         if (vless_state() == VL_UP) { snprintf(t, sizeof t, TR("%d мс"), vless_latency_ms()); y += set_row(x, y, w, "VLESS", t, C_TEXT); }
+        {   /* шумоподавление и поток звонка: доля одного ядра и память (только в звонке) */
+            VoiceStatus pv;
+            voice_status(&pv);
+            static const char *const nsn[3] = { "выкл", "SpeexDSP", "RNNoise" };
+            int nm = voice_ns_mode();
+            if (nm < 0 || nm > 2) nm = 0;
+            if (pv.phase == VS_IDLE) snprintf(t, sizeof t, TR("%s; не в звонке"), tr(nsn[nm]));
+            else {
+                VoiceStats vst2;
+                voice_stats(&vst2);
+                if (nm == NS_OFF) snprintf(t, sizeof t, "%s", tr(nsn[0]));
+                else if (!vst2.ns_mode) snprintf(t, sizeof t, TR("%s; не работает (микрофон молчит или заглушён)"), tr(nsn[nm]));
+                else snprintf(t, sizeof t, TR("%s; %.1f%% ядра, %d КБ"), tr(nsn[nm]), vst2.ns_cpu_pm / 10.0, vst2.ns_mem_kb);
+                y += set_row(x, y, w, TR("ШУМОПОДАВЛЕНИЕ"), t, C_TEXT);
+                snprintf(t, sizeof t, TR("%.1f%% ядра"), vst2.cap_cpu_pm / 10.0);
+                y += set_row(x, y, w, TR("ПОТОК ЗВОНКА"), t, C_TEXT);
+                t[0] = 0;
+            }
+            if (t[0]) y += set_row(x, y, w, TR("ШУМОПОДАВЛЕНИЕ"), t, C_MUTED);
+        }
         g_button(x, y, show_ram ? TR("[x] Память в строке состояния") : TR("[ ] Память в строке состояния"), w, show_ram ? 1 : 0, B_RAMBAR);
         break;
     }
@@ -5098,7 +5151,7 @@ static void draw_friends(int cx, int cw, int H) {
     x += g_text(x, 0, TR("Друзья"), 8, C_WHITE, AT_B) + 1;
     g_ch(x, 0, '|', C_LINE, 0);
     x += 2;
-    char nb[8];
+    char nb[12];
     snprintf(nb, sizeof nb, "%d", nin > 99 ? 99 : nin);
     int full = 0;
     for (int i = 0; i < 4; i++) full += vw(tr(FR_TABS[i])) + 3 + (i == 2 && nin ? vw(nb) + 3 : 0);
@@ -6095,7 +6148,7 @@ static struct {
     bool loading;                                /* значения ещё грузятся: поля не заполнены, «Сохранить» недоступно */
     bool confirm;                                /* «Открыть в браузере» мимо VLESS: ждём второе нажатие */
     u64 o_al, o_de;                              /* «Права»: исходная перезапись цели (меняем только свои биты) */
-    char title[96], sub[240], err[200];
+    char title[96], sub[400], err[200];
     FField f[9];
     struct { const char *t; int id, style; } b[4];
     int nb;
@@ -6329,12 +6382,13 @@ static void fm_open(int id, u64 gid, u64 cid) {
         sh_names[sh_n] = "Весь экран";
         snprintf(FM.title, sizeof FM.title, "%s", TR("Демонстрация экрана"));
 #ifdef _WIN32
-        snprintf(FM.sub, sizeof FM.sub, "%s", TR("Все увидят выбранное окно. Окно Astra DS в трансляцию не попадает; на время эфира включится режим стримера."));
+        snprintf(FM.sub, sizeof FM.sub, "%s", TR("Эфир 1280x720, 30 к/с. Окно: видно только оно, даже под другими окнами; свёрнутое - зрители видят последний кадр. Весь экран: видно всё. Astra DS в эфир не попадает, включится режим стримера."));
 #else
         snprintf(FM.sub, sizeof FM.sub, "%s", TR("Внимание: в X11 при показе всего экрана видны все окна, в том числе это."));
 #endif
         fm_choice(fm_add(FF_CHOICE, "ИСТОЧНИК", NULL), sh_names, sh_n + 1, 0);
         fm_choice(fm_add(FF_CHOICE, "КАЧЕСТВО", NULL), SH_MODES, 2, 0);
+        fm_add(FF_TOGGLE, "Транслировать звук", NULL)->ch = 1;   /* окно — звук его программы; экран — всё, кроме Astra DS */
         fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Начать трансляцию"), FB_OK, 1);
         break;
     }
@@ -9363,8 +9417,11 @@ static void fm_submit(int bid) {
         uintptr_t id = src < sh_n ? sh_ids[src] : 0;
         VoiceStatus v5;
         voice_status(&v5);
+        share_audio_enable(FM.f[2].ch != 0);
         ok = share_start(FM.f[1].ch, id, err, sizeof err);
+        if (ok && !golive_start(v5.guild_id, v5.channel_id, err, sizeof err)) { share_stop(); ok = false; }   /* Go Live в этот канал/звонок */
         if (ok) {
+            GL_phase = GL_prev = GL_CREATING;
             sh_running = true;
             sh_ch = v5.channel_id;
             sh_prev_streamer = streamer_on();
@@ -9759,6 +9816,7 @@ static void button(int id, int x, int y) {
     }
 #endif
     case B_HPF: voice_hpf(!voice_hpf_on()); break;
+    case B_NS_OFF: case B_NS_SPX: case B_NS_RNN: voice_ns_set(NS_OFF + (id - B_NS_OFF)); break;
     case B_FSEND: if (U.mode == M_FILE) file_submit(); break;
     case B_MOD: {
         const Channel *oc = chan_find(S.open_ch);
@@ -10537,11 +10595,23 @@ void ui_tick(void) {
         if (sh_running) {
             ShareState ns2;
             share_state(&ns2);
-            if (ns2.fps_out != SHS.fps_out || ns2.mbps != SHS.mbps || ns2.active != SHS.active) U.dirty = true;
+            if (ns2.fps_out != SHS.fps_out || ns2.mbps != SHS.mbps || ns2.active != SHS.active || ns2.paused != SHS.paused || strcmp(ns2.cover, SHS.cover)) U.dirty = true;
+            if (strcmp(ns2.pause_why, SHS.pause_why)) U.dirty = true;   /* на паузе эфир идёт (последний кадр) — golive_pause не зовём */
+            if (ns2.audio_err[0] && strcmp(ns2.audio_err, SHS.audio_err) && strcmp(ns2.audio_err, "без звука"))
+                ui_notice("%s", tr(ns2.audio_err));   /* звук не пошёл (старая Windows) — эфир без звука */
+            if (ns2.audio != SHS.audio) U.dirty = true;
+            if (ns2.active && ns2.minimized != SHS.minimized) {   /* свернули/развернули источник — сказать в окне */
+                if (ns2.minimized) ui_notice("%s", TR("Окно трансляции свёрнуто - зрители видят последний кадр. Разверните окно, и эфир продолжится"));
+                else ui_notice("%s", TR("Окно развёрнуто - трансляция продолжается"));
+            }
             SHS = ns2;
+            GoLiveState gl;
+            golive_state(&gl);
+            if (gl.phase != GL_phase) { GL_prev = GL_phase; GL_phase = gl.phase; snprintf(GL_err, sizeof GL_err, "%s", gl.err); U.dirty = true; }
             VoiceStatus v6;
             voice_status(&v6);
             if (!ns2.active) share_ui_stop(ns2.reason[0] ? ns2.reason : "трансляция остановлена");
+            else if (GL_phase == GL_OFF && GL_prev != GL_OFF) share_ui_stop("трансляция остановлена: Discord завершил эфир");
             else if (v6.phase == VS_IDLE) share_ui_stop("трансляция остановлена: вы вышли из звонка");
             else if (v6.channel_id != sh_ch) share_ui_stop("трансляция остановлена: другой канал");
         }
@@ -10694,7 +10764,7 @@ static void ui_drop_file(const char *path) {
 void ui_init(void) {
     g_ui_drop = ui_drop_file;
 #ifdef ASTRA_VIDEO
-    term_capture_exclude(true);                  /* безопасник: окно видео-версии не попадает ни в чей захват */
+    share_self_excluded(term_capture_exclude(true));   /* окно видео-версии не попадает ни в чей захват; не вышло — свои окна считаются перекрытием */
 #endif
     if (!lang_inited) ui_lang_init(-1);
     U.focus = F_GUILDS;

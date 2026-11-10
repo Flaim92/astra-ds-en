@@ -15,17 +15,348 @@
 #include "captcha.h"
 
 #ifndef _WIN32
-/* Linux: WebKitGTK в статическую сборку не входит — проверку показать нечем (интерфейс предложит QR). */
-bool captcha_supported(void) { return false; }
-bool captcha_open(const char *sitekey, const char *rqdata, char *out, size_t cap, bool test, char *err, size_t errn) {
-    (void)sitekey; (void)rqdata; (void)out; (void)cap; (void)test;
-    snprintf(err, errn, ui_tr("проверка hCaptcha в Astra DS на Linux пока не поддерживается: войдите по QR-коду"));
-    return false;
+/* Linux: WebKitGTK системы (libwebkit2gtk-4.1 или 4.0), если установлен. В статическую сборку он не входит и в
+ * процесс клиента не загружается: окно проверки показывает отдельный процесс-помощник — тот же исполняемый файл
+ * с ключом --captcha-helper (см. captcha_helper_main). Помощник подгружает WebKitGTK через dlopen, открывает
+ * страницу с виджетом под адресом https://discord.com/astra-captcha (load_html с базовым URI, в сеть сама
+ * страница не уходит — hCaptcha видит домен Discord), контекст эфемерный (без профиля на диске). Ответ приходит
+ * в заголовок страницы и пишется в stdout помощника; клиент читает его в отдельном потоке и будит g_wake.
+ * Сеть помощника: при включённом VLESS — только через SOCKS5 туннеля (не удалось задать прокси — проверку не
+ * открываем, напрямую не идём); WebRTC выключен. Адрес и пароль SOCKS идут через stdin, не в argv. */
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <spawn.h>
+#include <unistd.h>
+#include <dlfcn.h>
+#include <sys/wait.h>
+
+extern char **environ;
+
+#define TEST_SITEKEY "10000000-ffff-ffff-ffff-000000000001"   /* открытый тестовый ключ hCaptcha */
+#define PAGE_URL "https://discord.com/astra-captcha"
+#define RU_TITLE "Astra DS: проверка hCaptcha для Discord"
+
+static const char *const wk_libs[] = { "libwebkit2gtk-4.1.so.0", "libwebkit2gtk-4.0.so.37" };
+
+enum { CS_IDLE, CS_OPEN, CS_OK, CS_FAIL };
+static struct {
+    pthread_t th;
+    bool th_on;
+    volatile int state;
+    volatile bool running;
+    pid_t pid;
+    int fd;
+    char *out;
+    size_t cap;
+    char err[200];
+    int supported;                              /* -1 — ещё не проверяли */
+} C = { .fd = -1, .supported = -1 };
+
+static bool cs_charset(const char *s, const char *extra, size_t max) {
+    size_t n = strlen(s);
+    if (n > max) return false;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c && strchr(extra, c)))) return false;
+    }
+    return true;
 }
-int captcha_result(char *err, size_t errn) { if (errn) err[0] = 0; return -1; }
-void captcha_close(void) {}
-bool captcha_busy(void) { return false; }
+
+/* Есть ли WebKitGTK: ищем файл библиотеки, не загружая её в процесс клиента. */
+bool captcha_supported(void) {
+    if (C.supported >= 0) return C.supported;
+    static const char *const dirs[] = { "/usr/lib/x86_64-linux-gnu", "/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib",
+                                        "/lib64", "/usr/local/lib", "/usr/lib/aarch64-linux-gnu" };
+    C.supported = 0;
+    for (size_t d = 0; d < sizeof dirs / sizeof *dirs && !C.supported; d++)
+        for (size_t l = 0; l < sizeof wk_libs / sizeof *wk_libs; l++) {
+            char p[256];
+            snprintf(p, sizeof p, "%s/%s", dirs[d], wk_libs[l]);
+            if (access(p, R_OK) == 0) { C.supported = 1; break; }
+        }
+    return C.supported;
+}
+
+static void *reader(void *a) {
+    (void)a;
+    size_t n = 0;
+    bool over = false;
+    for (;;) {
+        char tmp[512];
+        ssize_t r = read(C.fd, tmp, sizeof tmp);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        for (ssize_t i = 0; i < r; i++) {
+            if (n + 1 < C.cap) C.out[n++] = tmp[i]; else over = true;
+        }
+        plat_wipe(tmp, sizeof tmp);
+    }
+    close(C.fd);
+    C.fd = -1;
+    int st = 0;
+    while (waitpid(C.pid, &st, 0) < 0 && errno == EINTR) {}
+    int code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    while (n && (C.out[n - 1] == '\n' || C.out[n - 1] == '\r')) n--;
+    C.out[n] = 0;
+    if (code == 0 && n && !over && cs_charset(C.out, "-_.:+/=", C.cap)) C.state = CS_OK;
+    else {
+        plat_wipe(C.out, C.cap);
+        snprintf(C.err, sizeof C.err, "%s",
+                 code == 2 ? ui_tr("WebKitGTK не загрузился: установите libwebkit2gtk-4.1 или войдите по QR-коду")
+               : code == 3 ? ui_tr("hCaptcha не загрузилась (нет связи?)")
+               : code == 5 ? ui_tr("VLESS не работает: проверку открыть нельзя (напрямую не идём)")
+               : code == 6 ? ui_tr("нет графического сеанса для окна проверки")
+               : ui_tr("окно проверки закрыто"));
+        C.state = CS_FAIL;
+    }
+    C.running = false;
+    if (g_wake) wake_signal(g_wake);
+    return NULL;
+}
+
+bool captcha_open(const char *sitekey, const char *rqdata, char *out, size_t cap, bool test, char *err, size_t errn) {
+    err[0] = 0;
+    if (captcha_busy()) { snprintf(err, errn, ui_tr("окно проверки уже открыто")); return false; }
+    captcha_close();
+    if (test) sitekey = TEST_SITEKEY;
+    if (!sitekey || !rqdata || !cs_charset(sitekey, "-", 64) || !cs_charset(rqdata, "+/=._-", 4000) || !sitekey[0] || cap < 2) {
+        snprintf(err, errn, ui_tr("Discord прислал проверку непонятного вида"));
+        return false;
+    }
+    if (!captcha_supported()) {
+        snprintf(err, errn, ui_tr("нет WebKitGTK (пакет libwebkit2gtk-4.1): проверку показать нечем, войдите по QR-коду"));
+        return false;
+    }
+    char proxy[400] = "";
+    if (vless_state() != VL_OFF) {
+        char ip[64] = "", user[128] = "", pass[128] = "";
+        int port = 0;
+        bool ok = vless_socks(ip, sizeof ip, &port, user, sizeof user, pass, sizeof pass) &&
+                  cs_charset(ip, ".:", 63) && cs_charset(user, "-_.", 127) && cs_charset(pass, "-_.", 127) && port > 0;
+        if (ok && user[0]) snprintf(proxy, sizeof proxy, "socks5://%s:%s@%s:%d", user, pass, ip, port);
+        else if (ok) snprintf(proxy, sizeof proxy, "socks5://%s:%d", ip, port);
+        plat_wipe(pass, sizeof pass);
+        if (!ok) { snprintf(err, errn, ui_tr("VLESS не работает: проверку открыть нельзя (напрямую не идём)")); return false; }
+    }
+    int in[2], o[2];
+    if (pipe2(in, O_CLOEXEC)) { plat_wipe(proxy, sizeof proxy); snprintf(err, errn, ui_tr("поток проверки не запустился")); return false; }
+    if (pipe2(o, O_CLOEXEC)) { close(in[0]); close(in[1]); plat_wipe(proxy, sizeof proxy); snprintf(err, errn, ui_tr("поток проверки не запустился")); return false; }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, in[0], 0);
+    posix_spawn_file_actions_adddup2(&fa, o[1], 1);
+    posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+    char *argv[] = { "astra-ds", "--captcha-helper", (char *)sitekey, (char *)(rqdata[0] ? rqdata : "-"), test ? "1" : "0", NULL };
+    pid_t pid = -1;
+    if (posix_spawn(&pid, "/proc/self/exe", &fa, NULL, argv, environ) != 0) pid = -1;
+    posix_spawn_file_actions_destroy(&fa);
+    close(in[0]);
+    close(o[1]);
+    if (pid < 0) { close(in[1]); close(o[0]); plat_wipe(proxy, sizeof proxy); snprintf(err, errn, ui_tr("поток проверки не запустился")); return false; }
+    /* stdin помощника: прокси, заголовок окна, текст над виджетом, язык hCaptcha */
+    const char *title = ui_tr(RU_TITLE);
+    char cfg[1400];
+    int cn = snprintf(cfg, sizeof cfg, "%s\n%s\n%s\n%s\n", proxy, title,
+                      ui_tr("Discord просит подтвердить, что вы человек. Пройдите проверку - окно закроется само."),
+                      strcmp(title, RU_TITLE) ? "en" : "ru");
+    plat_wipe(proxy, sizeof proxy);
+    signal(SIGPIPE, SIG_IGN);
+    if (cn > 0) { ssize_t w = write(in[1], cfg, (size_t)cn < sizeof cfg ? (size_t)cn : sizeof cfg - 1); (void)w; }
+    plat_wipe(cfg, sizeof cfg);
+    close(in[1]);
+    C.pid = pid;
+    C.fd = o[0];
+    C.out = out;
+    C.cap = cap;
+    plat_wipe(out, cap);
+    C.err[0] = 0;
+    C.state = CS_OPEN;
+    C.running = true;
+    if (pthread_create(&C.th, NULL, reader, NULL)) {
+        kill(pid, SIGKILL);
+        close(C.fd);
+        C.fd = -1;
+        int st;
+        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+        C.running = false;
+        C.state = CS_IDLE;
+        C.out = NULL;
+        snprintf(err, errn, ui_tr("поток проверки не запустился"));
+        return false;
+    }
+    C.th_on = true;
+    return true;
+}
+
 void captcha_bridge_stats(int *used, int *refused) { *used = *refused = 0; }
+bool captcha_busy(void) { return C.th_on && C.running; }
+
+int captcha_result(char *err, size_t errn) {
+    if (errn) err[0] = 0;
+    if (C.state == CS_OPEN || captcha_busy()) return 0;
+    if (C.state == CS_OK) return 1;
+    if (C.state == CS_FAIL) { snprintf(err, errn, "%s", C.err); return -1; }
+    return -1;
+}
+
+void captcha_close(void) {
+    if (C.th_on) {
+        if (C.running && C.pid > 0) kill(C.pid, SIGTERM);   /* поток дочитает канал и заберёт процесс */
+        pthread_join(C.th, NULL);
+        C.th_on = false;
+    }
+    C.state = CS_IDLE;
+    C.out = NULL;
+}
+
+/* ---------- процесс-помощник: окно WebKitGTK (GTK 3) ---------- */
+typedef void *gp;
+static struct {
+    void (*main_quit)(void);
+    const char *(*get_title)(gp);
+    int code;
+} H = { .code = 4 };
+
+/* Ответ hCaptcha (несколько КБ) приходит частями: WebKit обрезает заголовок страницы до 1000 символов, и ответ,
+ * переданный одним заголовком, доходил обрубком (Discord: invalid-response). Страница по кругу выставляет
+ * заголовки "k:<номер>:<всего>:<до 800 символов>"; пропущенная часть придёт на следующем круге. */
+#define CH_MAX 40
+#define CH_LEN 800
+static char h_chunk[CH_MAX][CH_LEN + 1];
+static bool h_have[CH_MAX];
+static void h_title(gp obj, gp pspec, gp data) {
+    (void)pspec; (void)data;
+    const char *t = H.get_title(obj);
+    if (!t || H.code == 0) return;
+    if (!strncmp(t, "err:", 4)) { H.code = 3; H.main_quit(); return; }
+    int i = -1, n = -1, off = 0;
+    if (sscanf(t, "k:%d:%d:%n", &i, &n, &off) < 2 || off <= 0 || n < 1 || n > CH_MAX || i < 0 || i >= n) return;
+    size_t len = strlen(t + off);
+    if (!len || len > CH_LEN || (i < n - 1 && len != CH_LEN)) return;
+    memcpy(h_chunk[i], t + off, len + 1);
+    h_have[i] = true;
+    for (int k = 0; k < n; k++) if (!h_have[k]) return;
+    for (int k = 0; k < n; k++) fputs(h_chunk[k], stdout);
+    fputc('\n', stdout);
+    fflush(stdout);
+    H.code = 0;
+    H.main_quit();
+}
+static void h_destroy(gp w, gp data) { (void)w; (void)data; H.main_quit(); }
+static gp h_create(gp wv, gp act, gp data) { (void)wv; (void)act; (void)data; return NULL; }   /* новые окна не открываем */
+static int h_timeout(gp data) { (void)data; H.main_quit(); return 0; }
+
+static void read_line(char *s, size_t n) {
+    size_t i = 0;
+    for (;;) {
+        char c;
+        ssize_t r = read(0, &c, 1);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0 || c == '\n') break;
+        if (i + 1 < n) s[i++] = c;
+    }
+    s[i] = 0;
+}
+
+int captcha_helper_main(int argc, char **argv) {
+    if (argc < 5) return 4;
+    const char *sitekey = argv[2], *rq = strcmp(argv[3], "-") ? argv[3] : "";
+    bool test = !strcmp(argv[4], "1");
+    if (!cs_charset(sitekey, "-", 64) || !cs_charset(rq, "+/=._-", 4000) || !sitekey[0]) return 4;
+    char proxy[400], title[300], text[600], lang[8];
+    read_line(proxy, sizeof proxy);
+    read_line(title, sizeof title);
+    read_line(text, sizeof text);
+    read_line(lang, sizeof lang);
+    if (strcmp(lang, "en")) snprintf(lang, sizeof lang, "ru");
+    for (char *p = text; *p; p++) if (*p == '<' || *p == '>' || *p == '&' || *p == '"' || *p == '%') *p = ' ';
+    if (!getenv("DISPLAY") && !getenv("WAYLAND_DISPLAY")) return 6;
+    void *wk = NULL;
+    for (size_t i = 0; i < sizeof wk_libs / sizeof *wk_libs && !wk; i++) wk = dlopen(wk_libs[i], RTLD_NOW | RTLD_LOCAL);
+    if (!wk) return 2;
+#define SYM(v, name) *(void **)(&v) = dlsym(wk, name)
+    int (*gtk_init_check)(int *, char ***); SYM(gtk_init_check, "gtk_init_check");
+    gp (*window_new)(int); SYM(window_new, "gtk_window_new");
+    void (*set_title)(gp, const char *); SYM(set_title, "gtk_window_set_title");
+    void (*set_size)(gp, int, int); SYM(set_size, "gtk_window_set_default_size");
+    void (*set_pos)(gp, int); SYM(set_pos, "gtk_window_set_position");
+    void (*keep_above)(gp, int); SYM(keep_above, "gtk_window_set_keep_above");
+    void (*add)(gp, gp); SYM(add, "gtk_container_add");
+    void (*show_all)(gp); SYM(show_all, "gtk_widget_show_all");
+    void (*gtk_main)(void); SYM(gtk_main, "gtk_main");
+    SYM(H.main_quit, "gtk_main_quit");
+    unsigned long (*connect)(gp, const char *, void *, gp, void *, int); SYM(connect, "g_signal_connect_data");
+    unsigned (*timeout_add)(unsigned, void *, gp); SYM(timeout_add, "g_timeout_add_seconds");
+    gp (*ctx_new)(void); SYM(ctx_new, "webkit_web_context_new_ephemeral");
+    gp (*view_new)(gp); SYM(view_new, "webkit_web_view_new_with_context");
+    void (*load_html)(gp, const char *, const char *); SYM(load_html, "webkit_web_view_load_html");
+    SYM(H.get_title, "webkit_web_view_get_title");
+    gp (*get_settings)(gp); SYM(get_settings, "webkit_web_view_get_settings");
+    void (*set_webrtc)(gp, int); SYM(set_webrtc, "webkit_settings_set_enable_webrtc");
+    void (*set_media)(gp, int); SYM(set_media, "webkit_settings_set_enable_media_stream");
+    gp (*get_dm)(gp); SYM(get_dm, "webkit_web_context_get_website_data_manager");
+    gp (*proxy_new)(const char *, const char *const *); SYM(proxy_new, "webkit_network_proxy_settings_new");
+    void (*dm_proxy)(gp, int, gp); SYM(dm_proxy, "webkit_website_data_manager_set_network_proxy_settings");
+    void (*ctx_proxy)(gp, int, gp); SYM(ctx_proxy, "webkit_web_context_set_network_proxy_settings");
+#undef SYM
+    if (!gtk_init_check || !window_new || !set_title || !set_size || !add || !show_all || !gtk_main || !H.main_quit ||
+        !connect || !timeout_add || !ctx_new || !view_new || !load_html || !H.get_title) return 2;
+    int gc = 1;
+    char *gv0[] = { argv[0], NULL }, **gv = gv0;
+    if (!gtk_init_check(&gc, &gv)) return 6;
+    gp ctx = ctx_new();
+    if (!ctx) return 2;
+    if (proxy[0]) {                             /* VLESS: только через туннель; не вышло — не открываем */
+        gp ps = proxy_new ? proxy_new(proxy, NULL) : NULL;
+        bool set = false;
+        if (ps && dm_proxy && get_dm) { gp dm = get_dm(ctx); if (dm) { dm_proxy(dm, 2 /* CUSTOM */, ps); set = true; } }
+        if (ps && !set && ctx_proxy) { ctx_proxy(ctx, 2, ps); set = true; }
+        plat_wipe(proxy, sizeof proxy);
+        if (!set) return 5;
+    }
+    gp view = view_new(ctx);
+    if (!view) return 2;
+    if (get_settings) {
+        gp s = get_settings(view);
+        if (s && set_webrtc) set_webrtc(s, 0);
+        if (s && set_media) set_media(s, 0);
+    }
+    gp win = window_new(0);
+    if (!win) return 6;
+    set_title(win, title);
+    set_size(win, 460, 660);
+    if (set_pos) set_pos(win, 1 /* GTK_WIN_POS_CENTER */);
+    if (keep_above) keep_above(win, 1);
+    add(win, view);
+    connect(win, "destroy", (void *)h_destroy, NULL, NULL, 0);
+    connect(view, "notify::title", (void *)h_title, NULL, NULL, 0);
+    connect(view, "create", (void *)h_create, NULL, NULL, 0);
+    timeout_add(600, (void *)h_timeout, NULL);  /* 10 минут на проверку */
+    size_t pn = 12288;
+    char *page = malloc(pn);
+    if (!page) return 4;
+    snprintf(page, pn,
+        "<!doctype html><html lang=\"%s\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\">"
+        "<title>astra</title><style>html,body{margin:0;height:100%%;background:#313338;color:#dbdee1;font:15px sans-serif}"
+        "body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px}"
+        "#t{max-width:380px;text-align:center;line-height:1.4}</style><script>var SK=\"%s\",RQ=\"%s\",AUTO=%d;"
+        "function post(s){if(s.slice(0,3)!='ok:'){document.title=s;return}var t=s.slice(3),n=Math.ceil(t.length/800),i=0;"
+        "setInterval(function(){document.title='k:'+i+':'+n+':'+t.substr(i*800,800);i=(i+1)%%n},40)}"
+        "var loaded=0;function onl(){loaded=1;try{var id=hcaptcha.render('c',{sitekey:SK,theme:'dark',size:AUTO?'invisible':'normal',"
+        "callback:function(t){post('ok:'+t)},'error-callback':function(e){try{hcaptcha.reset(id)}catch(x){}}});"
+        "if(RQ)hcaptcha.setData(id,{rqdata:RQ});if(AUTO)hcaptcha.execute(id);}catch(e){post('err:load')}}"
+        "setTimeout(function(){if(!loaded)post('err:load')},30000);</script>"
+        "<script src=\"https://js.hcaptcha.com/1/api.js?render=explicit&onload=onl&hl=%s&recaptchacompat=off\" async defer></script>"
+        "</head><body><div id=\"t\">%s</div><div id=\"c\"></div></body></html>",
+        lang, sitekey, rq, test ? 1 : 0, lang, text);
+    load_html(view, page, PAGE_URL);
+    show_all(win);
+    gtk_main();
+    fflush(stdout);
+    _exit(H.code);                              /* без деструкторов GTK/WebKit: процесс одноразовый */
+}
 #else
 
 #define COBJMACROS
@@ -297,7 +628,7 @@ static ULONG STDMETHODCALLTYPE o_addref(void *This) { return (ULONG)++((Obj *)Th
 static ULONG STDMETHODCALLTYPE o_release(void *This) { return (ULONG)--((Obj *)This)->ref; }   /* объекты статические */
 
 /* Параметры среды: прокси — наш мост; всё лишнее у Chromium выключено. */
-static WCHAR g_args[256];
+static WCHAR g_args[768];                       /* 256 не хватало: хвост (флаги WebRTC) обрезался */
 static HRESULT STDMETHODCALLTYPE opt_dup(const WCHAR *s, LPWSTR *v) {
     size_t n = (wcslen(s) + 1) * sizeof(WCHAR);
     *v = CoTaskMemAlloc(n);

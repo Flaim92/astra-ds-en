@@ -147,7 +147,7 @@ static void screen_wipe(void) {
 void panic_now(void) {
     if (dry) { dry_hits++; return; }
 #ifdef ASTRA_VIDEO
-    share_stop();                                /* трансляция экрана — прекратить раньше всего остального */
+    share_stop_nowait();                         /* трансляция экрана: только флаг + ожидание <= 150 мс (В-5-б), дальше — токен */
 #endif
     secret_destroy();                            /* токен: затереть в памяти — первым делом */
     login_panic();                               /* окно входа: пароль, коды, тикеты */

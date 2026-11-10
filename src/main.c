@@ -6,7 +6,9 @@
 #include "mc.h"
 #include "plat.h"
 #include "img.h"
+#include "captcha.h"
 #include "login.h"
+#include "impcurl.h"
 #ifndef _WIN32
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -62,6 +64,55 @@ bool term_snapshot(const char *path);           /* --shot: сетка -> BMP */
 bool term_read_line(const char *prompt, char *out, size_t cap);   /* видимая строка (консоль или окно) */
 
 Opts O;
+
+/* Безголовый вход (--headlogin): проверка входа на сервере без GUI. Логин и пароль — две строки stdin,
+ * код 2FA — по запросу (печатает NEED_CODE, читает строку). Гоняет настоящий движок login.c; токен
+ * сохраняется в хранилище, как при обычном входе, — дальше можно запускать клиент уже залогиненным.
+ * Статусы — в stdout; секреты (логин/пароль/код/токен) не печатаются. VLESS не трогаем (напрямую). */
+static int headlogin_main(void) {
+    char login[320] = "", pass[320] = "", code[64] = "";
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (!fgets(login, sizeof login, stdin) || !fgets(pass, sizeof pass, stdin)) { printf("ERR: нет логина/пароля в stdin\n"); return 2; }
+    login[strcspn(login, "\r\n")] = 0;
+    pass[strcspn(pass, "\r\n")] = 0;
+    if (!secret_init()) { printf("ERR: защищённая память\n"); return 1; }
+    plat_net_init();
+    if (!net_init()) { printf("ERR: сеть\n"); return 1; }
+    g_wake = wake_new();
+    if (!login_init()) { printf("ERR: login_init\n"); return 1; }
+    printf("вход: %s ...\n", "запрос к Discord");
+    login_start_password(login, pass);
+    memset(login, 0, sizeof login);
+    memset(pass, 0, sizeof pass);
+    int rc = 1;
+    bool asked = false;
+    for (int guard = 0; guard < 400000; guard++) {
+        Waitable w[8];
+        int n = login_waitables(w, 7);
+        if (g_wake) w[n++] = wake_waitable(g_wake);
+        i64 now = now_ms(), t = login_next_wake();
+        int timeout = t == INT64_MAX ? 100 : (t <= now ? 0 : (int)(t - now > 100 ? 100 : t - now));
+        plat_wait(w, n, timeout);
+        wake_clear(g_wake);
+        vless_service();
+        login_service();
+        const LoginView *v = login_view();
+        if (v->error && v->error[0]) { printf("ERR: %s\n", v->error); break; }
+        if (v->stage == LG_DONE) { printf("DONE: вход выполнен, токен сохранён в хранилище\n"); rc = 0; break; }
+        if (v->stage == LG_CAPTCHA) { printf("ERR: Discord требует капчу — на сервере без окна не пройти\n"); break; }
+        if (v->stage == LG_MFA && !asked) {
+            printf("NEED_CODE: нужен код 2FA (totp)\n");
+            if (!fgets(code, sizeof code, stdin)) { printf("ERR: нет кода в stdin\n"); break; }
+            code[strcspn(code, "\r\n")] = 0;
+            login_submit_code(code, 0);
+            memset(code, 0, sizeof code);
+            asked = true;
+        }
+    }
+    if (rc) printf("итог: вход не выполнен\n");
+    login_finish();
+    return rc;
+}
 
 #ifdef ASTRA_VIDEO
 #define PRODUCT_NAME "Astra DS Video"
@@ -689,6 +740,7 @@ int main(int argc, char **argv) {
     }
 #else
     if (!freopen("/dev/null", "w", stderr)) return 1;
+    if (argc >= 2 && !strcmp(argv[1], "--captcha-helper")) return captcha_helper_main(argc, argv);
 #endif
     bool list_devices = false, tui = false;
     const char *vlesstest = NULL, *shot = NULL, *shot_keys = NULL;
@@ -719,6 +771,14 @@ int main(int argc, char **argv) {
         else if (arg_is(a, "--lang", &v) && v) { if (!strcmp(v, "ru")) lang_force = 0; else if (!strcmp(v, "en")) lang_force = 1; else { term_puts(ui_tr("--lang=ru или --lang=en\n")); return 2; } }
         else if (arg_is(a, "--version", NULL)) { term_puts(PRODUCT_NAME " " ASTRA_VERSION PRODUCT_NOTE "\n"); return 0; }
 #ifdef ASTRA_VIDEO
+        else if (arg_is(a, "--streamsrc", NULL)) {   /* скрытый: окно-источник для --livetest MC_LIVE=golive */
+#ifdef _WIN32
+            int stream_source_main(void);
+            return stream_source_main();
+#else
+            return 1;
+#endif
+        }
         /* скрытый: --streamtest=N[,сцена[,ширина,высота,к/с,кбит/с]] — замер трансляции, без сети и файлов */
         else if (arg_is(a, "--streamtest", &v) && v && *v) {
             int p[6] = { 10, 0, 1280, 720, 24, 2000 };
@@ -749,6 +809,8 @@ int main(int argc, char **argv) {
         else if (arg_is(a, "--selftest", NULL)) { g_wake = wake_new(); voice_init(); return selftest(); }
         else if (arg_is(a, "--keyringtest", NULL)) return selftest_keyring();
         else if (arg_is(a, "--gwtest", NULL)) { g_wake = wake_new(); voice_init(); return selftest_gateway(); }
+        else if (arg_is(a, "--imptest", NULL)) return impcurl_selftest();
+        else if (arg_is(a, "--headlogin", NULL)) return headlogin_main();
         else if (arg_is(a, "--livetest", NULL)) { g_wake = wake_new(); voice_init(); return selftest_live(); }
         else { term_puts(USAGE); return strcmp(a, "--help") && strcmp(a, "-h") ? 2 : 0; }
     }

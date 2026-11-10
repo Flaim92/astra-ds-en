@@ -41,6 +41,8 @@ void plat_lock(void *p, size_t n);              /* не в подкачку и �
 void plat_unlock(void *p, size_t n);
 void plat_wipe(void *p, size_t n);
 size_t plat_private_bytes(void);               /* частная память процесса */
+long long plat_thread_cpu_us(void);             /* время процессора текущего потока, мкс (GetThreadTimes / CLOCK_THREAD_CPUTIME_ID) */
+long long plat_now_us(void);                    /* монотонные микросекунды */
 int64_t plat_cpu_ms(void);
 void plat_trim(void);                           /* вернуть системе свободную память кучи */                      /* процессорное время процесса */
 

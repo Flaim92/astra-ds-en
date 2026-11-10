@@ -669,6 +669,7 @@ bool gb_open(bool hide) {
     if (dpy) return true;
     const char *d = getenv("DISPLAY");
     if (!d || !*d) return false;
+    XInitThreads();                              /* трансляция экрана (share_x11.c) работает с X из своего потока */
     dpy = XOpenDisplay(NULL);
     if (!dpy) return false;
     XSetErrorHandler(x_error);

@@ -1180,6 +1180,368 @@ static void t_leak(void) {
     check(m1 < m0 + (64u << 10), w);
 }
 
+/* ---------- список участников сервера (memlist.c): GUILD_MEMBER_LIST_UPDATE живого формата ---------- */
+u32 ml_test_murmur(const char *s);              /* memlist.c, только для проверок */
+static void ev(const char *t, const char *json);
+static bool wanted(const char *raw);
+const char *ml_test_list_id(void);
+size_t ml_test_bytes(void);
+/* участник в живом формате (лишние поля — как у настоящего шлюза; клиент их не хранит) */
+static void mlj_member(Buf *b, u64 id, const char *gname, const char *nick, const char *role, const char *st, const char *acts, bool bot) {
+    buf_printf(b, "{\"member\":{\"user\":{\"username\":\"user%llu\",\"public_flags\":0,\"primary_guild\":null,\"id\":\"%llu\","
+                  "\"global_name\":\"%s\",\"display_name_styles\":null,\"discriminator\":\"0\",\"collectibles\":null,\"bot\":%s,"
+                  "\"avatar_decoration_data\":null,\"avatar\":\"0123456789abcdef0123456789abcdef\"},\"roles\":[%s%s%s],"
+                  "\"premium_since\":null,\"pending\":false,\"nick\":%s%s%s,\"mute\":false,\"joined_at\":\"2021-03-04T05:06:07.123000+00:00\","
+                  "\"flags\":0,\"deaf\":false,\"communication_disabled_until\":null,\"banner\":null,\"avatar\":null,",
+               (unsigned long long)id, (unsigned long long)id, gname, bot ? "true" : "false",
+               role ? "\"" : "", role ? role : "", role ? "\"" : "", nick ? "\"" : "", nick ? nick : "null", nick ? "\"" : "");
+    buf_printf(b, "\"presence\":{\"user\":{\"id\":\"%llu\"},\"status\":\"%s\",\"processed_at_timestamp\":1762900000000,"
+                  "\"client_status\":{\"desktop\":\"%s\"},\"broadcast\":null,\"activities\":[%s]}}}",
+               (unsigned long long)id, st, st, acts ? acts : "");
+}
+static void mlj_begin(Buf *b, const char *lid, u64 gid, const char *groups) {
+    b->len = 0;
+    buf_printf(b, "{\"ops\":[");
+    (void)lid; (void)gid; (void)groups;
+}
+static void mlj_end(Buf *b, const char *lid, u64 gid, const char *groups, int members, int online) {
+    buf_printf(b, "],\"online_count\":%d,\"member_count\":%d,\"id\":\"%s\",\"guild_id\":\"%llu\",\"groups\":%s}",
+               online, members, lid, (unsigned long long)gid, groups);
+}
+static void mlj_ev(Buf *b) { ev("GUILD_MEMBER_LIST_UPDATE", b->p ? b->p : "{}"); }
+static const char ML_GROUPS[] = "[{\"id\":\"2001\",\"count\":2},{\"id\":\"online\",\"count\":3},{\"id\":\"offline\",\"count\":4}]";
+static const char ML_GAME[] = "{\"type\":0,\"timestamps\":{\"start\":1762899000000},\"session_id\":\"s1\",\"platform\":\"desktop\",\"name\":\"ELDEN RING\","
+                              "\"id\":\"8a1b2c3d4e5f6a7b\",\"created_at\":1762899000000,\"application_id\":\"1015373113155813378\"}";
+static const char ML_CUSTOM[] = "{\"type\":4,\"state\":\"сплю \\u001b[2Jдо обеда\",\"name\":\"Custom Status\",\"id\":\"custom\",\"emoji\":{\"name\":\"z\"},\"created_at\":1762899000000},"
+                                "{\"type\":0,\"name\":\"Krita\",\"created_at\":1762899000000}";
+/* SYNC [0,99] из 12 строк: «Админ» 2, «В сети» 3, «Не в сети» 4 (+ заголовки) */
+static void mlj_sync12(Buf *b, const char *lid) {
+    mlj_begin(b, lid, 2000, ML_GROUPS);
+    buf_puts(b, "{\"range\":[0,99],\"op\":\"SYNC\",\"items\":[{\"group\":{\"id\":\"2001\",\"count\":2}},");
+    mlj_member(b, 501, "Одмен", "ODMEN", "2001", "online", ML_GAME, false); buf_puts(b, ",");
+    mlj_member(b, 502, "Второй", NULL, "2001", "dnd", ML_CUSTOM, false); buf_puts(b, ",{\"group\":{\"id\":\"online\",\"count\":3}},");
+    mlj_member(b, 503, "Бот музыки", NULL, NULL, "online", "{\"type\":2,\"name\":\"Spotify\"}", true); buf_puts(b, ",");
+    mlj_member(b, 504, "\\u001b[31mЗлой\\u202eник\\u0007", NULL, "2003", "idle", NULL, false); buf_puts(b, ",");
+    mlj_member(b, 505, "ДлинноеИмяДлинноеИмяДлинноеИмяДлинноеИмяДлинноеИмяДлинноеИмяДлинноеИмяДлинноеИмя", NULL, NULL, "online", NULL, false);
+    buf_puts(b, ",{\"group\":{\"id\":\"offline\",\"count\":4}},");
+    for (int i = 0; i < 4; i++) { mlj_member(b, 506 + (u64)i, "Спящий", NULL, NULL, "offline", NULL, false); if (i < 3) buf_puts(b, ","); }
+    buf_puts(b, "]}");
+    mlj_end(b, lid, 2000, ML_GROUPS, 9, 5);
+}
+static bool utf8_whole(const char *s) {          /* обрезка не посреди символа */
+    for (const unsigned char *p = (const unsigned char *)s; *p; ) {
+        int n = *p < 0x80 ? 1 : (*p & 0xE0) == 0xC0 ? 2 : (*p & 0xF0) == 0xE0 ? 3 : (*p & 0xF8) == 0xF0 ? 4 : 0;
+        if (!n) return false;
+        for (int k = 1; k < n; k++) if ((p[k] & 0xC0) != 0x80) return false;
+        p += n;
+    }
+    return true;
+}
+static void t_memlist(void) {
+    Buf b = {0};
+    u64 keep = S.open_ch;
+    bool demo = O.demo;
+    O.demo = false;                              /* разбор — как с живого шлюза (подписка без сети никуда не уходит) */
+    check(ml_test_murmur("") == 0 && ml_test_murmur("hello") == 0x248bfa47u &&
+          ml_test_murmur("The quick brown fox jumps over the lazy dog") == 0x2e4ff723u, "список участников: murmur3_32 (id списка) по эталонным векторам");
+    ml_close();
+    ml_open(2000, 3003);                         /* #секретный: VIEW запрещён @everyone -> id по правам */
+    char want[24];
+    snprintf(want, sizeof want, "%u", (unsigned)ml_test_murmur("deny:2000"));
+    check(!strcmp(ml_test_list_id(), want), "список участников: id списка закрытого канала = murmur3(\"deny:<everyone>\")");
+    ml_open(2000, 3001);
+    check(!strcmp(ml_test_list_id(), "everyone") && ml_total(3001) == -1, "список участников: открытый канал — «everyone», до SYNC списка нет");
+    /* отсев до разбора */
+    const char *w1 = "{\"t\":\"GUILD_MEMBER_LIST_UPDATE\",\"s\":5,\"op\":0,\"d\":{\"ops\":[],\"id\":\"everyone\",\"guild_id\":\"2000\",\"groups\":[]}}";
+    const char *w2 = "{\"t\":\"GUILD_MEMBER_LIST_UPDATE\",\"s\":6,\"op\":0,\"d\":{\"ops\":[],\"id\":\"everyone\",\"guild_id\":\"20001\",\"groups\":[]}}";
+    check(wanted(w1) && !wanted(w2), "список участников: отсев — событие своего сервера принято, чужого (и похожего id) — без разбора");
+
+    /* SYNC */
+    mlj_sync12(&b, "everyone");
+    mlj_ev(&b);
+    const MemRow *r0 = ml_row(0), *r1 = ml_row(1), *r2 = ml_row(2), *r3 = ml_row(3), *r4 = ml_row(4), *r5 = ml_row(5), *r6 = ml_row(6);
+    check(ml_total(3001) == 12 && ml_online() == 5 && ml_member_count() == 9 && ml_rows_held() == 9,
+          "список участников: SYNC живого формата — 12 строк, 9 участников в памяти, online/member_count");
+    r0 = ml_row(0);
+    check(r0 && r0->kind == MLR_GROUP && r0->id == 2001 && r0->count == 2 && !strcmp(r0->name, "Админ"),
+          "список участников: заголовок роли (hoist) — имя из ролей сервера и число");
+    r1 = ml_row(1);
+    check(r1 && r1->kind == MLR_MEMBER && r1->id == 501 && !strcmp(r1->name, "ODMEN") && r1->color == 15548997 &&
+          r1->status == PS_ONLINE && r1->act == MLA_PLAY && !strcmp(r1->text, "ELDEN RING") && r1->avatar[0],
+          "список участников: ник главнее имени, цвет роли, в сети, игра, аватар");
+    r2 = ml_row(2);
+    check(r2 && r2->status == PS_DND && r2->act == MLA_CUSTOM && !strncmp(r2->text, "сплю ", strlen("сплю ")) && !dirty(r2->text) && !strchr(r2->text, '\x1b'),
+          "список участников: свой статус главнее игры, без управляющих последовательностей");
+    r3 = ml_row(3);
+    check(r3 && r3->kind == MLR_GROUP && r3->id == ML_G_ONLINE && r3->count == 3 && !r3->name[0], "список участников: группа «В сети»");
+    r4 = ml_row(4);
+    check(r4 && r4->bot && r4->act == MLA_LISTEN && !strcmp(r4->text, "Spotify") && r4->color == 0, "список участников: бот, «Слушает Spotify», без роли — обычный цвет");
+    r5 = ml_row(5);
+    check(r5 && !dirty(r5->name) && strstr(r5->name, "Злой") && r5->status == PS_IDLE && r5->color == 5763719, "список участников: имя очищено (ESC, BiDi, BEL), не активен");
+    r6 = ml_row(6);
+    check(r6 && strlen(r6->name) < sizeof r6->name && utf8_whole(r6->name), "список участников: длинное имя обрезано по границе символа");
+    const MemRow *r7 = ml_row(7), *r8 = ml_row(8);
+    check(r7 && r7->kind == MLR_GROUP && r7->id == ML_G_OFFLINE && r8 && r8->status == PS_OFFLINE && !ml_row(12) && !ml_row(-1),
+          "список участников: «Не в сети», границы индекса (-1, total)");
+    check(!strcmp(user_name(501), "ODMEN") && user_avatar(501), "список участников: имя и аватар для карточки — из видимого списка");
+
+    /* INSERT: новый в «В сети» на место 4, всё ниже сдвигается */
+    static const char G2[] = "[{\"id\":\"2001\",\"count\":2},{\"id\":\"online\",\"count\":4},{\"id\":\"offline\",\"count\":4}]";
+    mlj_begin(&b, "everyone", 2000, G2);
+    buf_puts(&b, "{\"op\":\"INSERT\",\"index\":4,\"item\":");
+    mlj_member(&b, 520, "Новенький", NULL, NULL, "online", NULL, false);
+    buf_puts(&b, "}");
+    mlj_end(&b, "everyone", 2000, G2, 10, 6);
+    mlj_ev(&b);
+    const MemRow *a4 = ml_row(4), *a5 = ml_row(5), *a8 = ml_row(8);
+    check(ml_total(3001) == 13 && a4 && a4->id == 520 && (a5 = ml_row(5)) && a5->id == 503 && (a8 = ml_row(8)) && a8->kind == MLR_GROUP && a8->id == ML_G_OFFLINE,
+          "список участников: INSERT — вставлен, строки ниже сдвинулись, заголовок «Не в сети» на новом месте");
+    /* UPDATE: статус и игра */
+    mlj_begin(&b, "everyone", 2000, G2);
+    buf_puts(&b, "{\"op\":\"UPDATE\",\"index\":2,\"item\":");
+    mlj_member(&b, 502, "Второй", NULL, "2001", "online", "{\"type\":1,\"name\":\"Twitch\"}", false);
+    buf_puts(&b, "}");
+    mlj_end(&b, "everyone", 2000, G2, 10, 6);
+    mlj_ev(&b);
+    const MemRow *u2 = ml_row(2);
+    check(u2 && u2->id == 502 && u2->status == PS_ONLINE && u2->act == MLA_STREAM && !strcmp(u2->text, "Twitch") && ml_rows_held() == 10,
+          "список участников: UPDATE — статус и трансляция, строк не прибавилось");
+    /* DELETE: убрать 4 (Новенький), ниже — вверх */
+    mlj_begin(&b, "everyone", 2000, ML_GROUPS);
+    buf_puts(&b, "{\"op\":\"DELETE\",\"index\":4}");
+    mlj_end(&b, "everyone", 2000, ML_GROUPS, 9, 5);
+    mlj_ev(&b);
+    const MemRow *d4 = ml_row(4);
+    check(ml_total(3001) == 12 && d4 && d4->id == 503 && ml_rows_held() == 9, "список участников: DELETE — строка убрана, нижние поднялись");
+    /* INVALIDATE */
+    mlj_begin(&b, "everyone", 2000, ML_GROUPS);
+    buf_puts(&b, "{\"op\":\"INVALIDATE\",\"range\":[0,99]}");
+    mlj_end(&b, "everyone", 2000, ML_GROUPS, 9, 5);
+    mlj_ev(&b);
+    const MemRow *i0 = ml_row(0);
+    check(ml_rows_held() == 0 && !ml_row(1) && i0 && i0->kind == MLR_GROUP && ml_total(3001) == 12,
+          "список участников: INVALIDATE — строки окна убраны (заглушки), заголовки по groups остаются");
+
+    /* чужое: другой сервер, другой id списка, не-SYNC чужого списка */
+    mlj_sync12(&b, "everyone");
+    mlj_ev(&b);
+    int held = ml_rows_held();
+    mlj_sync12(&b, "123456");                    /* другой список того же сервера (не ожидаемый) — мимо */
+    mlj_ev(&b);
+    mlj_begin(&b, "everyone", 2000, ML_GROUPS);
+    buf_puts(&b, "{\"op\":\"DELETE\",\"index\":1}");
+    mlj_end(&b, "everyone", 2100, ML_GROUPS, 9, 5);   /* чужой сервер */
+    mlj_ev(&b);
+    check(held == 9 && ml_rows_held() == 9 && ml_row(1) && ml_row(1)->id == 501, "список участников: события чужого сервера и чужого списка не трогают данные");
+
+    /* границы: окно вне подписки, мусорные индексы и диапазоны, лишние элементы SYNC */
+    const char *bad[] = {
+        "{\"op\":\"SYNC\",\"range\":[100,199],\"items\":[{\"member\":{\"user\":{\"id\":\"900\",\"username\":\"x\"}}}]}",
+        "{\"op\":\"INSERT\",\"index\":-1,\"item\":{\"member\":{\"user\":{\"id\":\"901\",\"username\":\"x\"}}}}",
+        "{\"op\":\"INSERT\",\"index\":1e300,\"item\":{\"member\":{\"user\":{\"id\":\"902\",\"username\":\"x\"}}}}",
+        "{\"op\":\"UPDATE\",\"index\":\"3\",\"item\":{\"member\":{\"user\":{\"id\":\"903\",\"username\":\"x\"}}}}",
+        "{\"op\":\"SYNC\",\"range\":[5,2],\"items\":[]}",
+        "{\"op\":\"SYNC\",\"range\":[0],\"items\":[]}",
+        "{\"op\":\"SYNC\",\"range\":[0,99999],\"items\":[]}",
+        "{\"op\":\"INVALIDATE\",\"range\":\"0-99\"}",
+        "{\"op\":\"DELETE\"}",
+        "{\"op\":\"НЕЧТО\",\"index\":1}",
+        "{\"op\":7}",
+        "[]", "null", "\"SYNC\"",
+    };
+    for (size_t k = 0; k < sizeof bad / sizeof *bad; k++) {
+        mlj_begin(&b, "everyone", 2000, ML_GROUPS);
+        buf_puts(&b, bad[k]);
+        mlj_end(&b, "everyone", 2000, ML_GROUPS, 9, 5);
+        mlj_ev(&b);
+    }
+    check(ml_rows_held() == 9 && ml_row(1) && ml_row(1)->id == 501 && ml_total(3001) == 12,
+          "список участников: окно вне подписки, индексы -1/1e300/строкой, кривые диапазоны и операции — без изменений");
+    /* SYNC [0,99] с 400 элементами и у части нет user — в памяти не больше 100, мусорные пропущены */
+    mlj_begin(&b, "everyone", 2000, "[{\"id\":\"online\",\"count\":399}]");
+    buf_puts(&b, "{\"op\":\"SYNC\",\"range\":[0,99],\"items\":[{\"group\":{\"id\":\"online\",\"count\":399}}");
+    for (int i = 1; i < 400; i++) {
+        buf_puts(&b, ",");
+        if (i % 7 == 0) buf_puts(&b, "{\"member\":{\"roles\":[]}}");
+        else if (i % 11 == 0) buf_puts(&b, "{\"member\":{\"user\":{\"username\":\"без id\"}}}");
+        else if (i % 13 == 0) buf_puts(&b, "42");
+        else mlj_member(&b, 3000 + (u64)i, "Масса", NULL, NULL, "online", ML_GAME, false);
+    }
+    buf_puts(&b, "]}");
+    mlj_end(&b, "everyone", 2000, "[{\"id\":\"online\",\"count\":399}]", 399, 399);
+    mlj_ev(&b);
+    int expect = 0;
+    for (int i = 1; i < 100; i++) if (i % 7 && i % 11 && i % 13) expect++;
+    check(ml_total(3001) == 400 && ml_rows_held() == expect && !ml_row(7) && ml_row(1) && ml_row(1)->id == 3001,
+          "список участников: SYNC с 400 элементами — хранится только окно [0,99], элементы без user пропущены");
+    /* мусорный JSON целиком */
+    const char *junk[] = {
+        "{}", "[]", "{\"guild_id\":\"2000\"}", "{\"guild_id\":\"2000\",\"id\":\"everyone\",\"ops\":{}}",
+        "{\"guild_id\":\"2000\",\"id\":7,\"ops\":[]}", "{\"guild_id\":\"2000\",\"id\":\"everyone\",\"ops\":[],\"groups\":{\"a\":1}}",
+        "{\"guild_id\":\"2000\",\"id\":\"everyone\",\"ops\":[],\"groups\":[{\"id\":\"online\",\"count\":-5},{\"id\":null},{\"id\":\"0\",\"count\":3},7]}",
+        "{\"guild_id\":\"2000\",\"id\":\"everyone\",\"ops\":[],\"groups\":[{\"id\":\"online\",\"count\":1e300}]}",
+        "{\"guild_id\":\"2000\",\"id\":\"ooooooooooooooooooooooooooooooooooooooooooooooooooooo\",\"ops\":[{\"op\":\"SYNC\",\"range\":[0,99],\"items\":[]}]}",
+    };
+    for (size_t k = 0; k < sizeof junk / sizeof *junk; k++) ev("GUILD_MEMBER_LIST_UPDATE", junk[k]);
+    check(ml_total(3001) >= 0 && ml_total(3001) <= 1000000, "список участников: мусорный JSON (не объект, ops не массив, кривые groups) — без падения");
+    /* фаззинг: порча байтов живого SYNC */
+    mlj_sync12(&b, "everyone");
+    Buf f = {0};
+    u32 seed = 12345;
+    for (int it = 0; it < 3000; it++) {
+        f.len = 0;
+        buf_put(&f, b.p, b.len);
+        for (int k = 0; k < 4; k++) {
+            seed = seed * 1103515245u + 12345u;
+            size_t pos = (seed >> 8) % f.len;
+            static const char FZ[] = "{}[]\",:0-9ae\\x";
+            f.p[pos] = FZ[(seed >> 3) % (sizeof FZ - 1)];
+        }
+        ev("GUILD_MEMBER_LIST_UPDATE", f.p);
+    }
+    buf_free(&f);
+    check(ml_rows_held() <= ML_WIN * 3, "список участников: 3000 испорченных SYNC — без падения, строк не больше трёх окон");
+
+    /* прокрутка: окна подписки и что хранится */
+    mlj_begin(&b, "everyone", 2000, "[{\"id\":\"online\",\"count\":600}]");
+    buf_puts(&b, "{\"op\":\"SYNC\",\"range\":[0,99],\"items\":[]}");
+    mlj_end(&b, "everyone", 2000, "[{\"id\":\"online\",\"count\":600}]", 600, 600);
+    mlj_ev(&b);
+    ml_view(150, 170);                           /* окна {0, 1} */
+    mlj_begin(&b, "everyone", 2000, "[{\"id\":\"online\",\"count\":600}]");
+    buf_puts(&b, "{\"op\":\"SYNC\",\"range\":[100,199],\"items\":[");
+    for (int i = 0; i < 100; i++) { if (i) buf_puts(&b, ","); mlj_member(&b, 7000 + (u64)i, "Окно", NULL, NULL, "online", NULL, false); }
+    buf_puts(&b, "]}");
+    mlj_end(&b, "everyone", 2000, "[{\"id\":\"online\",\"count\":600}]", 600, 600);
+    mlj_ev(&b);
+    int h1 = ml_rows_held();
+    const MemRow *w150 = ml_row(150);
+    bool got = w150 && w150->id == 7050;
+    ml_view(0, 20);                              /* окно 1 больше не нужно — его строки уходят */
+    int h2 = ml_rows_held();
+    ml_view(250, 400);                           /* больше двух окон вокруг видимого не берём: {0, 2, 3} */
+    mlj_begin(&b, "everyone", 2000, "[{\"id\":\"online\",\"count\":600}]");
+    buf_puts(&b, "{\"op\":\"SYNC\",\"range\":[400,499],\"items\":[");
+    mlj_member(&b, 7400, "Далеко", NULL, NULL, "online", NULL, false);
+    buf_puts(&b, "]},{\"op\":\"SYNC\",\"range\":[300,399],\"items\":[");
+    mlj_member(&b, 7300, "Рядом", NULL, NULL, "online", NULL, false);
+    buf_puts(&b, "]}");
+    mlj_end(&b, "everyone", 2000, "[{\"id\":\"online\",\"count\":600}]", 600, 600);
+    mlj_ev(&b);
+    const MemRow *w300 = ml_row(300);
+    check(h1 == 100 && got && h2 == 0 && w300 && w300->id == 7300 && !ml_row(400),
+          "список участников: прокрутка — окна {0,1} -> {0} -> {0,2,3}; строки вне окон не хранятся");
+
+    /* смена канала: тот же список сохраняется, другой — затирается; ЛС — список закрыт */
+    mlj_sync12(&b, "everyone");
+    mlj_ev(&b);
+    int hk = ml_rows_held();
+    ml_open(2000, 3002);                         /* #новости — тоже «everyone» */
+    bool same = ml_total(3002) == 12 && hk >= 9 && ml_rows_held() == hk && ml_total(3001) == -1;
+    ml_open(2000, 3003);                         /* #секретный — другой список */
+    bool other = ml_rows_held() == 0 && ml_total(3003) == -1 && !ml_row(1);
+    mlj_sync12(&b, ml_test_list_id());
+    mlj_ev(&b);
+    bool other2 = ml_total(3003) == 12 && ml_rows_held() == 9;
+    ml_open(0, 4000);                            /* ЛС */
+    bool dm = ml_total(3003) == -1 && ml_rows_held() == 0 && !wanted(w1);
+    check(same && other && other2 && dm, "список участников: смена канала — тот же список остаётся, другой затирается, в ЛС списка нет");
+    ml_open(2000, 3001);
+    mlj_sync12(&b, "everyone");
+    mlj_ev(&b);
+    ml_open(2100, 3101);                         /* другой сервер */
+    check(ml_rows_held() == 0 && ml_total(3001) == -1 && ml_total(3101) == -1, "список участников: смена сервера — всё освобождено");
+
+    /* память: три полных окна по 100 участников с длинными именами и статусами; затем тысячи событий */
+    ml_close();
+    size_t m0 = plat_private_bytes();
+    ml_open(2000, 3001);
+    ml_view(150, 210);                           /* окна {0, 1, 2} */
+    static const char G600[] = "[{\"id\":\"2001\",\"count\":2},{\"id\":\"online\",\"count\":300},{\"id\":\"offline\",\"count\":296}]";
+    for (int c = 0; c < 3; c++) {
+        mlj_begin(&b, "everyone", 2000, G600);
+        buf_printf(&b, "{\"op\":\"SYNC\",\"range\":[%d,%d],\"items\":[", c * 100, c * 100 + 99);
+        for (int i = 0; i < 100; i++) {
+            if (i) buf_puts(&b, ",");
+            mlj_member(&b, 10000 + (u64)(c * 100 + i), "ОченьДлинноеИмяУчастникаСервера", "НикНикНикНикНикНикНикНикНик", "2001", "online",
+                       "{\"type\":4,\"state\":\"длинный-длинный свой статус участника сервера, сто двадцать восемь символов\"}", false);
+        }
+        buf_puts(&b, "]}");
+        mlj_end(&b, "everyone", 2000, G600, 598, 302);
+        mlj_ev(&b);
+    }
+    size_t m1 = plat_private_bytes();
+    int full = ml_rows_held();
+    i64 t0 = now_ms();
+    size_t mw = 0;
+    for (int it = 0; it < 6000; it++) {
+        if (it == 1000) mw = plat_private_bytes();
+        int idx = 1 + (int)((u32)it * 2654435761u % 290);
+        mlj_begin(&b, "everyone", 2000, G600);
+        switch (it % 4) {
+        case 0: buf_printf(&b, "{\"op\":\"INSERT\",\"index\":%d,\"item\":", idx); mlj_member(&b, 50000 + (u64)it, "Пришёл", NULL, NULL, "online", ML_GAME, false); buf_puts(&b, "}"); break;
+        case 1: buf_printf(&b, "{\"op\":\"DELETE\",\"index\":%d}", idx); break;
+        case 2: buf_printf(&b, "{\"op\":\"UPDATE\",\"index\":%d,\"item\":", idx); mlj_member(&b, 60000 + (u64)it, "Обновился", NULL, "2001", "idle", ML_CUSTOM, false); buf_puts(&b, "}"); break;
+        default:
+            if (it % 400 == 3) { ml_open(2000, 3003); ml_open(2000, 3001); ml_view(150, 210); }   /* смена канала туда и обратно */
+            buf_printf(&b, "{\"op\":\"SYNC\",\"range\":[100,199],\"items\":[");
+            for (int i = 0; i < 100; i++) { if (i) buf_puts(&b, ","); mlj_member(&b, 20000 + (u64)i, "Снова", NULL, NULL, "online", NULL, false); }
+            buf_puts(&b, "]}");
+            break;
+        }
+        mlj_end(&b, "everyone", 2000, G600, 598, 302);
+        mlj_ev(&b);
+    }
+    size_t m2 = plat_private_bytes();
+    char w[260];
+    size_t mb = ml_test_bytes();
+    snprintf(w, sizeof w, "список участников: 300 строк (3 окна) — %.1f КБ модуля, частная +%.0f КБ; 6000 событий за %lld мс: %.0f -> %.0f КБ (рост после 1000)",
+             mb / 1024.0, ((double)m1 - (double)m0) / 1024.0, (long long)(now_ms() - t0), mw / 1024.0, m2 / 1024.0);
+    check(full == 300 && mb < (96u << 10) && m1 < m0 + (256u << 10) && m2 < mw + (64u << 10) && ml_rows_held() <= 300, w);
+    ml_close();
+    check(ml_rows_held() == 0 && ml_total(3001) == -1 && !strcmp(user_name(10001), "?") && !user_avatar(10001), "список участников: ml_close — строк нет, имена/аватары списка недоступны");
+    buf_free(&b);
+
+    /* демо: синтетический список через store_tick, рисуется справа; колесо переподписывает окна */
+    O.demo = true;
+    i64 skew0 = g_clock_skew;
+    ui_open_channel(3001);
+    S.open_ch = 3001;
+    ml_open(2000, 3001);
+    g_clock_skew += 1000; store_tick();
+    const MemRow *g0 = ml_row(0);
+    check(ml_total(3001) == 559 && g0 && g0->kind == MLR_GROUP && g0->id == 2001 && ml_online() == 15,
+          "список участников (демо): Админ, Модератор, В сети 11, Не в сети 540");
+    check(on_screen("Админ - 2") && on_screen("В сети - 11") && on_screen("ELDEN RING") && on_screen("БОТ") && !on_screen("В ЧАТЕ - "),
+          "список участников (демо): справа группы, игра, метка БОТ; «В ЧАТЕ» больше нет");
+    {
+        Scr s;
+        scr_take(&s, 120, 34);
+        bool ok = scr_deco_ok(&s, "участники") && scr_layout_ok(&s, true, true, "участники");
+        scr_free(&s);
+        check(ok, "список участников (демо): ASCII-оформление и линии колонок ровные");
+    }
+    int x0 = 0, y0 = 0;
+    cur_take();
+    bool fnd = scr_find_ex(&cur, "В сети - 11", &x0, &y0, false);
+    for (int k = 0; k < 60 && fnd; k++) mouse_at(5, x0, y0 < 20 ? y0 : 20);   /* колесо вниз над списком */
+    cur_take();
+    g_clock_skew += 1000; store_tick();
+    bool down = fnd && ml_rows_held() > 100 && on_screen("Не в сети - 540") == false;
+    for (int k = 0; k < 200 && fnd; k++) mouse_at(4, x0, 20);   /* обратно наверх */
+    cur_take();
+    g_clock_skew += 1000; store_tick();
+    check(down && on_screen("Админ - 2") && ml_rows_held() <= 300, "список участников (демо): колесо листает, окна подгружаются и отпускаются");
+    /* щелчок по участнику — карточка */
+    bool card = click("ELDEN RING") && profile_state() && profile_state()->id == 1004;
+    key(K_ESC, 0);
+    check(card, "список участников (демо): щелчок по участнику открывает карточку");
+    ml_close();
+    g_clock_skew = skew0;
+    O.demo = demo;
+    S.open_ch = keep;
+}
+
 /* ======================= запуск ======================= */
 /* Данные и разбор: права, голосовые состояния, отсев событий, очистка, разметка, отправка. */
 static void t_data(void) {
@@ -3395,6 +3757,7 @@ int selftest(void) {
     term_puts("\n  пакет В (часть 2):\n");   t_packv2();
     term_puts("\n  слеш-команды и модерация:\n"); t_slash_mod();
     term_puts("\n  файл со спойлером:\n");  t_send_ex();
+    term_puts("\n  список участников сервера:\n"); t_memlist();
     term_puts("\n  автообновление:\n");     update_selftest(check);
     demo_en_selftest(check);
 #ifdef ASTRA_VIDEO

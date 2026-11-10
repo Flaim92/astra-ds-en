@@ -1507,14 +1507,28 @@ i64 gw_next_wake(void) {
     return INT64_MAX;
 }
 
-void gw_subscribe(u64 guild, u64 channel) {
-    if (!guild || !channel || G.st != GW_LIVE) return;
-    char b[320];
+void gw_subscribe_ranges(u64 guild, u64 channel, const int *chunk, int n) {
+    if (!guild || !channel || G.st != GW_LIVE || !chunk || n < 1) return;
+    if (n > 3) n = 3;
+    char r[128], b[400];
+    size_t o = 0;
+    r[o++] = '[';
+    for (int i = 0; i < n; i++) {
+        int c = chunk[i] < 0 ? 0 : chunk[i] > 9999 ? 9999 : chunk[i];
+        o += (size_t)snprintf(r + o, sizeof r - o, "%s[%d,%d]", i ? "," : "", c * ML_WIN, c * ML_WIN + ML_WIN - 1);
+        if (o >= sizeof r - 2) return;
+    }
+    r[o++] = ']';
+    r[o] = 0;
     snprintf(b, sizeof b,
         "{\"op\":14,\"d\":{\"guild_id\":\"%llu\",\"typing\":true,\"threads\":false,\"activities\":false,"
-        "\"members\":[],\"channels\":{\"%llu\":[[0,99]]},\"thread_member_lists\":[]}}",
-        (unsigned long long)guild, (unsigned long long)channel);
+        "\"members\":[],\"channels\":{\"%llu\":%s},\"thread_member_lists\":[]}}",
+        (unsigned long long)guild, (unsigned long long)channel, r);
     gw_send(b);
+}
+void gw_subscribe(u64 guild, u64 channel) {
+    int z = 0;
+    gw_subscribe_ranges(guild, channel, &z, 1);
 }
 
 #ifdef ASTRA_VIDEO

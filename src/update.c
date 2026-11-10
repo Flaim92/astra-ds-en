@@ -1,6 +1,7 @@
 /* Автообновление (SECURITY.md «Автообновление», п. 1–14).
- * Проверка: GET api.github.com/repos/Flaim92/astra-ds/releases/latest (только метаданные, решений по ним нет),
- * затем подписанный манифест manifest-<продукт>-<платформа>.json и его подпись .sig (ed25519, 64 Б) — проверка подписи
+ * Проверка: GET api.github.com/repos/Flaim92/astra-ds/releases/latest (только описание для показа, решений по нему нет),
+ * затем из служебного релиза UP_TAG («updates», не «последний»: в обычных релизах только архивы и суммы, с 0.2.6)
+ * подписанный манифест manifest-<продукт>-<платформа>.json и его подпись .sig (ed25519, 64 Б) — проверка подписи
  * встроенным открытым ключом ДО использования полей; версия строго больше текущей; продукт и платформа совпадают.
  * Загрузка и замена — только после явного «Обновить» (update_apply): временный файл в каталоге exe (CREATE_NEW /
  * O_EXCL|O_NOFOLLOW, 0700), SHA-256 по ходу записи и повторно из того же дескриптора, затем замена (Windows —
@@ -84,6 +85,7 @@ static PlatThread *up_thr;
 static atomic_bool up_done;
 static bool up_auto = true;
 static char up_proxy[300];
+#define UP_TAG "updates"                         /* служебный релиз с манифестами, подписями и файлами без архива */
 static char up_tag[48], up_file[72], up_sha[65];
 static long long up_size;
 
@@ -321,6 +323,7 @@ static int up_check_thread(void *arg) {
         json_done();
         buf_free(&js);
         if (!tag_ok) { up_set(UP_FAILED, ui_tr("неверный ответ GitHub")); goto done; }
+        snprintf(up_tag, sizeof up_tag, "%s", UP_TAG);   /* файлы обновления — только из служебного релиза */
     }
     {
         char url[256];

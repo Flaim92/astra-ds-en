@@ -100,8 +100,8 @@ static const char READY[] =
     "\"merged_presences\":{\"friends\":[{\"user_id\":\"1001\",\"status\":\"online\"},{\"user_id\":\"1002\",\"status\":\"idle\"},"
     "{\"user_id\":\"1004\",\"status\":\"dnd\"},{\"user_id\":\"1006\",\"status\":\"online\"},{\"user_id\":\"1009\",\"status\":\"online\"}],\"guilds\":[]},"
     "\"guilds\":[{\"id\":\"2000\",\"properties\":{\"name\":\"Уютный уголок\",\"owner_id\":\"1001\",\"icon\":\"0123456789abcdef0123456789abcdef\"},"
-    "\"roles\":[{\"id\":\"2000\",\"permissions\":\"274881170497\"},{\"id\":\"2001\",\"permissions\":\"8\",\"color\":15548997,\"position\":3},"
-    "{\"id\":\"2002\",\"permissions\":\"0\",\"color\":3447003,\"position\":1},{\"id\":\"2003\",\"permissions\":\"0\",\"color\":5763719,\"position\":2},{\"id\":\"2004\",\"permissions\":\"268435505\",\"position\":4}],"
+    "\"roles\":[{\"id\":\"2000\",\"permissions\":\"274881170497\"},{\"id\":\"2001\",\"name\":\"Админ\",\"hoist\":true,\"permissions\":\"8\",\"color\":15548997,\"position\":3},"
+    "{\"id\":\"2002\",\"name\":\"Модератор\",\"hoist\":true,\"permissions\":\"0\",\"color\":3447003,\"position\":1},{\"id\":\"2003\",\"name\":\"Участник\",\"permissions\":\"0\",\"color\":5763719,\"position\":2},{\"id\":\"2004\",\"permissions\":\"268435505\",\"position\":4}],"
     "\"channels\":["
     "{\"id\":\"3000\",\"type\":4,\"name\":\"Текстовые каналы\",\"position\":0},"
     "{\"id\":\"3001\",\"type\":0,\"name\":\"general\",\"position\":0,\"parent_id\":\"3000\",\"last_message_id\":\"9005\"},"
@@ -560,4 +560,88 @@ static void put_now_and_close(Buf *bp) {
     buf_printf(&b, ",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02d+00:00\"}}", (int)y, (int)m, (int)d,
                (int)(sod / 3600), (int)(sod / 60 % 60), (int)(sod % 60));
     *bp = b;
+}
+
+/* ---------- список участников сервера (memlist.c): синтетический GUILD_MEMBER_LIST_UPDATE ----------
+ * «Уютный уголок» (2000): роли Админ и Модератор показаны отдельно, «В сети» 11, «Не в сети» 540 —
+ * больше одного окна по 100, чтобы прокрутка переподписывала окна. Прочие серверы — маленький список. */
+typedef struct { u64 id; const char *name; u64 role; const char *st; int at; const char *act; bool bot; } DemoMem;
+static const DemoMem DM_TOP[] = {
+    { 1001, "Алиса", 2001, "online", 0, "Krita", false },
+    { 1004, "Ночной Филин", 2001, "dnd", 0, "ELDEN RING", false },
+    { 1002, "Боб", 2002, "idle", 4, "сплю до обеда", false },
+    { 1006, "Сонный Кот", 2002, "online", 2, "Spotify", false },
+    { 1000, "Вы", 2004, "online", 4, "пишу клиент Discord на C", false },
+    { 1100, "MemeBot", 0, "online", 0, "!play", true },
+    { 1005, "Мира", 2003, "online", 0, "Visual Studio Code", false },
+    { 1003, "\\u001b[31mМэллори\\u202e", 0, "dnd", -1, NULL, false },
+};
+static void dm_synth_name(int i, char *out, size_t n) {
+    static const char *const SY[] = { "ka", "ri", "mo", "ta", "ne", "vi", "lo", "sa", "du", "ze", "po", "li", "an", "or" };
+    unsigned h = (unsigned)i * 2654435761u;
+    snprintf(out, n, "%s%s%s%s", SY[h % 14], SY[h / 14 % 14], i % 3 ? SY[h / 196 % 14] : "", i % 5 ? "" : "_42");
+    if (out[0] >= 'a' && out[0] <= 'z') out[0] = (char)(out[0] - 32);
+}
+static void dm_member(Buf *b, const DemoMem *m) {
+    buf_printf(b, "{\"member\":{\"user\":{\"id\":\"%llu\",\"username\":\"u%llu\",\"global_name\":\"%s\"%s},\"roles\":[",
+               (unsigned long long)m->id, (unsigned long long)m->id, m->name, m->bot ? ",\"bot\":true" : "");
+    if (m->role) buf_printf(b, "\"%llu\"", (unsigned long long)m->role);
+    buf_printf(b, "],\"nick\":null,\"presence\":{\"user\":{\"id\":\"%llu\"},\"status\":\"%s\",\"client_status\":{\"desktop\":\"%s\"},\"activities\":[",
+               (unsigned long long)m->id, m->st, m->st);
+    if (m->at == 4) buf_printf(b, "{\"type\":4,\"name\":\"Custom Status\",\"state\":\"%s\"}", m->act);
+    else if (m->at >= 0 && m->act) buf_printf(b, "{\"type\":%d,\"name\":\"%s\"}", m->at, m->act);
+    buf_puts(b, "]}}}");
+}
+void demo_memlist(u64 gid, const char *list_id, const int *chunk, int n) {
+    bool big = gid == 2000;
+    /* группы: id, сколько */
+    const char *gn[4]; int gc[4], ng = 0;
+    if (big) { gn[0] = "2001"; gc[0] = 2; gn[1] = "2002"; gc[1] = 2; gn[2] = "online"; gc[2] = 11; gn[3] = "offline"; gc[3] = 540; ng = 4; }
+    else { gn[0] = "online"; gc[0] = 1; gn[1] = "offline"; gc[1] = 3; ng = 2; }
+    int total = 0, online = 0, members = 0;
+    for (int k = 0; k < ng; k++) { total += gc[k] + 1; members += gc[k]; if (strcmp(gn[k], "offline")) online += gc[k]; }
+    Buf b = {0};
+    buf_printf(&b, "{\"id\":\"%s\",\"guild_id\":\"%llu\",\"member_count\":%d,\"online_count\":%d,\"groups\":[",
+               list_id ? list_id : "everyone", (unsigned long long)gid, members, online);
+    for (int k = 0; k < ng; k++) buf_printf(&b, "%s{\"id\":\"%s\",\"count\":%d}", k ? "," : "", gn[k], gc[k]);
+    buf_puts(&b, "],\"ops\":[");
+    for (int c = 0; c < n && c < 3; c++) {
+        int a = chunk[c] * ML_WIN, z = a + ML_WIN - 1;
+        buf_printf(&b, "%s{\"op\":\"SYNC\",\"range\":[%d,%d],\"items\":[", c ? "," : "", a, z);
+        for (int idx = a; idx <= z && idx < total; idx++) {
+            if (idx > a) buf_puts(&b, ",");
+            /* где строка: заголовок группы k или j-й участник группы k */
+            int pos = 0, k = 0, j = -1;
+            for (k = 0; k < ng; k++) { if (idx == pos) break; if (idx <= pos + gc[k]) { j = idx - pos - 1; break; } pos += gc[k] + 1; }
+            if (k >= ng) break;
+            if (j < 0) { buf_printf(&b, "{\"group\":{\"id\":\"%s\",\"count\":%d}}", gn[k], gc[k]); continue; }
+            /* участник: в большом списке первые 8 из DM_TOP (роли по 2, затем «в сети»), остальные — синтетические */
+            int flat = 0;
+            for (int q = 0; q < k; q++) flat += gc[q];
+            flat += j;
+            DemoMem m = { 0 };
+            char nm[40];
+            if (big && flat < (int)(sizeof DM_TOP / sizeof *DM_TOP)) m = DM_TOP[flat];
+            else if (!big && k == 0) m = DM_TOP[4];
+            else {
+                static const char *const GAMES[] = { "Dota 2", "Minecraft", "Counter-Strike 2", NULL };
+                static const char *const ST[] = { "online", "idle", "dnd" };
+                dm_synth_name(flat, nm, sizeof nm);
+                m.id = 61000 + (u64)flat;
+                m.name = nm;
+                bool on = strcmp(gn[k], "offline");
+                m.st = on ? ST[flat % 3] : "offline";
+                m.at = on && GAMES[flat % 4] ? 0 : -1;
+                m.act = on ? GAMES[flat % 4] : NULL;
+                m.role = on && flat % 4 == 1 ? 2003 : 0;
+            }
+            dm_member(&b, &m);
+        }
+        buf_puts(&b, "]}");
+    }
+    buf_puts(&b, "]}");
+    cJSON *j = json_parse(b.p, b.len);
+    if (j) store_event("GUILD_MEMBER_LIST_UPDATE", j);
+    json_done();
+    buf_free(&b);
 }

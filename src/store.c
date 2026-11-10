@@ -20,6 +20,17 @@ static i64 demo_slow_at;
 static u64 demo_del_th;                         /* демо «!delthread» в ветке: через 3 с — THREAD_DELETE */
 static i64 demo_del_at;
 static i64 cdn_next_wake(void);
+/* список участников сервера (memlist.c, включён в конце файла) */
+static void ml_event(const cJSON *d);
+static bool ml_want_raw(const char *raw, size_t len);
+static void ml_tick(i64 now);
+static i64 ml_next_wake(void);
+static void ml_resub(void);
+static void ml_guild_gone(u64 gid);
+static const char *ml_avatar(u64 uid);
+static const char *ml_name(u64 uid);
+static void role_name_set(Role *ro, const cJSON *r);
+static void utf8_trunc(char *s, size_t max);
 
 #define P_ADMIN   (1ULL << 3)
 #define P_VIEW    (1ULL << 10)
@@ -31,7 +42,10 @@ static i64 cdn_next_wake(void);
 
 /* ---------- освобождение ---------- */
 static void chan_free(Channel *c) { free(c->name); free(c->topic); free(c->recipients); free(c->ow); }
-static void guild_free(Guild *g) { free(g->name); free(g->roles); free(g->my_roles); }
+static void guild_free(Guild *g) {
+    for (int i = 0; i < g->nroles; i++) free(g->roles[i].name);
+    free(g->name); free(g->roles); free(g->my_roles);
+}
 static void embeds_free(Message *m);
 static void poll_free(Poll *p);
 static void embeds_parse(Message *m, const cJSON *arr);
@@ -91,6 +105,7 @@ void store_reset(void) {
     free(S.me_name); free(S.session_id);
     free(S.rels);
     msgs_clear();
+    ml_close();
     search_close();
     pins_close();
     mentions_close();
@@ -151,12 +166,14 @@ u32 user_color(u64 gid, u64 id) {
 }
 const char *user_avatar(u64 id) {
     User *u = user_find(id);
-    return u && u->avatar[0] ? u->avatar : NULL;
+    return u && u->avatar[0] ? u->avatar : ml_avatar(id);    /* нет в таблице — из видимого списка участников */
 }
 const char *user_name(u64 id) {
     if (id == S.me_id && S.me_name) return S.me_name;
     User *u = user_find(id);
-    return u ? u->name : "?";
+    if (u) return u->name;
+    const char *m = ml_name(id);
+    return m ? m : "?";
 }
 
 Guild *guild_find(u64 id) {
@@ -447,6 +464,7 @@ static void guild_load(const cJSON *go, const cJSON *my_member) {
             g->roles[g->nroles].perms = perm_str(r, "permissions");
             g->roles[g->nroles].color = (u32)jint(r, "color", 0) & 0xFFFFFFu;
             g->roles[g->nroles].pos = (int)jint(r, "position", 0);
+            role_name_set(&g->roles[g->nroles], r);
             g->nroles++;
         }
     }
@@ -560,17 +578,45 @@ static bool presence_apply(const cJSON *p) {
 }
 
 /* Действия (записи): в демо — только локально, без сети. */
+/* Ответ Discord на действие с друзьями: при ошибке — его текст и код (а не только «403»), управляющие
+ * символы заменяются пробелом. ctx — что делали (строка интерфейса). */
 static void on_rel_done(Resp *r, void *ctx) {
-    (void)ctx;
-    if (r->status < 200 || r->status >= 300) ui_notice(ui_tr("друзья: Discord ответил %ld"), r->status);
+    if (r->status >= 200 && r->status < 300) return;
+    const char *what = ctx ? (const char *)ctx : ui_tr("друзья");
+    char m[120] = "";
+    long code = 0;
+    if (r->body.p && r->body.len) {
+        cJSON *j = json_parse(r->body.p, r->body.len);
+        const char *msg = jstr(j, "message");
+        code = (long)jint(j, "code", 0);
+        if (msg) {
+            snprintf(m, sizeof m, "%s", msg);
+            for (char *q = m; *q; q++) if ((unsigned char)*q < 0x20 || *q == 0x7F) *q = ' ';
+        }
+        json_done();
+    }
+    if (r->status == 0) ui_notice(ui_tr("%s: нет связи с Discord"), what);
+    else if (m[0] && code) ui_notice(ui_tr("%s: Discord ответил %ld: %s (код %ld)"), what, r->status, m, code);
+    else if (m[0]) ui_notice(ui_tr("%s: Discord ответил %ld: %s"), what, r->status, m);
+    else ui_notice(ui_tr("%s: Discord ответил %ld"), what, r->status);
+}
+/* PUT /users/@me/relationships/<id> как у официального клиента: с X-Context-Properties = base64({"location":..}),
+ * без него Discord может отвечать 403 */
+static void rel_put(u64 uid, const char *body, const char *location, const char *what) {
+    char path[64], ctxj[64];
+    snprintf(path, sizeof path, "/users/@me/relationships/%llu", (unsigned long long)uid);
+    snprintf(ctxj, sizeof ctxj, "{\"location\":\"%s\"}", location);
+    Buf h = {0};
+    buf_puts(&h, "X-Context-Properties: ");
+    base64_enc(ctxj, strlen(ctxj), &h);
+    http_async_hdr("PUT", path, body, h.p, on_rel_done, (void *)what);
+    buf_free(&h);
 }
 void rel_accept(u64 uid) {
     const Relation *r = rel_find(uid);
     if (!r || r->type != REL_IN) { ui_notice(ui_tr("нет входящей заявки")); return; }
     if (O.demo) { rel_set(uid, REL_FRIEND); ui_dirty(); return; }      /* по сети придёт RELATIONSHIP_ADD */
-    char path[64];
-    snprintf(path, sizeof path, "/users/@me/relationships/%llu", (unsigned long long)uid);
-    http_async("PUT", path, "{}", on_rel_done, NULL);
+    rel_put(uid, "{}", "Friends", ui_tr("принять заявку"));
 }
 void rel_remove(u64 uid) {
     if (!rel_find(uid)) return;
@@ -668,6 +714,7 @@ static void ready_tail(const cJSON *d) {
     cJSON_ArrayForEach(e, entries(jget(d, "user_guild_settings"))) apply_guild_settings(e);
     store_sort_dms();
     S.ready = true;
+    ml_resub();                                  /* новая сессия шлюза: подписку на список открытого канала повторить */
 }
 void store_ready(const cJSON *d) {
     ready_head(d);
@@ -759,6 +806,16 @@ static void reactions_from(Message *m, const cJSON *arr) {
         x->count = (int)jint(r, "count", 1);
         x->me = jbool(r, "me");
     }
+}
+/* Имя роли храним только у показанных отдельно (hoist): это заголовки групп списка участников. */
+static void role_name_set(Role *ro, const cJSON *r) {
+    free(ro->name);
+    ro->name = NULL;
+    ro->hoist = jbool(r, "hoist");
+    const char *n = jstr(r, "name");
+    if (!ro->hoist || !n) return;
+    ro->name = san(n, false);
+    utf8_trunc(ro->name, 64);
 }
 /* Цвет ника: цвет старшей (по position) роли участника, у которой цвет задан. */
 static u32 member_color(const Guild *g, const cJSON *member) {
@@ -1623,6 +1680,7 @@ void store_tick(void) {
     ix_tick(now);
     cdn_flush(now);
     demo_slow_tick(now);
+    ml_tick(now);
     if (demo_del_th && now >= demo_del_at) {   /* демо: «сервер удалил ветку» */
         char j[160];
         Channel *dc = chan_find(demo_del_th);
@@ -1650,6 +1708,7 @@ i64 store_next_wake(void) {
     { i64 f = focus_next_wake(); if (f < t) t = f; }
     { i64 f = status_next_wake(); if (f < t) t = f; }
     { i64 s = slow_next_wake(); if (s < t) t = s; }
+    { i64 m = ml_next_wake(); if (m < t) t = m; }
     if (ps_pend != 255 && ps_sent[0] + 20000 < t) t = ps_sent[0] + 20000;   /* ревью 8 М1: минимум, не затирать */
     if (win_focused())
         for (int i = 0; i < ACK_SLOTS; i++) if (AK[i].pend && AK[i].at + ACK_GAP < t) t = AK[i].at + ACK_GAP;
@@ -1670,9 +1729,7 @@ void rel_add(u64 uid) {
     if (r && (r->type == REL_FRIEND || r->type == REL_OUT)) return;
     if (r && r->type == REL_IN) { rel_accept(uid); return; }
     if (O.demo) { rel_set(uid, REL_OUT); ui_dirty(); return; }
-    char path[64];
-    snprintf(path, sizeof path, "/users/@me/relationships/%llu", (unsigned long long)uid);
-    http_async("PUT", path, "{}", on_write_done, (void *)ui_tr("заявка в друзья"));
+    rel_put(uid, "{}", "User Profile", ui_tr("заявка в друзья"));
 }
 
 /* «Добавить в друзья» по имени пользователя (как кнопка Discord): POST /users/@me/relationships
@@ -1927,6 +1984,7 @@ void store_event(const char *t, const cJSON *d) {
     else if (!strcmp(t, "INTERACTION_SUCCESS") || !strcmp(t, "INTERACTION_FAILURE")) ix_event(t, d);
     else if (!strcmp(t, "USER_SETTINGS_PROTO_UPDATE")) folders_event(d);
     else if (!strcmp(t, "VOICE_CHANNEL_STATUS_UPDATE") || !strcmp(t, "CHANNEL_INFO")) vcs_event(t, d);
+    else if (!strcmp(t, "GUILD_MEMBER_LIST_UPDATE")) ml_event(d);
     else if (!strcmp(t, "MESSAGE_POLL_VOTE_ADD")) poll_vote_ev(d, 1);
     else if (!strcmp(t, "MESSAGE_POLL_VOTE_REMOVE")) poll_vote_ev(d, -1);
     else if (!strcmp(t, "MESSAGE_REACTION_REMOVE")) { react_change(d, -1); ui_dirty(); }
@@ -1989,6 +2047,7 @@ void store_event(const char *t, const cJSON *d) {
         u64 gid = jid(d, "id");
         for (int i = S.nchans - 1; i >= 0; i--) if (S.chans[i].guild_id == gid) { chan_free(&S.chans[i]); S.chans[i] = S.chans[--S.nchans]; }
         for (int i = 0; i < S.nguilds; i++) if (S.guilds[i].id == gid) { guild_free(&S.guilds[i]); memmove(&S.guilds[i], &S.guilds[i + 1], (size_t)(S.nguilds - i - 1) * sizeof(Guild)); S.nguilds--; break; }
+        ml_guild_gone(gid);
         store_sort_dms();
         ui_dirty();
     } else if (!strncmp(t, "GUILD_ROLE_", 11)) {
@@ -2000,13 +2059,18 @@ void store_event(const char *t, const cJSON *d) {
         int i;
         for (i = 0; i < g->nroles && g->roles[i].id != rid; i++) {}
         if (!strcmp(t + 11, "DELETE")) {
-            if (i < g->nroles) g->roles[i] = g->roles[--g->nroles];
+            if (i < g->nroles) { free(g->roles[i].name); g->roles[i] = g->roles[--g->nroles]; }
         } else {
-            if (i == g->nroles) { g->roles = xrealloc(g->roles, (size_t)(g->nroles + 1) * sizeof(Role)); g->nroles++; }
+            if (i == g->nroles) {
+                g->roles = xrealloc(g->roles, (size_t)(g->nroles + 1) * sizeof(Role));
+                memset(&g->roles[g->nroles], 0, sizeof(Role));
+                g->nroles++;
+            }
             g->roles[i].id = rid;
             g->roles[i].perms = perm_str(r, "permissions");
             g->roles[i].color = (u32)jint(r, "color", 0) & 0xFFFFFFu;
             g->roles[i].pos = (int)jint(r, "position", 0);
+            role_name_set(&g->roles[i], r);
         }
         recompute_guild(gid);
         ui_dirty();
@@ -5105,7 +5169,7 @@ static const Sch S_TMETA[] = { {"archived", NULL}, {"locked", NULL}, END };
 static const Sch S_TMEM[] = { {"user_id", NULL}, {"id", NULL}, END };
 static const Sch S_THR[] = { {"id", NULL}, {"type", NULL}, {"name", NULL}, {"parent_id", NULL}, {"guild_id", NULL},
     {"last_message_id", NULL}, {"owner_id", NULL}, {"rate_limit_per_user", NULL}, {"thread_metadata", S_TMETA}, {"member", S_TMEM}, END };
-static const Sch S_ROLE[] = { {"id", NULL}, {"permissions", NULL}, {"color", NULL}, {"position", NULL}, END };
+static const Sch S_ROLE[] = { {"id", NULL}, {"permissions", NULL}, {"color", NULL}, {"position", NULL}, {"name", NULL}, {"hoist", NULL}, END };
 static const Sch S_MEMBER[] = { {"user_id", NULL}, {"nick", NULL}, {"roles", NULL}, {"user", S_USER},
     {"communication_disabled_until", NULL}, {"pending", NULL}, END };
 static const Sch S_VS[] = { {"user_id", NULL}, {"channel_id", NULL}, {"self_mute", NULL}, {"self_deaf", NULL}, {"self_stream", NULL}, {"self_video", NULL},
@@ -5211,6 +5275,10 @@ static void sl_object(Slim *x, const Sch *sch, int lvl) {
     x->r++;                                     /* '{' прочитана — теперь её можно записать */
     sl_put(x, '{');
     bool first = true, need = false;            /* need: перед следующим членом обязательна ',' */
+    /* роль: имя нужно только показанной отдельно (hoist) — заголовок группы в списке участников;
+     * у прочих ролей имя вырезается из вывода в конце объекта (hoist может идти после name) */
+    bool role = sch == S_ROLE, hoist = false, nm_have = false, nm_first = false;
+    size_t nm0 = 0, nm1 = 0;
     for (;;) {
         if (x->bad) return;
         sl_ws(x);
@@ -5247,13 +5315,25 @@ static void sl_object(Slim *x, const Sch *sch, int lvl) {
             if (x->bad) return;
             if (e == x->r + 4) { x->r = e; continue; }
         }
+        size_t m0 = x->w;
+        bool was_first = first;
         if (!first) sl_put(x, ',');
         first = false;
         sl_out(x, k0, k1 - k0);
         sl_put(x, ':');
-        size_t before = x->r;
+        size_t before = x->r, v0 = x->w;
         sl_value(x, hit->sub, lvl + 1);
         if (!x->bad && x->r == before) x->bad = true;          /* значение не прочитано — нет продвижения */
+        if (role && !x->bad) {
+            if (!strcmp(hit->key, "name")) { nm_have = true; nm0 = m0; nm1 = x->w; nm_first = was_first; }
+            else if (!strcmp(hit->key, "hoist")) hoist = x->w - v0 == 4 && !memcmp(x->s + v0, "true", 4);
+        }
+    }
+    if (role && nm_have && !hoist && !x->bad) {
+        size_t b = nm1;
+        if (nm_first && b < x->w && x->s[b] == ',') b++;      /* имя было первым — убрать запятую следующего */
+        memmove(x->s + nm0, x->s + b, x->w - b);
+        x->w -= b - nm0;
     }
     sl_put(x, '}');
 }
@@ -5920,9 +6000,12 @@ bool event_wanted(const char *raw, size_t len) {
         size_t n = 0;
         while (p + n < raw + len && p[n] != '"' && n < 40) n++;
         if (n == 15 && !memcmp(p, "PRESENCE_UPDATE", 15)) return presence_is_friend(raw, len);
+        if (n == 24 && !memcmp(p, "GUILD_MEMBER_LIST_UPDATE", 24)) return ml_want_raw(raw, len);
         for (size_t k = 0; k < sizeof WANTED / sizeof *WANTED; k++)
             if (strlen(WANTED[k]) == n && !memcmp(WANTED[k], p, n)) return true;
         return false;
     }
     return true;
 }
+
+#include "memlist.c"                             /* список участников сервера (op 14) */

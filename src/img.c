@@ -515,6 +515,10 @@ static bool att_url(const char *u, int pw, int ph, char *out, size_t outn, u64 *
  * Картинки не хранятся (требование владельца): готовые клетки живут, только пока картинка на
  * экране. img_frame() в начале кадра затирает и освобождает всё, что не запрашивали в прошлом
  * кадре (и прерывает его загрузку). Вернулась на экран — скачать и перекодировать заново.
+ * Исключение (решение владельца 11.11.2026): готовые аватары и значки (K_AV), ушедшие с экрана, остаются
+ * в памяти, пока их клетки вместе не больше AV_KEEP_BYTES, — при прокрутке ленты те же люди не
+ * скачиваются заново. Вытесняется тот, кого дольше всех не показывали; место под видимое важнее.
+ * Только в памяти (на диск ничего), при освобождении — затирание; превью вложений (K_PV) — как раньше.
  * Чтобы не долбить CDN при прокрутке, загрузка начинается, только если картинка видна не меньше
  * LOAD_DELAY_MS подряд; одновременно — не больше одной загрузки. Неудачи помнятся только ключом
  * (64 бита, без данных картинки), чтобы не повторять их по кругу. */
@@ -522,6 +526,7 @@ static bool att_url(const char *u, int pw, int ph, char *out, size_t outn, u64 *
 #define FRAME_MAX_BYTES (512u << 10)            /* жёсткий предел клеток видимого кадра */
 #define LOAD_DELAY_MS 150                       /* картинка должна быть видна столько, прежде чем качать */
 #define NFAIL 32                                /* ключи неудачных загрузок */
+#define AV_KEEP_BYTES (64u << 10)               /* аватары вне экрана: до 64 КБ клеток (~70 аватаров 16x8) */
 enum { ST_FREE, ST_WANT, ST_LOAD, ST_READY, ST_FAIL };
 enum { K_AV = 1, K_PV = 2 };
 typedef struct {
@@ -565,6 +570,21 @@ static bool failed_recently(u64 key) {
     return false;
 }
 
+/* Аватар, ушедший с экрана (не запрошен в этом кадре), которого дольше всех не показывали; NULL — нет. */
+static Ent *kept_lru(void) {
+    Ent *o = NULL;
+    for (int i = 0; i < NENT; i++) {
+        Ent *e = &s_e[i];
+        if (e->state == ST_READY && e->kind == K_AV && e->gen != s_gen && (!o || (int32_t)(e->gen - o->gen) < 0)) o = e;
+    }
+    return o;
+}
+static size_t kept_bytes(void) {
+    size_t n = 0;
+    for (int i = 0; i < NENT; i++)
+        if (s_e[i].state == ST_READY && s_e[i].kind == K_AV && s_e[i].gen != s_gen) n += ent_bytes(&s_e[i]);
+    return n;
+}
 static Ent *find(u64 key, int kind, int w, int h) {
     for (int i = 0; i < NENT; i++)
         if (s_e[i].state != ST_FREE && s_e[i].key == key && s_e[i].kind == kind && s_e[i].w == w && s_e[i].h == h) return &s_e[i];
@@ -574,6 +594,7 @@ static void want(u64 key, int kind, int w, int h, const char *url) {
     if (failed_recently(key)) return;
     Ent *e = NULL;
     for (int i = 0; i < NENT && !e; i++) if (s_e[i].state == ST_FREE) e = &s_e[i];
+    if (!e && (e = kept_lru()) != NULL) ent_free(e);   /* место видимому — за счёт аватара вне экрана */
     if (!e) return;                             /* на экране больше NENT картинок: остальные — инициалы */
     e->key = key; e->kind = (u8)kind; e->w = (u16)w; e->h = (u16)h;
     e->state = ST_WANT;
@@ -588,6 +609,7 @@ static void put_ready(Ent *e, ImgCell *cells) {
     size_t need = sizeof(ImgCell) * e->w * e->h;
     free(e->url);
     e->url = NULL;
+    for (Ent *k; s_bytes + need > FRAME_MAX_BYTES && (k = kept_lru()) != NULL && k != e;) ent_free(k);
     if (s_bytes + need > FRAME_MAX_BYTES) {
         wipe(cells, need);
         free(cells);
@@ -606,13 +628,15 @@ static bool take(Ent *e, ImgCell *out) {
 }
 
 void img_enable(bool on) { if (!on) img_forget(); s_on = on; }
-/* Начало кадра: всё, что не запросили в прошлом кадре, ушло с экрана — затереть и забыть. */
+/* Начало кадра: всё, что не запросили в прошлом кадре, ушло с экрана — затереть и забыть; готовые
+ * аватары — оставить в пределах AV_KEEP_BYTES (самые давние — вон). */
 void img_frame(void) {
     if (s_frames)
         for (int i = 0; i < NENT; i++)
-            if (s_e[i].state != ST_FREE && s_e[i].gen != s_gen) ent_free(&s_e[i]);
+            if (s_e[i].state != ST_FREE && s_e[i].gen != s_gen && !(s_e[i].state == ST_READY && s_e[i].kind == K_AV)) ent_free(&s_e[i]);
     s_frames = true;
     s_gen++;
+    for (Ent *k; kept_bytes() > AV_KEEP_BYTES && (k = kept_lru()) != NULL;) ent_free(k);
 }
 
 /* Стандартный аватар Discord: цвет по (id >> 22) % 6, «глаза» белым — без сети. */
@@ -1198,17 +1222,38 @@ int img_selftest(void (*check)(bool ok, const char *what)) {
         snprintf(hsh, sizeof hsh, "%032x", i);
         vis = vis && img_avatar(1000 + (u64)i, hsh, 4, 2, av) && av[0].ch == ' ';
     }
-    img_frame();                                /* начало кадра 3: невидимые 90 освобождены */
-    vis = vis && count_used() == 10 && s_bytes == 10 * 8 * sizeof(ImgCell) &&
-          !img_avatar(1000, "00000000000000000000000000000000", 4, 2, av);   /* вернулся — качать заново */
-    Ent *back = find(square_key("avatars", 1000, "00000000000000000000000000000000"), K_AV, 4, 2);
+    img_frame();                                /* начало кадра 3: невидимые 90 аватаров остались (5 КБ < AV_KEEP_BYTES) */
+    vis = vis && count_used() == 100 && s_bytes == 100 * 8 * sizeof(ImgCell) &&
+          img_avatar(1000, "00000000000000000000000000000000", 4, 2, av) && av[0].ch == ' ';   /* вернулся — сразу, без загрузки */
+    img_avatar(5000, "0123456789abcdef0123456789abcdef", 4, 2, av);   /* новый — ждёт загрузки */
+    Ent *back = find(square_key("avatars", 5000, "0123456789abcdef0123456789abcdef"), K_AV, 4, 2);
     vis = vis && back && back->state == ST_WANT && !eligible(back, now_ms());  /* пауза 150 мс */
     if (back) back->seen_at -= LOAD_DELAY_MS;
     vis = vis && back && eligible(back, now_ms());
     img_frame();
-    img_frame();                                /* два кадра без запросов — пусто */
-    vis = vis && count_used() == 0 && s_bytes == 0;
-    check(dflt && vis, "картинки: стандартный аватар без сети; держим только видимое, ушло — затёрто, пауза 150 мс");
+    img_frame();                                /* два кадра без запросов: незагруженный забыт, готовые аватары остались */
+    vis = vis && count_used() == 100 && !find(square_key("avatars", 5000, "0123456789abcdef0123456789abcdef"), K_AV, 4, 2);
+    /* предел аватаров вне экрана: 100 аватаров 16x8 (~90 КБ) -> остаются последние показанные, <= AV_KEEP_BYTES */
+    img_forget();
+    s_on = true;
+    img_frame();
+    ImgCell avb[128];
+    for (int i = 0; i < 100; i++) {             /* каждый — в своём кадре: i-й показан позже (i-1)-го */
+        snprintf(hsh, sizeof hsh, "%032x", i);
+        img_avatar(2000 + (u64)i, hsh, 16, 8, avb);
+        Ent *e = find(square_key("avatars", 2000 + (u64)i, hsh), K_AV, 16, 8);
+        if (e) { ImgCell *cc = malloc(sizeof(ImgCell) * 128); memset(cc, ' ', sizeof(ImgCell) * 128); put_ready(e, cc); }
+        img_frame();
+    }
+    img_frame();
+    snprintf(hsh, sizeof hsh, "%032x", 99);
+    Ent *last = find(square_key("avatars", 2099, hsh), K_AV, 16, 8);
+    snprintf(hsh, sizeof hsh, "%032x", 0);
+    Ent *first = find(square_key("avatars", 2000, hsh), K_AV, 16, 8);
+    bool keep = kept_bytes() <= AV_KEEP_BYTES && kept_bytes() > AV_KEEP_BYTES - 128 * sizeof(ImgCell) && last && last->state == ST_READY && !first;
+    img_forget();
+    vis = vis && keep && count_used() == 0 && s_bytes == 0;
+    check(dflt && vis, "картинки: стандартный аватар без сети; аватары вне экрана — до 64 КБ, вытесняются давние; пауза 150 мс");
     /* предел кадра и память неудач */
     img_frame();
     bool lim = true;

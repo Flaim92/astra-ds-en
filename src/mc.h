@@ -83,7 +83,7 @@ enum { CH_TEXT = 0, CH_DM = 1, CH_VOICE = 2, CH_GROUP = 3, CH_CATEGORY = 4, CH_N
        CH_NEWS_THREAD = 10, CH_THREAD = 11, CH_PRIV_THREAD = 12, CH_FORUM = 15, CH_MEDIA = 16 };
 
 typedef struct { u64 id; char *name; char avatar[35]; u32 color; u64 color_gid; } User;  /* color: цвет ника (0xRRGGBB, 0 — обычный) на сервере color_gid */   /* avatar: 32 hex или a_+32 hex, иначе "" */
-typedef struct { u64 id; u64 perms; u32 color; int pos; } Role;
+typedef struct { u64 id; u64 perms; u32 color; int pos; char *name; bool hoist; } Role;   /* name — только у ролей, показанных отдельно (hoist), иначе NULL */
 typedef struct { u64 id; u64 allow, deny; u8 type; } Overwrite;
 typedef struct {
     u64 id, guild_id, parent_id, last_msg, last_read;
@@ -198,6 +198,34 @@ const char *user_avatar(u64 id);                /* хэш аватара или 
 u32 user_color(u64 guild_id, u64 id);           /* цвет ника на сервере, 0 — обычный/неизвестен */
 void store_set_messages(const cJSON *arr, bool older);
 void msgs_clear(void);
+
+/* ---- Список участников сервера справа, как в Discord (memlist.c, включён в store.c) ----
+ * Подписка op 14 на открытый канал, приём GUILD_MEMBER_LIST_UPDATE (SYNC/INSERT/UPDATE/DELETE/INVALIDATE).
+ * Хранится только подписанное окно (до 3 окон по 100 строк) одного открытого канала; смена канала или
+ * сервера — всё затирается и освобождается. Строки — копии ограниченной длины после san(). */
+#define MC_MEMLIST 1
+enum { MLR_GROUP = 1, MLR_MEMBER = 2 };          /* строка списка: заголовок группы / участник */
+enum { ML_G_ONLINE = 1, ML_G_OFFLINE = 2 };      /* id групп «В сети» и «Не в сети»; прочие id — роли (hoist) */
+enum { MLA_NONE, MLA_PLAY, MLA_STREAM, MLA_LISTEN, MLA_WATCH, MLA_CUSTOM, MLA_COMPETE };   /* что под именем */
+#define ML_WIN 100                               /* окно подписки, как у официального клиента */
+typedef struct {
+    u64 id;                                      /* участник — id пользователя; группа — ML_G_* или id роли */
+    u8 kind, status, act;                        /* MLR_*, PS_* (у группы 0), MLA_* */
+    bool bot;
+    u32 color;                                   /* цвет ника по старшей роли с цветом (0 — обычный) */
+    int count;                                   /* группа: сколько в ней участников */
+    char name[72];                               /* ник / имя роли (у «В сети»/«Не в сети» пусто — подпись в ui) */
+    char text[72];                               /* свой статус или игра (пусто — нет) */
+    char avatar[35];                             /* хэш аватара или "" */
+} MemRow;
+void ml_open(u64 guild_id, u64 channel_id);      /* открыт канал (guild_id 0 — ЛС: список закрыть) */
+void ml_close(void);                             /* затереть и освободить */
+void ml_view(int first, int last);               /* видимые строки (индексы списка): переподписка окнами по 100 */
+int ml_total(u64 channel_id);                    /* строк в списке этого канала (группы + участники); -1 — списка нет */
+const MemRow *ml_row(int index);                 /* NULL — строка ещё не пришла (рисовать заглушку) */
+int ml_online(void);                             /* online_count сервера */
+int ml_member_count(void);                       /* member_count сервера */
+int ml_rows_held(void);                          /* сколько строк участников в памяти (для проверок) */
 Message *msg_find(u64 id, int *idx);
 void chan_label(const Channel *c, char *out, size_t n);
 bool guild_unread(u64 gid, int *mentions);
@@ -472,7 +500,7 @@ bool mod_voice_mute(u64 gid, u64 uid, bool mute, bool deaf, char *err, size_t er
 /* ---- Автообновление (update.c; SECURITY.md «Автообновление») ----
  * Проверка — при запуске не чаще раза в сутки (если включено; дата — в хранилище секретов) или по кнопке.
  * Загрузка и замена — только после явного «Обновить» (update_apply). Затем «Перезапустить» (update_restart). */
-#define ASTRA_VERSION "0.2.5"                   /* версия этой сборки: релиз поднимает её (обновление — только на строго большую) */
+#define ASTRA_VERSION "0.2.6"                   /* версия этой сборки: релиз поднимает её (обновление — только на строго большую) */
 enum { UP_IDLE, UP_CHECKING, UP_NONE, UP_AVAILABLE, UP_DOWNLOADING, UP_READY, UP_FAILED };
 typedef struct {
     int phase;                                  /* UP_* */
@@ -680,6 +708,8 @@ void gw_service(void);
 i64 gw_next_wake(void);
 void gw_send(const char *json);
 void gw_subscribe(u64 guild, u64 channel);
+/* op 14 с окнами списка участников по 100: chunk[i] — номер окна (0 — строки 0..99), n <= 3 */
+void gw_subscribe_ranges(u64 guild, u64 channel, const int *chunk, int n);
 void gw_voice_state(u64 guild, u64 channel, bool mute, bool deaf);
 const char *gw_status_text(void);
 bool gw_online(void);                           /* gateway подключён (можно слать op) */
@@ -900,6 +930,8 @@ int demo_en_selftest(void (*check)(bool ok, const char *what));
 void demo_send(u64 channel, const char *text);
 void demo_around(u64 channel, u64 msg_id);      /* переход к сообщению (#флуд — 50 вокруг) */
 void demo_older(u64 channel);                   /* подгрузка старых в демо (ui.c при прокрутке вверх) */
+/* демо: синтетический GUILD_MEMBER_LIST_UPDATE (SYNC окон chunk[0..n)) -> store_event, как с шлюза */
+void demo_memlist(u64 guild_id, const char *list_id, const int *chunk, int n);
 u64 demo_new_id(void);                          /* демо: новый id (сервер/канал/приглашение) */
 void demo_search(u64 guild_id, u64 channel_id, const char *query);   /* фальшивые результаты в search_apply */
 void demo_file(u64 channel, const char *filename, long long size, const char *text);  /* «[файл: имя]» в ленту */

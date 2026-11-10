@@ -621,11 +621,22 @@ static void bridge_stop(void) {
     wipe(C.spass, sizeof C.spass);
 }
 
-/* ---------- COM-объекты обработчиков (в C: таблица методов + счётчик ссылок) ---------- */
-typedef struct { void *vt; LONG ref; } Obj;
-static HRESULT STDMETHODCALLTYPE o_qi(void *This, REFIID riid, void **pp) { (void)riid; *pp = This; ((Obj *)This)->ref++; return S_OK; }
-static ULONG STDMETHODCALLTYPE o_addref(void *This) { return (ULONG)++((Obj *)This)->ref; }
-static ULONG STDMETHODCALLTYPE o_release(void *This) { return (ULONG)--((Obj *)This)->ref; }   /* объекты статические */
+/* ---------- COM-объекты обработчиков (в C: только таблица методов) ----------
+ * Объекты статические и живут всё время работы программы, поэтому счётчика ссылок нет: AddRef/Release
+ * ничего не пишут. (Раньше счётчик писался по смещению 8 от объекта размером 8 байт — в соседнюю
+ * переменную; WebView2 зовёт AddRef уже в CreateWebViewEnvironment, и при другой раскладке данных
+ * программа падала на «Пройти проверку».) QueryInterface отвечает только на IUnknown и свой
+ * интерфейс: на чужой (IMarshal, IAgileObject, внутренние WebView2) — E_NOINTERFACE, иначе WebView2
+ * вызвал бы методы чужой таблицы. */
+static const IID *o_iid(const void *This);
+static HRESULT STDMETHODCALLTYPE o_qi(void *This, REFIID riid, void **pp) {
+    const IID *own = o_iid(This);
+    if (IsEqualIID(riid, &IID_IUnknown) || (own && IsEqualIID(riid, own))) { *pp = This; return S_OK; }
+    *pp = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE o_addref(void *This) { (void)This; return 2; }
+static ULONG STDMETHODCALLTYPE o_release(void *This) { (void)This; return 1; }
 
 /* Параметры среды: прокси — наш мост; всё лишнее у Chromium выключено. */
 static WCHAR g_args[768];                       /* 256 не хватало: хвост (флаги WebRTC) обрезался */
@@ -771,6 +782,15 @@ static ICoreWebView2WebResourceRequestedEventHandler h_res = { &ICoreWebView2Web
 static ICoreWebView2WebMessageReceivedEventHandler h_msg = { &ICoreWebView2WebMessageReceivedEventHandler_vt };
 static ICoreWebView2NavigationStartingEventHandler h_nav = { &ICoreWebView2NavigationStartingEventHandler_vt };
 static ICoreWebView2NewWindowRequestedEventHandler h_new = { &ICoreWebView2NewWindowRequestedEventHandler_vt };
+static const IID *o_iid(const void *This) {
+    if (This == &h_env) return &IID_ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler;
+    if (This == &h_ctrl) return &IID_ICoreWebView2CreateCoreWebView2ControllerCompletedHandler;
+    if (This == &h_res) return &IID_ICoreWebView2WebResourceRequestedEventHandler;
+    if (This == &h_msg) return &IID_ICoreWebView2WebMessageReceivedEventHandler;
+    if (This == &h_nav) return &IID_ICoreWebView2NavigationStartingEventHandler;
+    if (This == &h_new) return &IID_ICoreWebView2NewWindowRequestedEventHandler;
+    return NULL;
+}
 
 /* ---------- окно и поток ---------- */
 static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {

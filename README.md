@@ -20,6 +20,13 @@ C11 · Windows and Linux · no Electron, no browser, no GPU
 
 </div>
 
+> [!IMPORTANT]
+> **Astra DS comes in two builds.**
+> - **Astra DS** (regular): messages, servers, friends, voice channels and calls. It has no video code at all, so it is the lightest.
+> - **Astra DS Video**: everything above plus **screen sharing, watching other people's streams and camera** (with eye hiding). The file is called `astra-ds-video`.
+>
+> If you want streams or the camera, download **Video**. The regular build has no buttons for them.
+
 > [!WARNING]
 > **Third-party clients break Discord's Terms of Service**, and your account can be banned for using one.
 > Use it at your own risk, ideally with a secondary account. This project has no affiliation with Discord Inc.
@@ -28,80 +35,118 @@ C11 · Windows and Linux · no Electron, no browser, no GPU
 > [!NOTE]
 > The interface is available in **English**: use the RU | EN switch on the start screen or run with `--lang=en`. The code and build are the same as the [Russian repository](https://github.com/Flaim92/astra-ds).
 
-### If Discord locks your account
+## Two builds
+
+| | Astra DS | Astra DS Video |
+|---|---|---|
+| Messages, servers, friends, DMs | yes | yes |
+| Voice channels and calls (DAVE encryption) | yes | yes |
+| Screen sharing with sound | no | yes |
+| Watching other people's streams | no | yes |
+| Camera: yours and other people's | no | yes |
+| Eye hiding on your camera | no | yes |
+| Program file | ~13 MB | ~22 MB |
+
+The two builds update separately: the regular one only offers regular updates, Video only offers Video updates.
+
+## Download
+
+Ready-made builds for Windows 10/11 and Linux are in [Releases](../../releases/latest):
+
+| System | Regular | Video |
+|---|---|---|
+| Windows 10/11, x64 | `astra-ds-<version>-windows-x64.zip` | `astra-ds-video-<version>-windows-x64.zip` |
+| Linux x64, glibc 2.36+ | `astra-ds-<version>-linux-x64.tar.gz` | `astra-ds-video-<version>-linux-x64.tar.gz` |
+
+- **Windows:** a single exe, no installer. The build is not code-signed, so SmartScreen will warn you: click "More info", then "Run anyway".
+- **Linux:** you need `libasound2` and `libx11-6`. For the captcha window, install `libwebkit2gtk-4.1-0`. For Video: stream sound goes through PulseAudio or PipeWire, screen sharing on Wayland through `xdg-desktop-portal` and PipeWire. Regular distributions already have all of this.
+
+Checksums are in `SHA256SUMS.txt` next to the builds. You can also build it yourself, see below.
+
+## If Discord locks your account
 
 Discord disables an account or forces a password reset when it thinks the account is a bot or was compromised. It can happen with any client, but third-party clients trigger it more often. The usual causes are:
 
 - joining or leaving servers;
 - reconnecting often, which includes restarting the app many times in a row;
 - opening DMs with people you don't know;
-- changing your friends list.
+- changing your friends list, especially many friend requests in a row.
 
 **Log in with email and password.** If two-factor authentication is on, enter the code from your authenticator app after the password. QR code login is unreliable right now: Discord may ask for a captcha and then refuse to accept it. It behaves the same way in a browser, so this is not an Astra DS bug.
 
-Do these in the official client. Astra DS sends you to the browser to join a server from an invite anyway, because Discord requires the official client for that. If your account gets locked, reset your password on discord.com, and if that doesn't help, [contact support](https://support.discord.com/hc/en-us/requests/new?ticket_form_id=360000029731).
+It's better to do all of this in the official client. To join a server from an invite, Astra DS will send you to the browser anyway: Discord requires the official client for that. If Discord ended your session after a captcha, log in again and check the official app for a suspicious activity notice. If your account was locked, change your password on discord.com, and if that doesn't help, [contact support](https://support.discord.com/hc/en-us/requests/new?ticket_form_id=360000029731).
 
-### If your antivirus complains
+## If there is no connection to Discord
 
-The Windows build isn't signed, so SmartScreen warns about it. An antivirus may flag any Discord client as a token stealer, since the code contains the same words a stealer does, such as "token" and "Authorization". The token only goes to Discord and stays in the system keyring (Credential Manager on Windows, Secret Service on Linux). The code is open, so you can read it or build it yourself. Only download Astra DS from this repository.
+If login says "No connection to Discord" while the internet works:
+
+- **Discord is blocked by your provider.** Check whether https://discord.com opens in a browser with VPN turned off. If it doesn't, set up your own VLESS server in the app (`--vless`).
+- **A VPN app in "system proxy" mode** (v2rayN, Hiddify, Nekoray and similar). Astra DS does not use the system proxy. Turn on TUN mode ("VPN for the whole system") in the VPN app or set up a VLESS server in Astra DS.
+- **An antivirus or firewall** blocks the program from the network. Allow it.
+
+VLESS is off by default: without your link all traffic goes directly. You can turn it off in **Settings → Privacy → VLESS**.
+
+## If your antivirus complains
+
+An antivirus may mistake any Discord client for a token stealer: the code contains the same words, "token" and "Authorization". The token is only ever sent to Discord and is stored in the system keychain (Credential Manager on Windows, Secret Service on Linux). The code is open, you can read it and build it yourself. Only download Astra DS from this repository.
 
 ## Why
 
-The official Discord app is a whole browser inside a program. For comparison:
+The official Discord is basically a whole web browser inside an app. For comparison:
 
-| | Idle RAM | Idle CPU | Binary |
+| | Idle memory | Idle CPU | Program file |
 |---|---|---|---|
 | Discord (Electron) | usually 300-600 MB¹ | noticeably above zero | hundreds of MB |
 | [larperCord](https://github.com/RshaCuDeVidro/larperCord) (Zig, SDL3) | ~130 MB² | 0-0.4%² | ~14 MB |
-| **Astra DS** | **~2.9 MB**³ | **0%** | **~13 MB** |
+| **Astra DS** | **~2.9 MB**³ | **0%** | **~13 MB** (Video ~22 MB) |
 
-<sub>¹ Estimate from Task Manager, depends on how many servers you're in. Not measured side by side.
+<sub>¹ An estimate from Task Manager, depends on the number of servers. We did not measure it side by side.
 ² From the larperCord README, not our measurement.
-³ Private bytes on Windows 11: median of five runs, 140x40 cell window, 2 s wait. A channel with images is 2.9-3.1 MB, a voice call with end-to-end encryption is 4-5 MB.</sub>
+³ Process private memory, Windows 11: median of five runs, 140x40 cell window, 2 s wait. A channel with images is 2.9-3.1 MB, a voice call with end-to-end encryption 4-5 MB. Measured on the regular build.</sub>
 
-How it stays this small:
+How it gets there:
 
-- **one thread and no polling loop.** The app sleeps until an event arrives, so idle CPU is 0%;
-- **nothing extra in memory.** Discord events the client doesn't need are dropped without parsing. Login data is processed one server at a time;
-- **images are drawn on the fly** from small previews and never stored;
-- **voice only exists during a call.** Threads, codecs and encryption are created when you join and fully freed when you leave;
-- **heavy things load on demand.** Server emoji, slash commands, forums and profiles are fetched when opened and freed when closed.
+- **one thread and no polling loop.** The program sleeps until an event arrives, so it uses 0% CPU when idle;
+- **nothing extra in memory.** Discord events the client doesn't need are dropped without being parsed. Login data is parsed one server at a time;
+- **images are drawn on the fly** from small previews. Attachment previews are freed as soon as they leave the screen. Avatars are kept in memory up to 64 KB so scrolling doesn't download the same faces again. Nothing is written to disk;
+- **voice and video only exist during a call.** Threads, codecs, the camera and encryption are created when you join and fully freed when you leave;
+- **heavy things load on demand.** Server emoji, slash commands, forums and profiles arrive when you open them and are freed when you close them.
 
 ## Features
 
-Against an inventory of 162 Discord screens and features, **86%** is done (84% not counting partial items).
+Out of an inventory of 162 Discord screens and features, **86%** are done (84% if partially done ones don't count).
 
-- **Messages.** Send, reply (with or without pinging the author), edit, delete, react, silent messages, forwarding, per-channel drafts. A message being sent shows in gray, and a failed one can be retried.
-- **Discord markdown.** Bold, italic, strikethrough, code, code blocks with a "Copy" button, headings, lists, quotes, spoilers. A `[text](url)` link shows the real address when it doesn't match the text.
+- **Messages.** Sending, replies (with or without pinging the author), editing, deleting, reactions, silent messages, forwarding, per-channel drafts. An unsent message shows up grey, and if it fails you can retry it. History loads as you scroll up, all the way to the start of the channel.
+- **Discord markdown.** Bold, italic, strikethrough, inline code, code blocks with a "Copy" button, headings, lists, quotes, spoilers. A `[text](url)` link shows the real address if it doesn't match the text.
 - **Attachments.** Images and avatars as colored ASCII, full-screen viewer, text file previews, voice messages (streamed playback), sending files up to 10 MB with spoiler and description, drag and drop into the window.
-- **Bots.** BOT tag, buttons and select menus, slash commands with options, link cards, polls with voting.
+- **Bots.** BOT tag, buttons and menus, slash commands with option input, link cards, polls with voting.
 - **Servers.** Channels by category with permissions, server folders, threads and forums (create, join, archive, new post), pinned messages, slowmode with a countdown.
-- **Management.** Create, edit, leave or delete a server. Channels and categories: create, rename, reorder, set permissions. Moderation when you have the rights: timeout, kick, ban, roles, moving people in voice.
-- **People.** Friends with statuses, requests, blocking, ignoring, personal notes, full profiles, group DMs. Message requests and spam are kept apart from DMs, and their images don't load until you reply.
-- **Voice.** Voice channels, calls in DMs and groups. DAVE end-to-end encryption is required: without it your voice is not sent. Per-user volume, microphone and output selection, mic test, automatic sensitivity, push to talk on any key or side mouse button, voice changer.
-- **Navigation.** Channel tabs, quick switcher (Ctrl+K), search with `from:` `in:` `has:` `before:` `after:` filters, an inbox with mentions, Discord message links open inside the app.
-- **Comfort.** Zoom with Ctrl+= and Ctrl+-, full screen with Alt+Enter, resizable columns, notifications and a tray icon, focus mode, keyword alerts, word filter.
-- **Three modes.** A window with mouse support, a full-screen terminal mode (`--tui`) and a line-based IRC-like mode (`--cli`).
+- **Management.** Create, edit, leave or delete a server. Channels and categories: create, rename, reorder, set permissions. Moderation for those who have the rights: timeout, kick, ban, roles, moving people in voice.
+- **People.** Friends with statuses, requests, blocking, ignoring, private notes, full profile, group DMs. Message requests and spam are kept separate from DMs, and images there don't load until you reply.
+- **Voice.** Voice channels, DM and group calls. DAVE end-to-end encryption is mandatory: without it your voice is not sent. Per-user volume, microphone and speaker selection, mic test, automatic threshold, noise suppression (SpeexDSP or RNNoise), push-to-talk on any key or side mouse button, voice changer.
+- **Navigation.** Channel tabs, quick switcher Ctrl+K, search with `from:` `in:` `has:` `before:` `after:` filters, an inbox with mentions, Discord message links open inside the app.
+- **Comfort.** Zoom with Ctrl+= and Ctrl+-, full screen with Alt+Enter, column widths by mouse, notifications and a tray icon, focus mode, alert words, word filter, English interface (`--lang=en` or the RU | EN switch on the login screen), auto-update with a signed manifest.
+- **Three modes.** A window with mouse support, a full-screen terminal mode (`--tui`) and a line-by-line IRC-like mode (`--cli`).
 
-**Video** is in a separate build, **Astra DS Video**. The regular build has none of this code, so it stays just as light.
+### Only in Astra DS Video
 
-- **Screen sharing.** The whole screen or one window, 1280x720 at 30 frames per second. With sound: a single window is shared with its program's sound, the whole screen with all system sound except Astra DS itself (call voices do not go into the stream). On Linux it works on both X11 and Wayland (GNOME, KDE, sway and others, through the system source picker). On Wayland a single window is shared without sound for now: the system does not say which program it belongs to.
-- **Watching other people's streams** in voice channels and calls.
-- **Camera**: your own and other people's, as tiles or large (Alt+arrows, Alt+F). Turn it on with the `[]/` button, F12 or Alt+C.
-- **Eye hiding on your camera.** The program finds your face in every frame and covers the eyes with a block of noise and random characters. If no face is found or the program is not sure, others see the Astra DS logo instead of the frame, and your preview says "Face not found". On by default, turn it off with Alt+E or the checkbox in the Camera dialog. Everything runs on your computer; frames go nowhere except the call.
+- **Screen sharing.** The whole screen or one window, 1280x720 at 30 frames per second, in voice channels and calls. With sound: a single window is shared with its program's sound, the whole screen with all system sound except Astra DS itself (call voices do not go into the stream). On Linux it works on both X11 and Wayland (GNOME, KDE, sway and others, through the system source picker). On Wayland a single window is shared without sound for now: the system does not say which program it belongs to.
+- **Watching other people's streams**: H.264, HEVC, VP8, VP9 and AV1.
+- **Camera**: your own and other people's, as tiles or large (Alt+arrows, Alt+F). Turn it on with the `[]/` button, F12 or Alt+C; pick the camera and quality (auto, 720p, 480p, 360p) in the Camera dialog. Windows and Linux (V4L2).
+- **Eye hiding on your camera.** The program finds your face in every frame and covers the eyes with a block of noise and random characters; the covered pixels cannot be recovered. If no face is found or the program is not sure, others see the Astra DS logo instead of the frame, and your preview says "Face not found". On by default, turn it off with Alt+E or the "Hide eyes" checkbox in the Camera dialog. Everything runs on your computer, about 2 ms per frame, and frames go nowhere except the call. Limitation: if a second person is in the frame and the program doesn't find their face (cut off by the frame edge or turned far away), their eyes may stay visible.
 
 **Not included:** animated GIFs, plugins.
 
 ## Privacy and security
 
-- **No logs, no cache, no telemetry.** The only thing written to disk is the token, and it goes into the system keyring.
+- **No logs, no telemetry, nothing on disk.** Only the token is written to disk, and only into the system keychain. Everything else lives in memory and is wiped when freed.
 - **The token lives in locked memory** that is never swapped out and never ends up in crash dumps.
-- **Your own VLESS (Reality) server** for all traffic, voice included. If the tunnel is down, the app asks instead of silently going direct.
+- **Your own VLESS (Reality) server** for all traffic, voice included. It is used only if you set a link yourself. If the tunnel goes down, the app does not silently fall back to a direct connection, it asks you first.
 - **Streamer mode** hides your email, the VLESS server address, invite links, file paths and DM text.
 - **Panic key:** pressing it three times wipes the token, closes the app and clears the screen.
-- **Captcha** opens right inside the app, and the action is retried automatically.
-- **Quiet notifications.** By default they only say "new message", because Windows keeps notification history on disk.
-- **Everything from the network is checked.** Control characters and text direction overrides are stripped, and the parsers are fuzz-tested (`tools/sec/`).
+- **Captcha** opens in a separate window of the app, and the action is retried automatically afterwards.
+- **Notifications without details.** By default they only say "new message": Windows keeps notification history on disk.
+- **Everything from the network is validated.** Control characters and text direction overrides are stripped, and data parsing is tested with fuzzers (`tools/sec/`).
 
 ## Screenshots
 
@@ -127,61 +172,67 @@ Against an inventory of 162 Discord screens and features, **86%** is done (84% n
 <td><img src="docs/screenshots/settings.png" alt="Voice settings"></td>
 </tr>
 <tr>
-<td align="center">Friends, groups and message requests</td>
+<td align="center">Friends, groups and requests</td>
 <td align="center">Voice settings</td>
 </tr>
 <tr>
 <td colspan="2"><img src="docs/screenshots/start.png" alt="Start screen"></td>
 </tr>
 <tr>
-<td colspan="2" align="center">Start screen: connecting through VLESS, with a "Don't ask again" checkbox</td>
+<td colspan="2" align="center">Start screen: connecting through VLESS with a "Don't ask again" checkbox</td>
 </tr>
 </table>
 
-## Download
-
-Ready-made builds for Windows 10/11 and Linux are in [Releases](../../releases/latest): the regular one and Astra DS Video. On Windows it's a single exe with no installer. On Linux you need glibc 2.36+, `libasound2` and `libx11-6`. For the captcha window on Linux, install `libwebkit2gtk-4.1-0`. Screen sharing on Wayland needs `xdg-desktop-portal` and PipeWire, which regular distributions already have. You can also build it yourself, see below.
+*The screenshots show the Russian interface; switch to English with RU | EN or `--lang=en`.*
 
 ## Useful flags
 
 ```
 --demo            demo with fake data, no network
 --tui             full-screen terminal mode
---cli             line-based mode, like IRC
---no-save         don't save the token, enter it every time
+--cli             line-by-line mode, like IRC
+--lang=ru|en      interface language
+--no-save         don't save the token, enter it on every launch
 --logout          delete the saved token and exit
---no-images       don't load images or avatars
+--no-images       don't load images and avatars
 --vless           set or change your VLESS server
+--no-vless        no VLESS for this launch, direct connection
 --panic=F12       panic key (press three times)
 --invisible       log in as invisible
 --no-ack          don't mark messages as read
---ptt             push to talk instead of voice activity
+--ptt             push-to-talk instead of voice activation
 --tray            minimize to tray (Windows)
---hq              better voice quality at the cost of CPU
+--hq              higher voice quality at the cost of CPU
+--mic=NAME        microphone (part of the device name)
+--out=NAME        output device (part of the name)
 --devices         list audio devices
+--no-update       don't check for updates
+--version         program version
 --selftest        offline self-test
 ```
 
 ## Building
 
-**Windows** (needs WinLibs GCC, CMake, Ninja and Git for Windows):
+**Windows** (you need WinLibs GCC, CMake, Ninja, NASM, Python 3 and Git for Windows):
 
 ```
-bash deps/build-deps.sh     # once: build the dependencies from source
-bash build.sh               # result: build/astra-ds.exe
+bash deps/build-deps.sh     # once: build dependencies from source
+bash build.sh               # regular: build/astra-ds.exe
+VIDEO=1 bash build.sh       # Video: build/astra-ds-video.exe
 ```
 
 **Linux** (Debian or Ubuntu):
 
 ```
-sudo apt install build-essential cmake ninja-build perl git curl xz-utils libasound2-dev libx11-dev pkg-config
+sudo apt install build-essential cmake ninja-build nasm python3 perl git curl xz-utils libasound2-dev libx11-dev pkg-config
 bash deps/build-deps.sh
-bash build.sh               # result: build/astra-ds
+bash build.sh               # regular: build/astra-ds
+VIDEO=1 bash build.sh       # Video: build/astra-ds-video
 ```
 
-Dependencies (zlib, OpenSSL, curl, opus, libdave and others) are built from source with checksum verification and linked statically. There is one exception: the prebuilt libcurl-impersonate library in `third_party/impcurl/`, used only for login requests. It is embedded in the program and is not a separate file next to it. To build with screen sharing: `VIDEO=1 bash build.sh`.
+Dependencies (zlib, OpenSSL, curl, opus, libdave, SpeexDSP, RNNoise, libjpeg-turbo, and for Video also FFmpeg and dav1d) are built from source with checksum verification and linked statically. There is one exception: the prebuilt libcurl-impersonate library in `third_party/impcurl/`, used only for login requests. It is embedded in the program and is not a separate file next to it. System libraries for video on Linux (PulseAudio, PipeWire, D-Bus) are loaded only when needed and are not required to start the program.
 
-To check that everything works: `build/astra-ds --selftest`. That's over 400 checks of the interface, data parsing, voice and security, with no network access.
+To check that everything works: `build/astra-ds --selftest`. It runs more than 470 offline checks of the interface, data parsing, voice and security, more than 550 in the Video build.
 
 ## Code layout
 
@@ -190,15 +241,22 @@ To check that everything works: `build/astra-ds --selftest`. That's over 400 che
 | `src/ui.c` | interface: Discord-like layout, mouse and keyboard |
 | `src/gui_win.c`, `gui_x11.c`, `gui_grid.c` | character-grid window for Windows and Linux |
 | `src/store.c` | data model, permissions, Discord events |
+| `src/memlist.c` | server member list by roles |
 | `src/net.c` | Discord requests and the persistent connection |
 | `src/voice.c`, `voicefx.c` | voice, DAVE encryption, voice messages, voice changer |
 | `src/img.c` | images as colored ASCII |
 | `src/login.c`, `captcha.c` | login, QR code, captcha |
 | `src/vless.c`, `xlite_c.c`, `tls13.c` | VLESS tunnel |
 | `src/secret.c`, `panic.c` | protected memory and the panic key |
+| `src/update.c` | auto-update with a signed manifest |
+| `src/golive.c`, `voice_stream.c`, `streamtest.c` | Video: streams, sending and watching |
+| `src/share_x11.c`, `share_pw.c`, `portal_wl.c` | Video: screen capture on Linux (X11, Wayland via portal and PipeWire) |
+| `src/viddec.c` | Video: decoding other people's streams and cameras |
+| `src/cam.c`, `voice_cam.c` | Video: camera (Media Foundation, V4L2) and sending it into a call |
+| `src/anon.c` | Video: eye hiding on your camera |
 | `src/selftest.c` | self-test |
 | `tools/sec/` | fuzzers and security test rigs |
-| `tools/uitest/` | checks every window through hidden snapshots |
+| `tools/uitest/` | checking every screen with hidden screenshots |
 
 ## Support the project
 
@@ -220,6 +278,10 @@ Questions, ideas and bug reports about Astra DS are welcome by email or in [Issu
 
 ## License
 
-GPL-3.0, see [LICENSE](LICENSE). Third-party code in `third_party/` keeps its own licenses: cJSON (MIT) and the WebView2 header (Microsoft's BSD-style license).
+GPL-3.0, see [LICENSE](LICENSE). Third-party code keeps its own licenses, with full texts in `third_party/LICENSE`:
+
+- in `third_party/`: cJSON (MIT), the WebView2 header (Microsoft's BSD-style license), libcurl-impersonate (MIT), the minih264 H.264 encoder (CC0), the pico face detector (MIT, Video only);
+- built from source: zlib, OpenSSL (Apache-2.0), curl, Opus, libdave and MLSpp, nlohmann/json, Brotli, SpeexDSP and RNNoise (BSD-3), libjpeg-turbo (IJG and BSD-style), for Video also FFmpeg (LGPL-2.1, no GPL parts) and dav1d (BSD-2);
+- the VLESS tunnel: Xray-core (MPL-2.0), Go and its modules.
 
 Astra DS is not affiliated with Discord Inc. Discord is a trademark of Discord Inc.

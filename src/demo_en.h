@@ -156,4 +156,6 @@ static const struct { const char *ru, *en; } DEMO_EN[] = {
     { "флуд номер %d", "flood message %d" },
     { "флуд-2", "flood-2" },
     { "чат", "chat" },
+    { "сплю до обеда", "sleeping till noon" },
+    { "пишу клиент Discord на C", "writing a Discord client in C" },
 };

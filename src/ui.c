@@ -93,6 +93,7 @@ enum {
     A_AR_RAIL, A_AR_CHANS, A_AR_FEED, A_AR_HELP, /* области прокрутки колесом */
     A_AR_LIST,                                   /* arg: 0 список друзей, 1 результаты поиска, 2 выбор друга */
     A_AR_TXT,                                    /* блок текстового вложения (колесо): arg — индекс в S.msgs */
+    A_AR_MEMB,                                   /* список участников сервера справа (колесо) */
     A_BLOCK,                                     /* фон карточки или меню: клик не проходит насквозь */
     A_GUILD, A_ROW, A_MSG, A_REACT, A_MENU, A_BTN, A_INPUT,
     A_OPENCH,                                    /* arg — индекс в S.chans (экран «Друзья») */
@@ -125,7 +126,8 @@ enum {
     A_AC,                                        /* автодополнение: arg — строка списка */
     A_FORMF,                                     /* окно-форма: поле (arg), sub — часть поля */
     A_FORMB,                                     /* окно-форма: кнопка (sub — FB_*) */
-    A_RVSEL                                      /* «Реакции»: arg — реакция */
+    A_RVSEL,                                     /* «Реакции»: arg — реакция */
+    A_MEMB                                       /* участник в списке справа: arg — индекс строки списка (карточка) */
 };
 enum { FA_ROW, FA_MSG, FA_MORE, FA_ACCEPT, FA_DECLINE, FA_UNBLOCK };
 enum {
@@ -586,12 +588,10 @@ static void open_channel(u64 id) {
         forum_close();                           /* посты прошлого форума больше не нужны */
         arch_view = 0;
         tab_add(id);
-        if (is_forum(c)) { forum_open(id, 0, 0); FV.sel = FV.top = 0; U.focus = F_MESSAGES; U.dirty = true; return; }
+        if (is_forum(c)) { ml_close(); forum_open(id, 0, 0); FV.sel = FV.top = 0; U.focus = F_MESSAGES; U.dirty = true; return; }
         if (O.demo) demo_send(id, NULL);
-        else {
-            fetch_messages(false);
-            if (c->guild_id) gw_subscribe(c->guild_id, c->id);
-        }
+        else fetch_messages(false);
+        ml_open(c->guild_id, c->id);             /* список участников справа + op 14 (печатает, окна по 100); ЛС — закрыть */
     }
     U.focus = is_forum(c) ? F_MESSAGES : F_INPUT;
     U.dirty = true;
@@ -4291,9 +4291,8 @@ static void draw_settings(int W, int H) {
     }
 }
 
-/* ---- колонка участников (как в Discord справа): кто писал в открытом канале; только видимое ---- */
-static void draw_members(int x, int w, int H, u64 gid) {
-    g_rect(x, 1, w, H - 1, C_SIDE);
+/* ---- колонка участников, пока списка сервера нет (нет шлюза, ещё не пришёл): кто писал в открытом канале ---- */
+static void draw_members_chat(int x, int w, int H, u64 gid) {
     u64 ids[48];
     const char *nm[48];
     u32 col[48];
@@ -4327,6 +4326,66 @@ static void draw_members(int x, int w, int H, u64 gid) {
         g_listav(x + 2, y, ids[i], nm[i], G_MEMB);
         g_texte(x + 7, y, nm[i], w - 8, col[i] ? col[i] : C_TEXT, 0);
         hit_add(x + 1, y, w - 2, 1, A_NONE, 0, 0, 0);
+    }
+}
+/* ---- список участников сервера, как в Discord: группы ролей (hoist), «В сети», «Не в сети»; у участника
+ * аватар 4x2 с точкой статуса, ник цветом роли, метка БОТ, под ником свой статус или игра. Строка — 2 клетки
+ * в высоту. Колесо листает; store держит и подписывает только окна по 100 вокруг видимого (ml_view). ---- */
+static struct { u64 cid; int top; } MB;
+static u32 status_col(int st);
+static void draw_members(int x, int w, int H, u64 gid, u64 cid) {
+    g_rect(x, 1, w, H - 1, C_SIDE);
+    int total = ml_total(cid);
+    if (total < 0) { draw_members_chat(x, w, H, gid); return; }
+    if (MB.cid != cid) { MB.cid = cid; MB.top = 0; }
+    int y0 = 1, rows = (H - 1 - y0) / 2;
+    if (rows < 1) return;
+    if (MB.top > total - rows) MB.top = total - rows;
+    if (MB.top < 0) MB.top = 0;
+    hit_add(x, 1, w, H - 1, A_AR_MEMB, 0, 0, 0);
+    ml_view(MB.top, MB.top + rows - 1);
+    char t[120];
+    for (int k = 0; k < rows && MB.top + k < total; k++) {
+        int i = MB.top + k, y = y0 + 2 * k;
+        const MemRow *r = ml_row(i);
+        if (!r) {                                /* ещё не пришла: серая заглушка, как у Discord */
+            for (int r2 = 0; r2 < 2; r2++) g_circle_row(x + 1, y + r2, 4, 2, r2, C_PH, NULL, C_WHITE);
+            g_text(x + 6, y, "......", w - 7, C_PH, 0);
+            continue;
+        }
+        if (r->kind == MLR_GROUP) {
+            const char *gn = r->id == ML_G_ONLINE ? TR("В сети") : r->id == ML_G_OFFLINE ? TR("Не в сети") :
+                             r->name[0] ? r->name : TR("Роль");
+            snprintf(t, sizeof t, "%s - %d", gn, r->count);
+            g_texte(x + 2, y + 1, t, w - 3, C_MUTED, AT_B);
+            continue;
+        }
+        u64 uid = r->id;
+        bool off = r->status == PS_OFFLINE;
+        u8 st = r->status, act = r->act;
+        bool bot = r->bot;
+        u32 col = off ? C_MUTED : r->color ? r->color : C_TEXT;
+        char nm[80], tx[80];
+        snprintf(nm, sizeof nm, "%s", r->name[0] ? r->name : "?");
+        snprintf(tx, sizeof tx, "%s", r->text);
+        for (int r2 = 0; r2 < 2; r2++) { g_avatar(x + 1, y + r2, 4, 2, r2, uid, NULL); strip_part(G_MEMB, x + 1, y + r2, 4, 2, r2, PK_AVR, uid); }
+        if (!off) g_cap(fine_on ? x + 5 : x + 4, y + 1, 'o', status_col(st), bg_at(x + 5, y + 1));
+        int nx = x + 7, room = w - 8;
+        const char *bt = TR("БОТ");
+        int bw = bot ? vw(bt) + 2 : 0;
+        int u = g_texte(nx, y, nm, room - (bot ? bw + 1 : 0), col, 0);
+        if (bot && u + 1 + bw <= room) { g_pill(nx + u + 1, y, bw, C_ACC); g_text(nx + u + 2, y, bt, bw - 2, C_WHITE, AT_B); }
+        if (tx[0] && !off) {
+            switch (act) {
+            case MLA_STREAM: snprintf(t, sizeof t, TR("Стримит %s"), tx); break;
+            case MLA_LISTEN: snprintf(t, sizeof t, TR("Слушает %s"), tx); break;
+            case MLA_WATCH: snprintf(t, sizeof t, TR("Смотрит %s"), tx); break;
+            case MLA_COMPETE: snprintf(t, sizeof t, TR("Соревнуется в %s"), tx); break;
+            default: snprintf(t, sizeof t, "%s", tx); break;
+            }
+            g_texte(nx, y + 1, t, room, C_MUTED, 0);
+        }
+        hit_add(x, y, w, 2, A_MEMB, 0, i, HV_BG);
     }
 }
 
@@ -4617,9 +4676,13 @@ static void draw_chat(int cx, int cw, int H, Channel *oc, bool panel) {
     bool chset = welcome && oc->guild_id;          /* кнопка «Настроить канал» под приветствием канала */
     int pre = !oc ? 0 : welcome ? 3 + nwl + 1 + (chset ? 2 : 0) : 1;   /* приветствие или «загрузить старые» */
     int rows = frows;
-    scroll_fix(pre, nml, rows);
+    /* полоса «Вы просматриваете старые сообщения» занимает строку ленты: ограничивать прокрутку надо уже по
+     * высоте без неё, иначе лента останавливается на строку ниже верха, U.at_top не наступает и старые
+     * сообщения не подгружаются (оставалось первые 50) */
     bool below = U.msg_scroll > 0 || S.detached;   /* detached: загружены старые, самых новых нет */
-    if (below) { rows--; scroll_fix(pre, nml, rows); }
+    if (below) rows--;
+    scroll_fix(pre, nml, rows);
+    if (below && !(U.msg_scroll > 0 || S.detached)) { rows++; scroll_fix(pre, nml, rows); below = false; }   /* всё влезло: полосы нет */
     int total = pre + nml;
     int v_start = total - rows - U.msg_scroll;  /* виртуальный индекс верхней видимой строки */
     if (total < rows) v_start = total - rows;   /* мало строк: прижаты к низу, как в Discord */
@@ -8161,7 +8224,7 @@ static void draw_main(int W, int H) {
     if (fw > 0) draw_chat(cx, fw, H, oc, false);
     if (memw) {
         for (int y = 1; y < H; y++) g_ch(cx + fw, y, '|', C_LINE, 0);
-        draw_members(cx + fw + 1, memw - 1, H, oc->guild_id);
+        draw_members(cx + fw + 1, memw - 1, H, oc->guild_id, oc->id);
     }
     if (srw) {
         if (fw > 0) { for (int y = 1; y < H; y++) g_ch(cx + fw, y, '|', C_LINE, 0); draw_search(cx + fw + 1, srw - 1, H); }
@@ -10407,6 +10470,7 @@ static void wheel(int x, int y, bool up) {
     case A_AR_HELP: U.help_scroll += up ? -3 : 3; if (U.help_scroll < 0) U.help_scroll = 0; break;
     case A_AR_RAIL: U.guild_free = true; U.guild_scroll += up ? -1 : 1; break;
     case A_AR_CHANS: U.row_free = true; U.row_scroll += up ? -3 : 3; break;
+    case A_AR_MEMB: MB.top += up ? -3 : 3; if (MB.top < 0) MB.top = 0; break;   /* верх — draw_members */
     case A_AR_TXT: {
         /* колесо над развёрнутым текстом — прокрутка внутри блока */
         for (int i = U.nhit - 1; i >= 0; i--) if (U.hit[i].act == A_AR_TXT && hit_in(&U.hit[i], x, y)) {
@@ -10859,6 +10923,7 @@ static void mouse(const Key *k) {
     case A_REPLYJ: if (h->arg >= 0 && h->arg < S.nmsgs) jump_to(S.open_ch, S.msgs[h->arg].ref_id); break;
     case A_CHLINK: if (h->arg >= 0 && h->arg < S.nchans) ui_open_channel(S.chans[h->arg].id); break;
     case A_MENT: if (h->arg >= 0 && h->arg < S.nusers) user_card(S.users[h->arg].id, k->x, k->y); break;
+    case A_MEMB: { const MemRow *r = ml_row(h->arg); if (r && r->kind == MLR_MEMBER) user_card(r->id, k->x, k->y); break; }
     default: break;
     }
 }

@@ -505,7 +505,7 @@ bool mod_voice_mute(u64 gid, u64 uid, bool mute, bool deaf, char *err, size_t er
 /* ---- Автообновление (update.c; SECURITY.md «Автообновление») ----
  * Проверка — при запуске не чаще раза в сутки (если включено; дата — в хранилище секретов) или по кнопке.
  * Загрузка и замена — только после явного «Обновить» (update_apply). Затем «Перезапустить» (update_restart). */
-#define ASTRA_VERSION "0.2.7"                   /* версия этой сборки: релиз поднимает её (обновление — только на строго большую) */
+#define ASTRA_VERSION "0.2.8"                   /* версия этой сборки: релиз поднимает её (обновление — только на строго большую) */
 enum { UP_IDLE, UP_CHECKING, UP_NONE, UP_AVAILABLE, UP_DOWNLOADING, UP_READY, UP_FAILED };
 typedef struct {
     int phase;                                  /* UP_* */
@@ -794,6 +794,9 @@ void voice_settings_flush(void);
 void voice_settings_forget(void);               /* паника, --logout */
 int voice_settings_format(char *b, size_t cap); /* самопроверка */
 bool voice_settings_parse(const char *s);
+/* окно Video скрыто от снимков экрана и чужой демонстрации (по умолчанию нет; сохраняется с настройками) */
+void app_hide_capture_set(bool on);
+bool app_hide_capture(void);
 void voice_duck_others(bool on);                /* приглушать другие программы в звонке (по умолчанию нет) */
 bool voice_duck_others_on(void);
 /* №145 звуки звонка — синтез (без файлов): звонок (повторяется до sound_stop), вход/выход, микрофон вкл/выкл,

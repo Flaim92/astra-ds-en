@@ -147,6 +147,7 @@ Out of an inventory of 162 Discord screens and features, **86%** are done (84% i
 - **The token lives in locked memory** that is never swapped out and never ends up in crash dumps.
 - **Your own VLESS (Reality) server** for all traffic, voice included. It is used only if you set a link yourself. If the tunnel goes down, the app does not silently fall back to a direct connection, it asks you first.
 - **Streamer mode** hides your email, the VLESS server address, invite links, file paths and DM text.
+- **Hide the window from screenshots** (Video, Windows and macOS): optionally, the window is not visible in Snipping Tool, screenshots or other people's screen sharing. Off by default.
 - **Panic key:** pressing it three times wipes the token, closes the app and clears the screen.
 - **Captcha** opens in a separate window of the app, and the action is retried automatically afterwards.
 - **Notifications without details.** By default they only say "new message": Windows keeps notification history on disk.

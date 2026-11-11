@@ -2437,6 +2437,11 @@ bool sounds_enabled(void) { return !SN.off; }
 #define VS_CAP 2500                             /* Windows: запись не больше 2560 байт */
 #define VS_HEAD "astra-voice 1\n"
 static bool vs_on;                              /* настройки загружены: дальше изменения сохраняются */
+/* «Скрывать окно от снимков экрана и трансляций» (Video, Windows и macOS): по умолчанию выкл. — «Ножницы»,
+ * снимки и чужая демонстрация экрана видят окно (issue #10). Хранится в той же записи настроек. */
+static atomic_bool g_hide_cap;
+void app_hide_capture_set(bool on) { atomic_store(&g_hide_cap, on); voice_settings_touch(); }
+bool app_hide_capture(void) { return atomic_load(&g_hide_cap); }
 static char vs_last[VS_CAP];
 static i64 vs_due;
 static void voice_settings_touch(void) { if (vs_on) vs_due = now_ms() + 1500; }
@@ -2449,9 +2454,10 @@ static bool vs_name_ok(const char *s) {
 int voice_settings_format(char *b, size_t cap) {
     char dev[2][96];
     for (int o = 0; o < 2; o++) snprintf(dev[o], sizeof dev[o], "%s", V.mu ? voice_device(o) : "");
-    int k = snprintf(b, cap, VS_HEAD "gain=%d\nvad=%d\nvadauto=%d\nns=%d\nhpf=%d\nduck=%d\nsounds=%d\nptt=%d\n",
+    int k = snprintf(b, cap, VS_HEAD "gain=%d\nvad=%d\nvadauto=%d\nns=%d\nhpf=%d\nduck=%d\nsounds=%d\nptt=%d\nhidecap=%d\n",
                      voice_mic_gain(), atomic_load(&V.vad_db), atomic_load(&V.vad_auto) ? 1 : 0, voice_ns_mode(),
-                     voice_hpf_on() ? 1 : 0, voice_duck_others_on() ? 1 : 0, sounds_enabled() ? 1 : 0, atomic_load(&V.ptt_vk));
+                     voice_hpf_on() ? 1 : 0, voice_duck_others_on() ? 1 : 0, sounds_enabled() ? 1 : 0, atomic_load(&V.ptt_vk),
+                     app_hide_capture() ? 1 : 0);
     if (k < 0 || (size_t)k >= cap) return -1;
     for (int o = 0; o < 2; o++) {
         if (!dev[o][0] || !vs_name_ok(dev[o])) continue;
@@ -2496,6 +2502,7 @@ bool voice_settings_parse(const char *s) {
                 else if (!strcmp(key, "duck") && num && (x == 0 || x == 1)) voice_duck_others(x == 1);
                 else if (!strcmp(key, "sounds") && num && (x == 0 || x == 1)) sounds_enable(x == 1);
                 else if (!strcmp(key, "ptt") && num && x >= 0 && x < 256) voice_ptt_bind((int)x);
+                else if (!strcmp(key, "hidecap") && num && (x == 0 || x == 1)) app_hide_capture_set(x == 1);
                 else if ((!strcmp(key, "mic") || !strcmp(key, "out")) && *val && vs_name_ok(val) && V.mu) {
                     int o = key[0] == 'o';
                     if (!(o ? O.out : O.mic)) {      /* --mic= / --out= в командной строке важнее сохранённого */

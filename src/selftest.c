@@ -2850,7 +2850,10 @@ static void t_audio_dev(void) {
         voice_hpf(false);
         voice_set_volume(4242, 0.5f);
         voice_set_device(0, "Микрофон X");
+        bool hc0 = app_hide_capture();
+        app_hide_capture_set(true);
         int n = voice_settings_format(vb, sizeof vb);
+        app_hide_capture_set(false);
         voice_mic_gain_set(100);
         voice_vad_adjust(-45 - voice_vad_db());
         voice_ns_set(0);
@@ -2859,7 +2862,9 @@ static void t_audio_dev(void) {
         voice_set_device(0, "");
         bool rd = voice_settings_parse(vb);
         bool back = n > 0 && rd && voice_mic_gain() == 150 && voice_vad_db() == -40 && voice_ns_mode() == 2 && !voice_hpf_on() &&
-                    voice_get_volume(4242) > 0.49f && voice_get_volume(4242) < 0.51f && !strcmp(voice_device(0), "Микрофон X");
+                    voice_get_volume(4242) > 0.49f && voice_get_volume(4242) < 0.51f && !strcmp(voice_device(0), "Микрофон X") &&
+                    app_hide_capture();
+        app_hide_capture_set(hc0);
         voice_mic_gain_set(100);
         voice_hpf(true);
         voice_set_device(0, "");

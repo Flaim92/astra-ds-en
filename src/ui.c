@@ -141,7 +141,7 @@ enum {
     B_PING, B_PINS, B_INBOX, B_PRESENT, B_STATUS, B_CARD_BLOCK, B_CARD_ADD, B_NEWMSG,
     B_PINS_MORE, B_INBOX_T0, B_INBOX_T1, B_ACK_ALL, B_EP_X, B_EMOJI, B_CAP_GO, B_CAP_NO,
     B_ADDSRV, B_GMENU, B_GINVITE, B_ADDFRIEND, B_TXT_EXP, B_TXT_DL, B_STARTASK, B_RV_X, B_EPH_HIDE, B_EMBEDS, B_MRETRY, B_MDISCARD,
-    B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS, B_NS_OFF, B_NS_SPX, B_NS_RNN, B_WATCH, B_WATCH_STOP, B_WATCH_PICK, B_WATCH_FULL, B_WATCH_CHAT, B_WATCH_SHOW, B_CAM, B_CAM_PV, B_CAM_VIEW, B_CAM_TILE, B_ANON, B_MICG_DN, B_MICG_UP, B_MICG_0,
+    B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS, B_NS_OFF, B_NS_SPX, B_NS_RNN, B_WATCH, B_WATCH_STOP, B_WATCH_PICK, B_WATCH_FULL, B_WATCH_CHAT, B_WATCH_SHOW, B_CAM, B_CAM_PV, B_CAM_VIEW, B_CAM_TILE, B_ANON, B_MICG_DN, B_MICG_UP, B_MICG_0, B_HIDECAP,
     B_SP_PREV, B_SP_NEXT
 };
 enum { MI_REPLY = 1, MI_EDIT, MI_DELETE, MI_REACT, MI_COPY,
@@ -3951,7 +3951,7 @@ static void dev_field(int x, int y, int w, int out) {
 #ifdef ASTRA_VIDEO
 /* Демонстрация экрана (видео-версия). Пока идёт: режим стримера включён, индикатор в строке состояния,
  * автостоп — выход из звонка, смена канала звонка, закрытие окна-источника, блокировка экрана, паника.
- * Своё окно исключено из захвата всегда (term_capture_exclude с запуска). Кадры никуда не пишутся. */
+ * Своё окно исключено из захвата, только если включено «Скрывать окно от снимков» (по умолчанию нет). Кадры никуда не пишутся. */
 static char sh_t[24][80];
 static const char *sh_names[25];
 static uintptr_t sh_ids[24];
@@ -4278,6 +4278,12 @@ static void draw_settings(int W, int H) {
         g_text(x, y, TR("РЕЖИМ СТРИМЕРА"), w, C_MUTED, AT_B);
         g_button(x, y + 1, streamer_on() ? TR("[x] Скрывать личное на экране") : TR("[ ] Скрывать личное на экране"), w, streamer_on() ? 1 : 0, B_STREAMER);
         y += 3;
+#if defined(ASTRA_VIDEO) && (defined(_WIN32) || defined(__APPLE__))
+        g_text(x, y, TR("СНИМКИ ЭКРАНА"), w, C_MUTED, AT_B);
+        g_button(x, y + 1, app_hide_capture() ? TR("[x] Скрывать окно от снимков экрана и трансляций") : TR("[ ] Скрывать окно от снимков экрана и трансляций"),
+                 w, app_hide_capture() ? 1 : 0, B_HIDECAP);
+        y += 3;
+#endif
         const char *pn = panic_key_name();
         if (pn && *pn && streamer_on()) snprintf(t, sizeof t, TR("задан (скрыто: режим стримера)"));
         else if (pn && *pn) snprintf(t, sizeof t, TR("%s x3: стереть токен и ссылку VLESS и выйти"), pn);
@@ -10613,6 +10619,17 @@ static void button(int id, int x, int y) {
     case B_NOTIFY: { int nm = notify_mode(); nm = nm == NOTIFY_OFF ? NOTIFY_PLAIN : nm == NOTIFY_PLAIN ? NOTIFY_TEXT : NOTIFY_OFF; notify_set(nm); break; }
     case B_FILTER: U.settings = false; U.full = true; fm_open(FM_FILTER, 0, 0); break;
     case B_FULL: full_toggle(); break;
+#ifdef ASTRA_VIDEO
+    case B_HIDECAP: {
+        bool on = !app_hide_capture();
+        app_hide_capture_set(on);
+        bool ok = term_capture_exclude(on);
+        share_self_excluded(on && ok);
+        ui_notice(on ? (ok ? TR("окно скрыто от снимков экрана и трансляций") : TR("скрыть окно не вышло: система не поддерживает"))
+                     : TR("окно видно на снимках экрана и в трансляциях"));
+        break;
+    }
+#endif
     case B_STREAMER: streamer_set(!streamer_on()); ui_notice(streamer_on() ? TR("режим стримера включён") : TR("режим стримера выключен")); break;
     case B_PTT_SET: ptt_capture = true; break;   /* следующее событие окна (не опрос клавиатуры) */
     case B_PTT_CLR: voice_ptt_bind(0); ptt_capture = false; break;
@@ -11614,7 +11631,11 @@ static void ui_drop_file(const char *path) {
 void ui_init(void) {
     g_ui_drop = ui_drop_file;
 #ifdef ASTRA_VIDEO
-    share_self_excluded(term_capture_exclude(true));   /* окно видео-версии не попадает ни в чей захват; не вышло — свои окна считаются перекрытием */
+    {   /* окно не попадает в чужой захват, только если так выбрано в настройках (по умолчанию снимки видят окно) */
+        bool hc = app_hide_capture();
+        bool ok = term_capture_exclude(hc);
+        share_self_excluded(hc && ok);           /* не скрыто — свои окна считаются перекрытием */
+    }
 #endif
     if (!lang_inited) ui_lang_init(-1);
     U.focus = F_GUILDS;

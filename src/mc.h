@@ -2,6 +2,11 @@
  * Принципы: безопасность > нулевое логирование > минимум памяти и процессора. */
 #ifndef MC_H
 #define MC_H
+#ifdef __APPLE__
+/* macOS: эти имена уже объявлены в заголовках mach (их тянут Cocoa и mach/mach.h) — у нас свои символы */
+#define thread_create astra_thread_create
+#define panic_init astra_panic_init
+#endif
 
 #include <stddef.h>
 #include <stdint.h>
@@ -500,7 +505,7 @@ bool mod_voice_mute(u64 gid, u64 uid, bool mute, bool deaf, char *err, size_t er
 /* ---- Автообновление (update.c; SECURITY.md «Автообновление») ----
  * Проверка — при запуске не чаще раза в сутки (если включено; дата — в хранилище секретов) или по кнопке.
  * Загрузка и замена — только после явного «Обновить» (update_apply). Затем «Перезапустить» (update_restart). */
-#define ASTRA_VERSION "0.2.6"                   /* версия этой сборки: релиз поднимает её (обновление — только на строго большую) */
+#define ASTRA_VERSION "0.2.7"                   /* версия этой сборки: релиз поднимает её (обновление — только на строго большую) */
 enum { UP_IDLE, UP_CHECKING, UP_NONE, UP_AVAILABLE, UP_DOWNLOADING, UP_READY, UP_FAILED };
 typedef struct {
     int phase;                                  /* UP_* */
@@ -779,6 +784,16 @@ void voice_mic_test(bool on);
 /* №143 фильтр микрофона: срез ниже 90 Гц (гул, стук по столу) — до шумоподавления/порога и Opus; по умолчанию вкл. */
 void voice_hpf(bool on);
 bool voice_hpf_on(void);
+/* громкость микрофона 0..400 % (по умолчанию 100; --mic-gain=N); выше 100 — с мягким ограничением */
+void voice_mic_gain_set(int pct);
+int voice_mic_gain(void);
+void voice_mic_gain_apply(int16_t *s, int n);
+/* настройки голоса в системном хранилище (запись "voice"): загрузка при старте, запись при изменении и выходе */
+void voice_settings_load(void);
+void voice_settings_flush(void);
+void voice_settings_forget(void);               /* паника, --logout */
+int voice_settings_format(char *b, size_t cap); /* самопроверка */
+bool voice_settings_parse(const char *s);
 void voice_duck_others(bool on);                /* приглушать другие программы в звонке (по умолчанию нет) */
 bool voice_duck_others_on(void);
 /* №145 звуки звонка — синтез (без файлов): звонок (повторяется до sound_stop), вход/выход, микрофон вкл/выкл,

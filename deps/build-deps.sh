@@ -12,21 +12,43 @@ SRC=$DEPS/src
 BLD=$DEPS/build
 PFX=$DEPS/prefix
 mkdir -p "$SRC" "$BLD" "$PFX"
-JOBS=$(nproc)
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) OS=win; MAKE=mingw32-make ;;
+    Darwin) OS=mac; MAKE=make ;;
     *) OS=linux; MAKE=make ;;
 esac
+if [ "$OS" = mac ]; then
+    # macOS: скрипт рассчитан на GNU sed и sha256sum (brew install gnu-sed coreutils); компилятор — clang
+    for g in gnu-sed coreutils; do
+        d=$(brew --prefix "$g" 2>/dev/null)/libexec/gnubin
+        [ -d "$d" ] && PATH="$d:$PATH"
+    done
+    sed --version > /dev/null 2>&1 || { echo "нужен GNU sed: brew install gnu-sed coreutils"; exit 1; }
+    command -v sha256sum > /dev/null || { echo "нужен sha256sum: brew install coreutils"; exit 1; }
+    export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-12.0}
+    export CC=clang CXX=clang++
+    gcc() { clang "$@"; }                      # сборка мелких библиотек ниже вызывает gcc напрямую
+    JOBS=$(sysctl -n hw.ncpu)
+else
+    JOBS=$(nproc)
+fi
 
 # Общие флаги защиты и размера для всего, что попадает в .exe.
 HARDEN="-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -ffunction-sections -fdata-sections"
 [ "$OS" = linux ] && HARDEN="$HARDEN -fPIC"   # статические библиотеки внутри PIE
 export CFLAGS="$HARDEN"
 export CXXFLAGS="$HARDEN"
+# macOS: Apple clang ищет /usr/local/include РАНЬШЕ каталогов -isystem, а CMake подключает найденные библиотеки
+# через -isystem. На Intel там Homebrew (openssl@3 и др.): curl собирался с чужими заголовками OpenSSL.
+# Каталоги -I идут раньше /usr/local/include — свой prefix первым.
+if [ "$OS" = mac ]; then
+    export CFLAGS="$CFLAGS -I$PFX/include"
+    export CXXFLAGS="$CXXFLAGS -I$PFX/include"
+fi
 
 fetch() { # файл url sha256
     local f=$SRC/$1
-    [ -f "$f" ] || curl -fsSL --proto '=https' --retry 3 -o "$f.part" "$2" && { [ -f "$f" ] || mv "$f.part" "$f"; }
+    [ -f "$f" ] || curl -fsSL --proto '=https' --retry 5 --retry-all-errors -o "$f.part" "$2" && { [ -f "$f" ] || mv "$f.part" "$f"; }
     echo "$3  $f" | sha256sum -c --quiet - || { echo "ХЭШ НЕ СОВПАЛ: $1"; rm -f "$f"; exit 1; }
 }
 
@@ -38,7 +60,13 @@ unpack() { # архив каталог
 
 cmake_static() { # исходники билд-каталог [опции...]
     local s=$1 b=$2; shift 2
-    cmake -S "$s" -B "$b" -G Ninja \
+    # macOS: Homebrew (/usr/local на Intel, /opt/homebrew на arm64) не должен подменять наши библиотеки.
+    # Пути к OpenSSL — явно. Порядок заголовков (свой prefix раньше /usr/local/include) — в CFLAGS выше.
+    local mac=()
+    [ "$OS" = mac ] && mac=(-DCMAKE_IGNORE_PREFIX_PATH="/usr/local;/opt/homebrew" -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF
+        -DOPENSSL_INCLUDE_DIR="$PFX/include" -DOPENSSL_CRYPTO_LIBRARY="$PFX/lib/libcrypto.a"
+        -DOPENSSL_SSL_LIBRARY="$PFX/lib/libssl.a" --no-warn-unused-cli)
+    cmake -S "$s" -B "$b" -G Ninja "${mac[@]}" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$PFX" \
         -DCMAKE_PREFIX_PATH="$PFX" \
@@ -114,6 +142,10 @@ PM
     # Windows: только libcrypto (TLS делает Schannel). Linux: ещё libssl для TLS в curl.
     local target=mingw64 tls="no-ssl no-tls no-sock"
     [ "$OS" = linux ] && { target=linux-x86_64; tls="no-ssl3 no-tls1 no-tls1_1"; }
+    if [ "$OS" = mac ]; then
+        tls="no-ssl3 no-tls1 no-tls1_1"
+        case "$(uname -m)" in arm64) target=darwin64-arm64-cc ;; *) target=darwin64-x86_64-cc ;; esac
+    fi
     perl Configure $target no-shared no-module no-dso no-engine no-apps no-docs no-tests \
         no-ui-console no-legacy no-deprecated $tls no-dtls no-quic no-srtp no-ct \
         no-cms no-ts no-comp no-autoload-config no-http \
@@ -162,6 +194,22 @@ build_curl() {
         -DCURL_DISABLE_SHUFFLE_DNS=ON -DCURL_DISABLE_SOCKETPAIR=OFF -DCURL_DISABLE_OPENSSL_AUTO_LOAD_CONFIG=ON
     # Установка CMake кладёт только заголовки; библиотеку берём из каталога сборки.
     cp "$BLD/curl-b/lib/libcurl.a" "$PFX/lib/libcurl.a"
+    # macOS: OpenSSL должен быть нашим (deps/prefix), а не из Homebrew
+    if [ "$OS" = mac ]; then
+        grep -q "Found OpenSSL: $PFX" "$BLD/curl-b.configure.txt" || { grep 'OpenSSL' "$BLD/curl-b.configure.txt"; echo "curl: чужой OpenSSL"; exit 1; }
+        # наш OpenSSL собран no-engine (и без OCSP): ссылки на ENGINE_/OCSP_ значат, что заголовки были чужие
+        if nm -u "$PFX/lib/libcurl.a" 2>/dev/null | grep -qE '^_(ENGINE_|OCSP_)'; then
+            echo "curl: собран с чужими заголовками OpenSSL"
+            local cmd
+            cmd=$(ninja -C "$BLD/curl-b" -t commands | grep -m1 'vtls/openssl.c' || true)
+            echo "$cmd"
+            ls -la /usr/local/include/openssl 2>&1 | head -3; echo "CPATH=${CPATH:-} C_INCLUDE_PATH=${C_INCLUDE_PATH:-} SDKROOT=${SDKROOT:-}"
+            grep -n 'OPENSSL_NO_ENGINE\|OPENSSL_NO_OCSP' "$PFX/include/openssl/configuration.h" || echo "в configuration.h нет OPENSSL_NO_ENGINE/OCSP"
+            # какие заголовки openssl реально подключаются и порядок поиска
+            ( cd "$BLD/curl-b" && eval "${cmd/ -o lib\/CMakeFiles\/libcurl_static.dir\/vtls\/openssl.c.o/ -o /dev/null} -H -v -fsyntax-only" 2>&1 | grep -E 'openssl/(ssl|opensslconf|configuration)\.h|^ /|search starts' | head -20 ) || true
+            exit 1
+        fi
+    fi
     grep -q 'Protocols: http https ws wss$' "$BLD/curl-b.configure.txt" || { grep 'Protocols:' "$BLD/curl-b.configure.txt"; echo "curl: лишние протоколы"; exit 1; }
 }
 
@@ -209,8 +257,27 @@ build_rnnoise() {
     unpack rnnoise-0.2.tar.gz rnnoise
     local b=$BLD/rnnoise o=$BLD/rnnoise-o
     rm -rf "$o"; mkdir -p "$o"
+    # Без AVX/SSE2 (ARM, Apple Silicon) vec.h берёт переносимый вариант, а он ждёт os_support.h из Opus,
+    # которого в архиве нет: нужные ему макросы копирования — свои.
+    [ -f "$b/src/os_support.h" ] || cat > "$b/src/os_support.h" <<'EOT'
+#ifndef OS_SUPPORT_H
+#define OS_SUPPORT_H
+#include <string.h>
+#include <stdlib.h>
+#ifndef OPUS_COPY
+#define OPUS_COPY(dst, src, n) (memcpy((dst), (src), (n) * sizeof(*(dst)) + 0 * ((dst) - (src))))
+#endif
+#ifndef OPUS_MOVE
+#define OPUS_MOVE(dst, src, n) (memmove((dst), (src), (n) * sizeof(*(dst)) + 0 * ((dst) - (src))))
+#endif
+#ifndef OPUS_CLEAR
+#define OPUS_CLEAR(dst, n) (memset((dst), 0, (n) * sizeof(*(dst))))
+#endif
+#endif
+EOT
     for f in denoise rnn pitch kiss_fft celt_lpc nnet nnet_default parse_lpcnet_weights rnnoise_data rnnoise_tables; do
-        gcc $CFLAGS -std=gnu11 -I"$b/include" -I"$b/src" -c "$b/src/$f.c" -o "$o/$f.o"
+        # DISABLE_NEON: на ARM (Apple Silicon) — тот же переносимый C (NEON-вариант ждёт os_support.h, которого нет в архиве)
+        gcc $CFLAGS -std=gnu11 -DDISABLE_NEON -I"$b/include" -I"$b/src" -c "$b/src/$f.c" -o "$o/$f.o"
     done
     rm -f "$PFX/lib/librnnoise.a"
     ar rcs "$PFX/lib/librnnoise.a" "$o"/*.o
@@ -332,7 +399,14 @@ build_jpegcam() {
     # Только libjpeg API, статически: без TurboJPEG API, утилит, тестов, арифметического кодирования.
     fetch libjpeg-turbo-3.2.1.tar.gz https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.1/libjpeg-turbo-3.2.1.tar.gz \
         c27ad72a68da151177929aa969ae773a2da5ac2af9ce946079314fdac8cece7f
-    command -v nasm > /dev/null || { echo "jpegcam: нужен nasm (SIMD)"; exit 1; }
+    # macOS: символы Mach-O с префиксом «_», переименование — llvm-objcopy (brew install llvm); arm64 — NEON без nasm
+    local us="" objcopy=objcopy
+    if [ "$OS" = mac ]; then
+        us=_
+        objcopy="$(brew --prefix llvm 2>/dev/null)/bin/llvm-objcopy"
+        [ -x "$objcopy" ] || { echo "jpegcam: нужен llvm-objcopy (brew install llvm)"; exit 1; }
+    fi
+    [ "$OS" = mac ] && [ "$(uname -m)" = arm64 ] || command -v nasm > /dev/null || { echo "jpegcam: нужен nasm (SIMD)"; exit 1; }
     unpack libjpeg-turbo-3.2.1.tar.gz jpegcam
     local inst=$BLD/jpegcam-inst
     rm -rf "$inst" "$BLD/jpegcam-b"
@@ -344,13 +418,17 @@ build_jpegcam() {
     # (MinGW: .refptr.<имя> — общие COMDAT-указатели; для своих имён тоже переименовываются, иначе компоновщик слил бы
     # указатель второй копии с указателем первой)
     nm -g --defined-only "$inst/lib/libjpeg.a" | awk 'NF >= 3 && $2 ~ /^[A-Z]$/ { print $3 }' | sort -u > "$BLD/jpegcam-all.txt"
-    grep -E '^[A-Za-z_][A-Za-z0-9_]*$' "$BLD/jpegcam-all.txt" | grep -vE '^__' > "$BLD/jpegcam-syms.txt"
+    if [ "$OS" = mac ]; then   # имена C в Mach-O — «_имя»: в список идут без префикса
+        grep -E '^_[A-Za-z][A-Za-z0-9_]*$' "$BLD/jpegcam-all.txt" | sed 's/^_//' > "$BLD/jpegcam-syms.txt"
+    else
+        grep -E '^[A-Za-z_][A-Za-z0-9_]*$' "$BLD/jpegcam-all.txt" | grep -vE '^__' > "$BLD/jpegcam-syms.txt"
+    fi
     [ -s "$BLD/jpegcam-syms.txt" ]
     {
-        awk '{ print $1 " camj_" $1 }' "$BLD/jpegcam-syms.txt"
-        awk '{ print ".refptr." $1 " .refptr.camj_" $1 }' "$BLD/jpegcam-syms.txt"
+        awk -v u="$us" '{ print u $1 " " u "camj_" $1 }' "$BLD/jpegcam-syms.txt"
+        [ "$OS" = mac ] || awk '{ print ".refptr." $1 " .refptr.camj_" $1 }' "$BLD/jpegcam-syms.txt"
     } > "$BLD/jpegcam-redef.txt"
-    objcopy --redefine-syms="$BLD/jpegcam-redef.txt" "$inst/lib/libjpeg.a" "$PFX/lib/libjpegcam.a"
+    "$objcopy" --redefine-syms="$BLD/jpegcam-redef.txt" "$inst/lib/libjpeg.a" "$PFX/lib/libjpegcam.a"
     rm -rf "$PFX/include/jpegcam"; mkdir -p "$PFX/include/jpegcam"
     cp "$inst"/include/{jconfig.h,jerror.h,jmorecfg.h,jpeglib.h} "$PFX/include/jpegcam/"
     {
@@ -363,7 +441,7 @@ build_jpegcam() {
         echo "#endif"
     } > "$PFX/include/jpegcam/camj.h"
     # проверка: в переименованной библиотеке не осталось определённого jpeg_* (иначе — конфликт с копией img.c)
-    ! nm -g --defined-only "$PFX/lib/libjpegcam.a" | awk 'NF >= 3 { print $3 }' | grep -qE '^(jpeg_|jsimd_|jinit_)'
+    ! nm -g --defined-only "$PFX/lib/libjpegcam.a" | awk 'NF >= 3 { print $3 }' | grep -qE "^${us}(jpeg_|jsimd_|jinit_)"
 }
 
 build_brotli() {
@@ -401,6 +479,7 @@ build_dav1d() {
     py=$(command -v python3 || command -v python)
     [ "$OS" = win ] && py=$(command -v python)   # python3 в Windows — заглушка магазина
     command -v nasm > /dev/null && asm=true
+    [ "$OS" = mac ] && [ "$(uname -m)" = arm64 ] && asm=true   # macOS arm64: NEON собирает clang, nasm не нужен
     rm -rf "$BLD/dav1d-b"
     ( cd "$BLD/dav1d" && "$py" "$BLD/meson/meson.py" setup "$BLD/dav1d-b" --prefix="$PFX" --libdir=lib \
         --buildtype=release -Db_ndebug=true -Ddefault_library=static -Denable_tools=false -Denable_tests=false \
@@ -429,7 +508,7 @@ build_ffmpeg() {
     [ "$(grep -c 'film_grain_dbp' "$h274")" = 3 ] || { echo "ffmpeg: патч h274 не применился"; exit 1; }
     local asm=--disable-x86asm extra=""
     command -v nasm > /dev/null && asm=--enable-x86asm
-    [ "$OS" = linux ] && extra="--enable-pic"
+    [ "$OS" != win ] && extra="--enable-pic"
     mkdir -p "$BLD/tmp"                          # TMPDIR Windows (C:\...) configure не понимает
     ( cd "$BLD/ffmpeg" && export TMPDIR="$BLD/tmp" && ./configure --prefix="$PFX" --libdir="$PFX/lib" --incdir="$PFX/include" \
         --enable-static --disable-shared --disable-everything --disable-autodetect --disable-programs --disable-doc \

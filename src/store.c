@@ -381,8 +381,25 @@ static int dm_cmp(const void *a, const void *b) {
     return 0;
 }
 void store_sort_dms(void) {
-    /* ЛС в начале массива по свежести; остальное после (порядок серверов строит интерфейс). */
-    qsort(S.chans, (size_t)S.nchans, sizeof(Channel), dm_cmp);
+    /* ЛС в начале массива по свежести; остальное после (порядок серверов строит интерфейс).
+     * Сортировка устойчивая (слиянием): каналы серверов для dm_cmp равны и должны сохранить порядок.
+     * qsort этого не обещает: glibc сортирует слиянием, а macOS и msvcrt перемешивали бы равные. */
+    size_t n = (size_t)S.nchans;
+    if (n < 2) return;
+    Channel *tmp = malloc(n * sizeof *tmp);
+    if (!tmp) { qsort(S.chans, n, sizeof(Channel), dm_cmp); return; }
+    Channel *src = S.chans, *dst = tmp;
+    for (size_t w = 1; w < n; w *= 2) {
+        for (size_t lo = 0; lo < n; lo += 2 * w) {
+            size_t mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n, i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) dst[k++] = dm_cmp(&src[j], &src[i]) < 0 ? src[j++] : src[i++];
+            while (i < mid) dst[k++] = src[i++];
+            while (j < hi) dst[k++] = src[j++];
+        }
+        Channel *t = src; src = dst; dst = t;
+    }
+    if (src != S.chans) memcpy(S.chans, src, n * sizeof *tmp);
+    free(tmp);
 }
 
 /* ---------- голосовые состояния ---------- */

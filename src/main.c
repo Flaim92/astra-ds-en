@@ -17,8 +17,45 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <stddef.h>
-/* Один экземпляр на пользователя Linux: абстрактный сокет (без файла на диске), держится до выхода. */
 static int g_single = -1;
+#ifdef __APPLE__
+/* macOS: абстрактных сокетов нет. Сокет-файл в личном временном каталоге пользователя ($TMPDIR, 0700),
+ * пустой, удаляется при выходе. Занят — проверить, что держит наш пользователь (getpeereid); не отвечает —
+ * остался от упавшего запуска: удалить и занять. */
+static char g_single_path[104];
+void single_instance_release(void) {
+    if (g_single >= 0) { close(g_single); g_single = -1; if (g_single_path[0]) unlink(g_single_path); }
+}
+bool single_instance(void) {
+    const char *t = getenv("TMPDIR");
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    if (!t || !*t || snprintf(a.sun_path, sizeof a.sun_path, "%s/astra-ds-%u.sock", t, (unsigned)getuid()) >= (int)sizeof a.sun_path) return true;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd < 0) return true;
+        if (bind(fd, (struct sockaddr *)&a, sizeof a) == 0) {
+            listen(fd, 1);
+            if (g_single < 0) { g_single = fd; snprintf(g_single_path, sizeof g_single_path, "%s", a.sun_path); } else close(fd);
+            return true;
+        }
+        close(fd);
+        if (errno != EADDRINUSE) return true;
+        int c = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (c < 0) return true;
+        bool alive = connect(c, (struct sockaddr *)&a, sizeof a) == 0;
+        uid_t u = (uid_t)-1;
+        gid_t g;
+        bool ours = alive && getpeereid(c, &u, &g) == 0 && u == getuid();
+        close(c);
+        if (alive) return !ours;
+        unlink(a.sun_path);                     /* хвост упавшего запуска */
+    }
+    return true;
+}
+#else
+/* Один экземпляр на пользователя Linux: абстрактный сокет (без файла на диске), держится до выхода. */
 void single_instance_release(void) { if (g_single >= 0) { close(g_single); g_single = -1; } }
 bool single_instance(void) {
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -47,6 +84,7 @@ bool single_instance(void) {
     close(c);
     return !ours;
 }
+#endif
 #endif
 
 /* Временно здесь, до переноса в mc.h координатором (раздел vless.c): */
@@ -150,6 +188,7 @@ static const char USAGE[] =
     "  --version         версия программы\n"
     "  --hq              качество голоса выше (Opus 64 кбит/с, сложность 8) ценой процессора\n"
     "  --mic=ИМЯ         микрофон (часть имени устройства)\n"
+    "  --mic-gain=N      громкость микрофона в процентах (0..400, по умолчанию 100)\n"
     "  --out=ИМЯ         устройство вывода (часть имени)\n"
     "  --devices         показать звуковые устройства и выйти\n"
     "  --shot=ФАЙЛ.bmp   с --demo: снимок окна в BMP без показа окна; --shot-keys=\"шаги\" - сценарий\n"
@@ -746,6 +785,7 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "--captcha-helper")) return captcha_helper_main(argc, argv);
 #endif
     bool list_devices = false, tui = false;
+    int mic_gain_cli = -1;                       /* --mic-gain: поверх сохранённой громкости */
     const char *vlesstest = NULL, *shot = NULL, *shot_keys = NULL;
     int hold = 0, lang_force = -1;
     for (int i = 1; i < argc; i++) {
@@ -822,6 +862,7 @@ int main(int argc, char **argv) {
         }
 #endif
         else if (arg_is(a, "--hq", NULL)) O.hq = true;
+        else if (arg_is(a, "--mic-gain", &v) && v) mic_gain_cli = atoi(v);
         else if (arg_is(a, "--mic", &v) && v) O.mic = v;
         else if (arg_is(a, "--out", &v) && v) O.out = v;
         else if (arg_is(a, "--devices", NULL)) list_devices = true;
@@ -869,6 +910,7 @@ int main(int argc, char **argv) {
         cred_delete();
         vless_forget();
         keyring_delete("startup");               /* «больше не спрашивать» — тоже */
+        keyring_delete("voice");                 /* настройки голоса */
         keyring_delete("update-checked");        /* дата проверки обновлений (АО-5) */
         keyring_delete("upd_told");              /* разовое уведомление об автопроверке */
         secret_destroy();
@@ -922,6 +964,8 @@ int main(int argc, char **argv) {
     }
     g_wake = wake_new();
     voice_init();
+    voice_settings_load();                       /* громкость, устройства, порог и прочее — из хранилища */
+    if (mic_gain_cli >= 0) voice_mic_gain_set(mic_gain_cli);   /* --mic-gain важнее сохранённого */
     /* --cli: ни сырого режима, ни альтернативного экрана — обычные строки (и конвейер) */
     if (O.cli) cli_init();
     else {
@@ -953,6 +997,7 @@ int main(int argc, char **argv) {
 
     while (!g_quit) loop_once(INT64_MAX);
 
+    voice_settings_flush();                      /* изменения последних 1,5 с */
     voice_shutdown();
     vless_stop();                               /* погасить Xray и затереть ключ до остального */
     if (O.cli) cli_shutdown(); else term_shutdown();

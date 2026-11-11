@@ -8,6 +8,8 @@
  *     аппаратных преобразователей (MF_READWRITE_DISABLE_CONVERTERS): берём родной формат камеры NV12/YUY2/MJPG;
  *     MJPG разбирает libjpeg-turbo (уже в сборке). После выключения — MFShutdown.
  *   Linux — V4L2 напрямую (ioctl, mmap, 3 буфера), YUYV/NV12/MJPG.
+ *   macOS: AVFoundation (src/cam_mac.m, -DASTRA_CAM_MAC), кадры NV12 уже вписаны в размер эфира; без cam_mac.m
+ *     камера честно отказывает: «камера на macOS пока не поддерживается».
  * Режим: самый крупный не выше 1280x720 при >= 24 к/с; камера даёт только больше — уменьшаем до 1280x720.
  * Пока видео в эфир не идёт (ключей DAVE нет) и предпросмотр не виден — кадры даже не переводятся.
  * Кадры камеры (её содержимое) нигде не сохраняются: буферы затираются перед освобождением; ни файлов, ни вывода. */
@@ -20,6 +22,11 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <mferror.h>
+#elif defined(__APPLE__)
+#include <errno.h>
+#ifdef ASTRA_CAM_MAC
+#include "cam_mac.h"
+#endif
 #else
 #include <errno.h>
 #include <fcntl.h>
@@ -478,6 +485,89 @@ static int src_read(CamSrc *s, CamRaw *r, char *err, size_t errn) {
     }
     return 1;
 }
+#elif defined(__APPLE__) && defined(ASTRA_CAM_MAC)
+/* ---------- macOS: AVFoundation (cam_mac.m) ---------- */
+struct CamSrc { CamMac *h; int w, h_; };
+typedef struct { CamDevice *out; int n, max; } MacList;
+static void mac_add(void *u, const char *id, const char *name) {
+    MacList *l = u;
+    if (l->n >= l->max || !id || !*id) return;
+    snprintf(l->out[l->n].id, sizeof l->out[l->n].id, "%s", id);
+    snprintf(l->out[l->n].name, sizeof l->out[l->n].name, "%s", name && *name ? name : ui_tr("камера"));
+    cam_clean(l->out[l->n].name);
+    l->n++;
+}
+static int src_list(CamDevice *out, int max) {
+    MacList l = { out, 0, max };
+    cammac_list(mac_add, &l);
+    return l.n;
+}
+static void mac_err(int e, int code, char *err, size_t n) {
+    switch (e) {
+    case CAMMAC_E_DENIED: snprintf(err, n, "%s", ui_tr("нет доступа к камере: Системные настройки -> Конфиденциальность и безопасность -> Камера")); break;
+    case CAMMAC_E_BUSY: snprintf(err, n, "%s", ui_tr("камера занята другой программой")); break;
+    case CAMMAC_E_GONE: case CAMMAC_E_NOTFOUND: snprintf(err, n, "%s", ui_tr("камера отключена")); break;
+    case CAMMAC_E_FORMAT: snprintf(err, n, "%s", ui_tr("камера не даёт NV12, YUY2 или MJPG")); break;
+    case CAMMAC_E_NOFRAMES: snprintf(err, n, "%s", ui_tr("камера не отдаёт кадры")); break;
+    default: snprintf(err, n, ui_tr("камера не открылась (ошибка %d)"), code); break;
+    }
+}
+static void src_close(CamSrc *s) {
+    if (!s) return;
+    cammac_close(s->h);
+    free(s);
+}
+static CamSrc *src_open(const char *id, CamMode *m, char *err, size_t errn) {
+    CamDevice d[16];
+    int k = src_list(d, 16);
+    int pick = -1;
+    for (int i = 0; i < k; i++) if (!id || !*id || !strcmp(d[i].id, id)) { pick = i; break; }
+    if (pick < 0) { snprintf(err, errn, "%s", k ? ui_tr("выбранная камера отключена") : ui_tr("камера не найдена")); return NULL; }
+    CamSrc *s = calloc(1, sizeof *s);
+    if (!s) return NULL;
+    CamMacMode mm;
+    memset(&mm, 0, sizeof mm);
+    int e = 0, code = 0;
+    s->h = cammac_open(d[pick].id, CAM_MAXW, CAM_MAXH, &mm, &e, &code);
+    if (!s->h) { mac_err(e ? e : CAMMAC_E_OTHER, code, err, errn); free(s); return NULL; }
+    snprintf(m->name, sizeof m->name, "%s", d[pick].name);
+    m->w = mm.w; m->h = mm.h; m->fps = mm.fps > 0 ? mm.fps : 30; m->fmt = CF_NV12;
+    if (m->w < 160 || m->h < 120 || m->w > 4096 || m->h > 4096 || (m->w & 1) || (m->h & 1)) {
+        snprintf(err, errn, "%s", ui_tr("камера не даёт NV12, YUY2 или MJPG"));
+        src_close(s);
+        return NULL;
+    }
+    s->w = m->w; s->h_ = m->h;
+    return s;
+}
+static void src_done(CamSrc *s) { cammac_done(s->h); }
+static int src_read(CamSrc *s, CamRaw *r, char *err, size_t errn) {
+    CamMacFrame f;
+    int e = 0;
+    int k = cammac_read(s->h, &f, 1000, &e);
+    if (k < 0) { mac_err(e ? e : CAMMAC_E_GONE, 0, err, errn); return -1; }
+    if (k == 0) return 0;
+    if (f.w != s->w || f.h != s->h_) { cammac_done(s->h); return 0; }   /* размер сменился на ходу: кадр мимо */
+    r->p = f.p; r->n = f.n; r->stride = f.stride; r->uv_off = f.uv_off;
+    return 1;
+}
+#elif defined(__APPLE__)
+/* ---------- macOS без cam_mac.m: честный отказ ---------- */
+#define CAM_MAC_UNSUPPORTED "камера на macOS пока не поддерживается"
+struct CamSrc { int unused; };
+static int src_list(CamDevice *out, int max) { (void)out; (void)max; (void)cam_clean; return 0; }
+static CamSrc *src_open(const char *id, CamMode *m, char *err, size_t errn) {
+    (void)id; (void)m;
+    snprintf(err, errn, "%s", ui_tr(CAM_MAC_UNSUPPORTED));
+    return NULL;
+}
+static int src_read(CamSrc *s, CamRaw *r, char *err, size_t errn) {
+    (void)s; (void)r;
+    snprintf(err, errn, "%s", ui_tr(CAM_MAC_UNSUPPORTED));
+    return -1;
+}
+static void src_done(CamSrc *s) { (void)s; }
+static void src_close(CamSrc *s) { (void)s; }
 #else
 /* ---------- Linux: V4L2 ---------- */
 #define V4_NBUF 3
@@ -929,6 +1019,10 @@ bool cam_start(char *err, size_t errn) {
 #ifdef _WIN32
     if (win_cam_denied()) { snprintf(err, errn, "%s", ui_tr("нет доступа к камере: Параметры Windows -> Конфиденциальность -> Камера")); return false; }
 #endif
+#if defined(__APPLE__) && !defined(ASTRA_CAM_MAC)
+    snprintf(err, errn, "%s", ui_tr(CAM_MAC_UNSUPPORTED));   /* поток даже не запускаем */
+    return false;
+#endif
     cam_lock();
     memset(&C.st, 0, sizeof C.st);
     C.st.phase = CAM_STARTING;
@@ -991,6 +1085,9 @@ int cam_test(int secs, const char *id) {
     int n = cam_list(d, 16);
     snprintf(line, sizeof line, "camtest: камер %d\n", n);
     term_puts(line);
+#if defined(__APPLE__) && !defined(ASTRA_CAM_MAC)
+    term_puts("camtest: " CAM_MAC_UNSUPPORTED "\n");
+#endif
     for (int i = 0; i < n; i++) { snprintf(line, sizeof line, "  %d: %s\n", i, d[i].name); term_puts(line); }
     if (!n) return 1;
     if (id && *id) cam_select(id);

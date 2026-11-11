@@ -119,8 +119,11 @@ static void status_set(VoicePhase ph, const char *err) {
 }
 static void maybe_start(void);
 static void voice_rejoin(void);
+static void voice_settings_touch(void);
+static void voice_settings_tick(void);
 /* Служебные дела главного потока по сигналам голосового (голосовой поток не трогает net.c и vless.c). */
 static void voice_main_chores(void) {
+    voice_settings_tick();                       /* отложенная запись настроек голоса */
     if (atomic_exchange(&V.vl_fail, false)) vless_report_failure(ui_tr("голос"));
 #ifdef ASTRA_VIDEO
     cam_main_chores();                           /* self_video на основном шлюзе */
@@ -177,6 +180,7 @@ void voice_set_volume(u64 user, float vol) {
     if (i == V.nvols && V.nvols < 64) V.nvols++;
     if (i < 64) V.vols[i] = (Vol){ user, vol };
     mutex_unlock(V.mu);
+    voice_settings_touch();
     ui_notice(ui_tr("громкость %s: %d%%"), user_name(user), (int)(vol * 100 + 0.5f));
 }
 void voice_vad_adjust(int d) {
@@ -184,11 +188,12 @@ void voice_vad_adjust(int d) {
     if (v < -70) v = -70;
     if (v > -10) v = -10;
     atomic_store(&V.vad_db, v);
+    voice_settings_touch();
 }
 int voice_vad_db(void) { return atomic_load(&V.vad_auto) ? atomic_load(&V.vad_auto_db) : atomic_load(&V.vad_db); }
-void voice_vad_auto(bool on) { if (on && !atomic_load(&V.vad_auto)) atomic_store(&V.vad_auto_db, atomic_load(&V.vad_db)); atomic_store(&V.vad_auto, on); }
+void voice_vad_auto(bool on) { if (on && !atomic_load(&V.vad_auto)) atomic_store(&V.vad_auto_db, atomic_load(&V.vad_db)); atomic_store(&V.vad_auto, on); voice_settings_touch(); }
 bool voice_vad_is_auto(void) { return atomic_load(&V.vad_auto); }
-void voice_ptt_bind(int vk) { atomic_store(&V.ptt_vk, vk > 0 && vk < 256 ? vk : 0); }
+void voice_ptt_bind(int vk) { atomic_store(&V.ptt_vk, vk > 0 && vk < 256 ? vk : 0); voice_settings_touch(); }
 int voice_ptt_bound(void) { return atomic_load(&V.ptt_vk); }
 void voice_ptt(bool down) { atomic_store(&V.ptt, down); }
 
@@ -800,10 +805,10 @@ static void hpf_run(VW *w, int16_t *s, int n) {
         s[i] = (int16_t)(y > 32767 ? 32767 : y < -32768 ? -32768 : y);
     }
 }
-void voice_hpf(bool on) { atomic_store(&V.hpf_off, !on); }
+void voice_hpf(bool on) { atomic_store(&V.hpf_off, !on); voice_settings_touch(); }
 /* ---------- шумоподавление ---------- */
 #define NS_N 480                                 /* 10 мс при 48 кГц: кадр RNNoise; SpeexDSP — тем же размером */
-void voice_ns_set(int mode) { atomic_store(&V.ns_mode, mode == NS_SPEEX || mode == NS_RNNOISE ? mode : NS_OFF); }
+void voice_ns_set(int mode) { atomic_store(&V.ns_mode, mode == NS_SPEEX || mode == NS_RNNOISE ? mode : NS_OFF); voice_settings_touch(); }
 int voice_ns_mode(void) { return atomic_load(&V.ns_mode); }
 static void ns_free(VW *w) {
     for (int i = 0; i < 2; i++) if (w->ns_sp[i]) { speex_preprocess_state_destroy(w->ns_sp[i]); w->ns_sp[i] = NULL; }
@@ -858,9 +863,29 @@ static void ns_run(VW *w, int16_t *s) {
 /* «Приглушать другие программы во время звонка»: по умолчанию выкл. (Windows приглушает их на 80 % для устройств
  * «для связи»); действует со следующего открытия устройства (вход в звонок) */
 static atomic_bool g_duck_others;
-void voice_duck_others(bool on) { atomic_store(&g_duck_others, on); }
+void voice_duck_others(bool on) { atomic_store(&g_duck_others, on); voice_settings_touch(); }
 bool voice_duck_others_on(void) { return atomic_load(&g_duck_others); }
 bool voice_hpf_on(void) { return !atomic_load(&V.hpf_off); }
+/* Громкость микрофона (как «Громкость микрофона» в Discord): 0..400 %, по умолчанию 100. Усиление — после
+ * фильтра, шумоподавления и смены голоса, до порога активации и Opus (порог и полоса проверки видят итог).
+ * Выше 100 % — мягкое ограничение вместо обрезки: громкие места не хрипят. */
+static atomic_int g_mic_gain = 100;
+void voice_mic_gain_set(int pct) { atomic_store(&g_mic_gain, pct < 0 ? 0 : pct > 400 ? 400 : pct); voice_settings_touch(); }
+int voice_mic_gain(void) { return atomic_load(&g_mic_gain); }
+void voice_mic_gain_apply(int16_t *s, int n) {
+    int g = atomic_load(&g_mic_gain);
+    if (g == 100) return;
+    float k = g / 100.0f;
+    for (int i = 0; i < n; i++) {
+        float x = s[i] * k / 32768.0f;
+        if (g > 100) {                           /* колено на 0,7: ниже — линейно, выше — плавно к 1,0 */
+            float a = x < 0 ? -x : x;
+            if (a > 0.7f) { float o = 0.7f + 0.3f * (1.0f - expf(-(a - 0.7f) / 0.3f)); x = x < 0 ? -o : o; }
+        }
+        int v = (int)lrintf(x * 32767.0f);
+        s[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+    }
+}
 static void capture_tick(VW *w) {
     if (!w->au) return;
     int16_t mono[FRAME];
@@ -878,6 +903,7 @@ static void capture_tick(VW *w) {
             if (!ptt_mode || (pkn ? plat_key_down(pkn) : atomic_load(&V.ptt))) ns_run(w, mono);
         }
         voicefx_process(mono, FRAME);            /* смена голоса — до VAD и Opus (и в демо-петле) */
+        voice_mic_gain_apply(mono, FRAME);       /* громкость микрофона */
         double sum = 0;
         for (int i = 0; i < FRAME; i++) sum += (double)mono[i] * mono[i];
         double rms = sqrt(sum / FRAME) / 32768.0;
@@ -1895,6 +1921,7 @@ void voice_set_device(int out, const char *name) {
     mutex_lock(V.mu);
     snprintf(V.dev[out], sizeof V.dev[out], "%s", name ? name : "");
     mutex_unlock(V.mu);
+    voice_settings_touch();
     atomic_fetch_add(&V.dev_gen, 1);
     if (V.cmd) wake_signal(V.cmd);
 }
@@ -1929,6 +1956,7 @@ static int mic_thread(void *arg) {
             if (!au) break;
         }
         for (int g = 0; g < 8 && audio_read_frame(au, mono); g++) {
+            voice_mic_gain_apply(mono, FRAME);   /* проверка показывает уровень с учётом громкости */
             double sum = 0;
             for (int i = 0; i < FRAME; i++) sum += (double)mono[i] * mono[i];
             double rms = sqrt(sum / FRAME) / 32768.0, db = rms > 0 ? 20 * log10(rms) : -100;
@@ -2397,8 +2425,127 @@ void sound_play(int which) {
     atomic_store(&SN.stop, false);
     SN.thr = thread_start(snd_thread, NULL);
 }
-void sounds_enable(bool on) { SN.off = !on; if (!on) sound_stop(); }
+void sounds_enable(bool on) { SN.off = !on; if (!on) sound_stop(); voice_settings_touch(); }
 bool sounds_enabled(void) { return !SN.off; }
+
+/* ======================= сохранение настроек голоса ======================= */
+/* Запись "voice" в системном хранилище (как токен: Диспетчер учётных данных / Secret Service / Keychain), без
+ * файлов. Текст «ключ=значение» построчно: громкость микрофона, выбранные микрофон и вывод, порог активации,
+ * авто, шумоподавление, фильтр гула, приглушение, звуки, клавиша рации, громкость собеседников (только не 100 %).
+ * Изменения пишутся через 1,5 с после последнего (не на каждый щелчок) и при выходе; та же строка — не пишется.
+ * --no-save — только чтение; --demo и самопроверка — хранилище не трогают. Стирается паникой и --logout. */
+#define VS_CAP 2500                             /* Windows: запись не больше 2560 байт */
+#define VS_HEAD "astra-voice 1\n"
+static bool vs_on;                              /* настройки загружены: дальше изменения сохраняются */
+static char vs_last[VS_CAP];
+static i64 vs_due;
+static void voice_settings_touch(void) { if (vs_on) vs_due = now_ms() + 1500; }
+static bool vs_name_ok(const char *s) {
+    size_t n = strlen(s);
+    if (n >= 96) return false;
+    for (size_t i = 0; i < n; i++) if ((unsigned char)s[i] < 0x20 || s[i] == 0x7f) return false;
+    return true;
+}
+int voice_settings_format(char *b, size_t cap) {
+    char dev[2][96];
+    for (int o = 0; o < 2; o++) snprintf(dev[o], sizeof dev[o], "%s", V.mu ? voice_device(o) : "");
+    int k = snprintf(b, cap, VS_HEAD "gain=%d\nvad=%d\nvadauto=%d\nns=%d\nhpf=%d\nduck=%d\nsounds=%d\nptt=%d\n",
+                     voice_mic_gain(), atomic_load(&V.vad_db), atomic_load(&V.vad_auto) ? 1 : 0, voice_ns_mode(),
+                     voice_hpf_on() ? 1 : 0, voice_duck_others_on() ? 1 : 0, sounds_enabled() ? 1 : 0, atomic_load(&V.ptt_vk));
+    if (k < 0 || (size_t)k >= cap) return -1;
+    for (int o = 0; o < 2; o++) {
+        if (!dev[o][0] || !vs_name_ok(dev[o])) continue;
+        int m = snprintf(b + k, cap - (size_t)k, "%s=%s\n", o ? "out" : "mic", dev[o]);
+        if (m < 0 || (size_t)m >= cap - (size_t)k) return k;
+        k += m;
+    }
+    if (V.mu) mutex_lock(V.mu);
+    for (int i = 0; i < V.nvols; i++) {
+        int pct = (int)(V.vols[i].vol * 100 + 0.5f);
+        if (pct == 100) continue;
+        int m = snprintf(b + k, cap - (size_t)k, "v=%llu:%d\n", (unsigned long long)V.vols[i].user, pct);
+        if (m < 0 || (size_t)m >= cap - (size_t)k) break;   /* не влезло — остальные не сохраняются */
+        k += m;
+    }
+    if (V.mu) mutex_unlock(V.mu);
+    return k;
+}
+/* Разбор: чужие и испорченные строки пропускаются, значения — только из допустимых пределов. */
+bool voice_settings_parse(const char *s) {
+    if (strncmp(s, VS_HEAD, strlen(VS_HEAD))) return false;
+    s += strlen(VS_HEAD);
+    while (*s) {
+        const char *e = strchr(s, '\n');
+        size_t n = e ? (size_t)(e - s) : strlen(s);
+        char ln[128];
+        if (n < sizeof ln) {
+            memcpy(ln, s, n);
+            ln[n] = 0;
+            char *eq = strchr(ln, '=');
+            if (eq) {
+                *eq = 0;
+                const char *key = ln, *val = eq + 1;
+                char *end = NULL;
+                long x = strtol(val, &end, 10);
+                bool num = end && end != val && !*end;
+                if (!strcmp(key, "gain") && num && x >= 0 && x <= 400) voice_mic_gain_set((int)x);
+                else if (!strcmp(key, "vad") && num && x >= -70 && x <= -10) atomic_store(&V.vad_db, (int)x);
+                else if (!strcmp(key, "vadauto") && num && (x == 0 || x == 1)) voice_vad_auto(x == 1);
+                else if (!strcmp(key, "ns") && num && x >= NS_OFF && x <= NS_RNNOISE) voice_ns_set((int)x);
+                else if (!strcmp(key, "hpf") && num && (x == 0 || x == 1)) voice_hpf(x == 1);
+                else if (!strcmp(key, "duck") && num && (x == 0 || x == 1)) voice_duck_others(x == 1);
+                else if (!strcmp(key, "sounds") && num && (x == 0 || x == 1)) sounds_enable(x == 1);
+                else if (!strcmp(key, "ptt") && num && x >= 0 && x < 256) voice_ptt_bind((int)x);
+                else if ((!strcmp(key, "mic") || !strcmp(key, "out")) && *val && vs_name_ok(val) && V.mu) {
+                    int o = key[0] == 'o';
+                    if (!(o ? O.out : O.mic)) {      /* --mic= / --out= в командной строке важнее сохранённого */
+                        mutex_lock(V.mu);
+                        snprintf(V.dev[o], sizeof V.dev[o], "%s", val);
+                        mutex_unlock(V.mu);
+                    }
+                } else if (!strcmp(key, "v") && V.mu) {
+                    char *c = NULL;
+                    unsigned long long id = strtoull(val, &c, 10);
+                    long pct = c && *c == ':' ? strtol(c + 1, &end, 10) : -1;
+                    if (id && c && *c == ':' && end && !*end && pct >= 0 && pct <= 200) {
+                        mutex_lock(V.mu);
+                        int i;
+                        for (i = 0; i < V.nvols && V.vols[i].user != id; i++) {}
+                        if (i == V.nvols && V.nvols < 64) V.nvols++;
+                        if (i < 64) V.vols[i] = (Vol){ id, pct / 100.0f };
+                        mutex_unlock(V.mu);
+                    }
+                }
+            }
+        }
+        if (!e) break;
+        s = e + 1;
+    }
+    return true;
+}
+void voice_settings_load(void) {
+    if (O.demo) return;
+    char *b = xmalloc(VS_CAP + 1);
+    int n = keyring_load("voice", b, VS_CAP + 1);
+    if (n > 0) { b[n] = 0; voice_settings_parse(b); }
+    free(b);
+    if (voice_settings_format(vs_last, sizeof vs_last) < 0) vs_last[0] = 0;
+    vs_on = !O.no_save;
+}
+void voice_settings_flush(void) {
+    vs_due = 0;
+    if (!vs_on) return;
+    char *b = xmalloc(VS_CAP);
+    int n = voice_settings_format(b, VS_CAP);
+    if (n > 0 && strcmp(b, vs_last) && keyring_save("voice", b, (size_t)n)) memcpy(vs_last, b, (size_t)n + 1);
+    free(b);
+}
+static void voice_settings_tick(void) { if (vs_due && now_ms() >= vs_due) voice_settings_flush(); }
+void voice_settings_forget(void) {               /* паника, --logout: перестать писать и стереть запись */
+    vs_on = false;
+    vs_due = 0;
+    keyring_delete("voice");
+}
 
 void voice_shutdown(void) {
     sound_stop();

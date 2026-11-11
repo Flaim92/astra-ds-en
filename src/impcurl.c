@@ -121,6 +121,11 @@ static void unload(void) {
         DLL_PATH[0] = 0;
     }
 }
+#elif defined(__APPLE__)
+/* macOS: своей сборки libcurl-impersonate пока нет — вход идёт через обычный libcurl (как без библиотеки). */
+static bool extract_and_load(void) { DBG("macOS: libcurl-impersonate не встроена"); return false; }
+static void *sym(const char *name) { (void)name; return NULL; }
+static void unload(void) {}
 #else
 /* POSIX (Linux): .so запечена в ELF (build.sh: ld -r -b binary). Грузим без диска —
  * memfd_create + dlopen(/proc/self/fd/N). Файл нигде на диске не появляется. */

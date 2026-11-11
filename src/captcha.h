@@ -24,7 +24,17 @@ void captcha_close(void);                       /* закрыть окно, до
 bool captcha_busy(void);                        /* окно открыто или поток ещё не завершён */
 void captcha_bridge_stats(int *used, int *refused);
 #ifndef _WIN32
-int captcha_helper_main(int argc, char **argv);   /* Linux: процесс-помощник окна проверки (--captcha-helper) */
+int captcha_helper_main(int argc, char **argv);   /* Linux и macOS: процесс-помощник окна проверки (--captcha-helper) */
 #endif   /* самопроверка: соединений через мост / отказов (не hcaptcha.com) */
+#ifdef __APPLE__
+/* src/captcha_mac.m. Окно WKWebView со страницей page под https://discord.com/astra-captcha. proxy_host == NULL —
+ * без прокси; иначе SOCKS5 proxy_host:proxy_port (логин и пароль, если user не пуст), только macOS 14+.
+ * Пароль затирается сразу после передачи в Network.framework. При успехе и при закрытии окна не возвращается:
+ * пишет ответ в stdout и завершает процесс (_exit) с кодом 0 / 3 / 4; возврат — код ошибки до показа окна
+ * (2 — нет WebKit, 5 — прокси не задать, 6 — нет графического сеанса). */
+int captcha_mac_run(const char *page, const char *title, const char *proxy_host, int proxy_port,
+                    const char *proxy_user, char *proxy_pass, size_t proxy_pass_n);
+bool captcha_mac_proxy_ok(void);                  /* есть WKWebsiteDataStore.proxyConfigurations (macOS 14+) */
+#endif
 
 #endif

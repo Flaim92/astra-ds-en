@@ -5,7 +5,7 @@
  * читается прямо из буфера PipeWire, пока держится замок shpw_lock(). Ни файлов, ни вывода. */
 #ifndef SHARE_PW_H
 #define SHARE_PW_H
-#if defined(ASTRA_VIDEO) && !defined(_WIN32)
+#if defined(ASTRA_VIDEO) && !defined(_WIN32) && !defined(__APPLE__)
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

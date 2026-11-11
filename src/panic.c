@@ -161,6 +161,7 @@ void panic_now(void) {
     cred_delete();                               /* токен из системного хранилища */
     vless_forget();                              /* ссылку VLESS из хранилища */
     keyring_delete("startup");                  /* выбор стартового экрана (под новым и старым именем) */
+    voice_settings_forget();                    /* настройки голоса: не дописать заново при выходе */
     keyring_delete("update-checked");           /* дата проверки обновлений (АО-5) */
     keyring_delete("upd_told");                 /* разовое уведомление об автопроверке */
 #ifdef _WIN32

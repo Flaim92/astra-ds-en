@@ -6,7 +6,7 @@
  * Сессия портала живёт, пока открыто соединение D-Bus, то есть до portal_wl_close. */
 #ifndef PORTAL_WL_H
 #define PORTAL_WL_H
-#if defined(ASTRA_VIDEO) && !defined(_WIN32)
+#if defined(ASTRA_VIDEO) && !defined(_WIN32) && !defined(__APPLE__)
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>

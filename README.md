@@ -6,10 +6,11 @@
 
 **A Discord client written in C that runs in about 3 MB of RAM.**
 
-C11 · Windows and Linux · no Electron, no browser, no GPU
+C11 · Windows, Linux and macOS · no Electron, no browser, no GPU
 
 ![C11](https://img.shields.io/badge/language-C11-00599C)
 ![Windows and Linux](https://img.shields.io/badge/Windows%20%7C%20Linux-ready-2ea44f)
+![macOS](https://img.shields.io/badge/macOS-untested-f0b232)
 ![Memory](https://img.shields.io/badge/idle_memory-~2.9_MB-5865F2)
 ![Discord features](https://img.shields.io/badge/Discord_features-86%25-f0b232)
 ![License GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)
@@ -51,15 +52,18 @@ The two builds update separately: the regular one only offers regular updates, V
 
 ## Download
 
-Ready-made builds for Windows 10/11 and Linux are in [Releases](../../releases/latest):
+Ready-made builds for Windows 10/11, Linux and macOS are in [Releases](../../releases/latest):
 
 | System | Regular | Video |
 |---|---|---|
 | Windows 10/11, x64 | `astra-ds-<version>-windows-x64.zip` | `astra-ds-video-<version>-windows-x64.zip` |
 | Linux x64, glibc 2.36+ | `astra-ds-<version>-linux-x64.tar.gz` | `astra-ds-video-<version>-linux-x64.tar.gz` |
+| macOS 12+, Apple Silicon ⚠️ | `astra-ds-<version>-macos-arm64.tar.gz` | `astra-ds-video-<version>-macos-arm64.tar.gz` |
+| macOS 12+, Intel ⚠️ | `astra-ds-<version>-macos-x64.tar.gz` | `astra-ds-video-<version>-macos-x64.tar.gz` |
 
 - **Windows:** a single exe, no installer. The build is not code-signed, so SmartScreen will warn you: click "More info", then "Run anyway".
 - **Linux:** you need `libasound2` and `libx11-6`. For the captcha window, install `libwebkit2gtk-4.1-0`. For Video: stream sound goes through PulseAudio or PipeWire, screen sharing on Wayland through `xdg-desktop-portal` and PipeWire. Regular distributions already have all of this.
+- **macOS (⚠️ not tested on a real Mac):** the build passes the self-test on GitHub's macOS servers, but nobody has run it live yet. It is not signed by Apple: after unpacking, run `xattr -dr com.apple.quarantine astra-ds`, otherwise macOS will not let it start. Screen sharing is not available on Mac yet; watching streams and the camera are. Captcha through VLESS needs macOS 14+. If you have a Mac, please tell us in [Issues](../../issues) what works.
 
 Checksums are in `SHA256SUMS.txt` next to the builds. You can also build it yourself, see below.
 
@@ -88,7 +92,7 @@ VLESS is off by default: without your link all traffic goes directly. You can tu
 
 ## If your antivirus complains
 
-An antivirus may mistake any Discord client for a token stealer: the code contains the same words, "token" and "Authorization". The token is only ever sent to Discord and is stored in the system keychain (Credential Manager on Windows, Secret Service on Linux). The code is open, you can read it and build it yourself. Only download Astra DS from this repository.
+An antivirus may mistake any Discord client for a token stealer: the code contains the same words, "token" and "Authorization". The token is only ever sent to Discord and is stored in the system keychain (Credential Manager on Windows, Secret Service on Linux, Keychain on macOS). The code is open, you can read it and build it yourself. Only download Astra DS from this repository.
 
 ## Why
 
@@ -123,7 +127,7 @@ Out of an inventory of 162 Discord screens and features, **86%** are done (84% i
 - **Servers.** Channels by category with permissions, server folders, threads and forums (create, join, archive, new post), pinned messages, slowmode with a countdown.
 - **Management.** Create, edit, leave or delete a server. Channels and categories: create, rename, reorder, set permissions. Moderation for those who have the rights: timeout, kick, ban, roles, moving people in voice.
 - **People.** Friends with statuses, requests, blocking, ignoring, private notes, full profile, group DMs. Message requests and spam are kept separate from DMs, and images there don't load until you reply.
-- **Voice.** Voice channels, DM and group calls. DAVE end-to-end encryption is mandatory: without it your voice is not sent. Per-user volume, microphone and speaker selection, mic test, automatic threshold, noise suppression (SpeexDSP or RNNoise), push-to-talk on any key or side mouse button, voice changer.
+- **Voice.** Voice channels, DM and group calls. DAVE end-to-end encryption is mandatory: without it your voice is not sent. Per-user volume and your own microphone volume (up to 400%), microphone and speaker selection, mic test, automatic threshold, noise suppression (SpeexDSP or RNNoise), push-to-talk on any key or side mouse button, voice changer. Voice settings are kept between launches.
 - **Navigation.** Channel tabs, quick switcher Ctrl+K, search with `from:` `in:` `has:` `before:` `after:` filters, an inbox with mentions, Discord message links open inside the app.
 - **Comfort.** Zoom with Ctrl+= and Ctrl+-, full screen with Alt+Enter, column widths by mouse, notifications and a tray icon, focus mode, alert words, word filter, English interface (`--lang=en` or the RU | EN switch on the login screen), auto-update with a signed manifest.
 - **Three modes.** A window with mouse support, a full-screen terminal mode (`--tui`) and a line-by-line IRC-like mode (`--cli`).
@@ -132,14 +136,14 @@ Out of an inventory of 162 Discord screens and features, **86%** are done (84% i
 
 - **Screen sharing.** The whole screen or one window, 1280x720 at 30 frames per second, in voice channels and calls. With sound: a single window is shared with its program's sound, the whole screen with all system sound except Astra DS itself (call voices do not go into the stream). On Linux it works on both X11 and Wayland (GNOME, KDE, sway and others, through the system source picker). On Wayland a single window is shared without sound for now: the system does not say which program it belongs to.
 - **Watching other people's streams**: H.264, HEVC, VP8, VP9 and AV1.
-- **Camera**: your own and other people's, as tiles or large (Alt+arrows, Alt+F). Turn it on with the `[]/` button, F12 or Alt+C; pick the camera and quality (auto, 720p, 480p, 360p) in the Camera dialog. Windows and Linux (V4L2).
+- **Camera**: your own and other people's, as tiles or large (Alt+arrows, Alt+F). Turn it on with the `[]/` button, F12 or Alt+C; pick the camera and quality (auto, 720p, 480p, 360p) in the Camera dialog. Windows, Linux (V4L2) and macOS (AVFoundation).
 - **Eye hiding on your camera.** The program finds your face in every frame and covers the eyes with a block of noise and random characters; the covered pixels cannot be recovered. If no face is found or the program is not sure, others see the Astra DS logo instead of the frame, and your preview says "Face not found". On by default, turn it off with Alt+E or the "Hide eyes" checkbox in the Camera dialog. Everything runs on your computer, about 2 ms per frame, and frames go nowhere except the call. Limitation: if a second person is in the frame and the program doesn't find their face (cut off by the frame edge or turned far away), their eyes may stay visible.
 
 **Not included:** animated GIFs, plugins.
 
 ## Privacy and security
 
-- **No logs, no telemetry, nothing on disk.** Only the token is written to disk, and only into the system keychain. Everything else lives in memory and is wiped when freed.
+- **No logs, no telemetry, nothing on disk.** Only the token and voice settings (volume, devices, threshold) go into the system keychain, there are no separate files. Everything else lives in memory and is wiped when freed.
 - **The token lives in locked memory** that is never swapped out and never ends up in crash dumps.
 - **Your own VLESS (Reality) server** for all traffic, voice included. It is used only if you set a link yourself. If the tunnel goes down, the app does not silently fall back to a direct connection, it asks you first.
 - **Streamer mode** hides your email, the VLESS server address, invite links, file paths and DM text.
@@ -204,6 +208,7 @@ Out of an inventory of 162 Discord screens and features, **86%** are done (84% i
 --tray            minimize to tray (Windows)
 --hq              higher voice quality at the cost of CPU
 --mic=NAME        microphone (part of the device name)
+--mic-gain=N      microphone volume, % (0..400)
 --out=NAME        output device (part of the name)
 --devices         list audio devices
 --no-update       don't check for updates
@@ -230,6 +235,15 @@ bash build.sh               # regular: build/astra-ds
 VIDEO=1 bash build.sh       # Video: build/astra-ds-video
 ```
 
+**macOS** 12+ (Xcode Command Line Tools and Homebrew):
+
+```
+brew install cmake ninja nasm gnu-sed coreutils llvm
+bash deps/build-deps.sh
+bash build.sh               # regular: build/astra-ds
+VIDEO=1 bash build.sh       # Video: build/astra-ds-video
+```
+
 Dependencies (zlib, OpenSSL, curl, opus, libdave, SpeexDSP, RNNoise, libjpeg-turbo, and for Video also FFmpeg and dav1d) are built from source with checksum verification and linked statically. There is one exception: the prebuilt libcurl-impersonate library in `third_party/impcurl/`, used only for login requests. It is embedded in the program and is not a separate file next to it. System libraries for video on Linux (PulseAudio, PipeWire, D-Bus) are loaded only when needed and are not required to start the program.
 
 To check that everything works: `build/astra-ds --selftest`. It runs more than 470 offline checks of the interface, data parsing, voice and security, more than 550 in the Video build.
@@ -239,7 +253,8 @@ To check that everything works: `build/astra-ds --selftest`. It runs more than 4
 | File | What's inside |
 |---|---|
 | `src/ui.c` | interface: Discord-like layout, mouse and keyboard |
-| `src/gui_win.c`, `gui_x11.c`, `gui_grid.c` | character-grid window for Windows and Linux |
+| `src/gui_win.c`, `gui_x11.c`, `gui_mac.m`, `gui_grid.c` | character-grid window for Windows, Linux and macOS |
+| `src/plat_win.c`, `plat_posix.c`, `compat_apple.h` | system layer: threads, network, token storage |
 | `src/store.c` | data model, permissions, Discord events |
 | `src/memlist.c` | server member list by roles |
 | `src/net.c` | Discord requests and the persistent connection |
@@ -252,7 +267,7 @@ To check that everything works: `build/astra-ds --selftest`. It runs more than 4
 | `src/golive.c`, `voice_stream.c`, `streamtest.c` | Video: streams, sending and watching |
 | `src/share_x11.c`, `share_pw.c`, `portal_wl.c` | Video: screen capture on Linux (X11, Wayland via portal and PipeWire) |
 | `src/viddec.c` | Video: decoding other people's streams and cameras |
-| `src/cam.c`, `voice_cam.c` | Video: camera (Media Foundation, V4L2) and sending it into a call |
+| `src/cam.c`, `cam_mac.m`, `voice_cam.c` | Video: camera (Media Foundation, V4L2, AVFoundation) and sending it into a call |
 | `src/anon.c` | Video: eye hiding on your camera |
 | `src/selftest.c` | self-test |
 | `tools/sec/` | fuzzers and security test rigs |

@@ -6,7 +6,7 @@
  *   Start -> Response(streams a(ua{sv})) -> OpenPipeWireRemote -> fd (h).
  * Сигнал Response приходит на путь запроса, который предсказуем по имени соединения и handle_token:
  * подписка на него оформляется ДО вызова метода, иначе быстрый ответ можно пропустить. */
-#if defined(ASTRA_VIDEO) && !defined(_WIN32)
+#if defined(ASTRA_VIDEO) && !defined(_WIN32) && !defined(__APPLE__)   /* xdg-desktop-portal есть только в Linux */
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <pthread.h>

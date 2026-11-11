@@ -18,7 +18,7 @@
  * не переводится (источник шлёт новый кадр только при изменениях). Окно Astra DS исключить нельзя (портал этого не
  * умеет): при показе экрана оно видно.
  * Звук трансляции — через PulseAudio/PipeWire (см. ниже). Буферы с содержимым экрана затираются перед освобождением. */
-#if defined(ASTRA_VIDEO) && !defined(_WIN32)
+#if defined(ASTRA_VIDEO) && !defined(_WIN32) && !defined(__APPLE__)   /* macOS: share_mac.c */
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdio.h>

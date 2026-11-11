@@ -17,7 +17,7 @@
  * Обработка (process) идёт в потоке цикла под его замком: берём самый свежий буфер, проверяем размеры, stride и
  * границы, держим его (предыдущий — сразу источнику). Поток захвата берёт тот же замок и переводит картинку прямо из
  * этого буфера в YUV — без копии кадра. Пропавший буфер (remove_buffer, смена формата) забывается сразу. */
-#if defined(ASTRA_VIDEO) && !defined(_WIN32)
+#if defined(ASTRA_VIDEO) && !defined(_WIN32) && !defined(__APPLE__)   /* PipeWire есть только в Linux */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>

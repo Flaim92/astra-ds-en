@@ -13,6 +13,7 @@
 !/tools/
 !/docs/
 !/res/
+!/.github/
 
 # внутри tools: только скрипты проверок
 /tools/uitest/out/

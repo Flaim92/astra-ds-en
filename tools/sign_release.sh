@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Подпись релиза для автообновления (SECURITY.md «Автообновление»).
 #   bash tools/sign_release.sh ФАЙЛ ПРОДУКТ ПЛАТФОРМА ВЕРСИЯ [КЛЮЧ]
-#   ПРОДУКТ: astra-ds | astra-ds-video;  ПЛАТФОРМА: win-x64 | linux-x64;  ВЕРСИЯ: x.y.z
+#   ПРОДУКТ: astra-ds | astra-ds-video;  ПЛАТФОРМА: win-x64 | linux-x64 | macos-arm64 | macos-x64;  ВЕРСИЯ: x.y.z
 #   (строго больше ASTRA_VERSION прошлой сборки этого продукта)
 #   КЛЮЧ по умолчанию: E:/projects/astra-ds-signing/astra-ds-ed25519.pem (ВНЕ репозитория; в git не класть)
 # Создаёт рядом с ФАЙЛОМ: manifest-ПРОДУКТ-ПЛАТФОРМА.json (<= 4 КБ) и .json.sig (ed25519, 64 Б).
@@ -14,7 +14,7 @@ set -euo pipefail
 f=${1:?файл}; prod=${2:?продукт}; plat=${3:?платформа}; ver=${4:?версия}
 key=${5:-/e/projects/astra-ds-signing/astra-ds-ed25519.pem}
 case "$prod" in astra-ds|astra-ds-video) ;; *) echo "продукт: astra-ds или astra-ds-video" >&2; exit 1;; esac
-case "$plat" in win-x64|linux-x64) ;; *) echo "платформа: win-x64 или linux-x64" >&2; exit 1;; esac
+case "$plat" in win-x64|linux-x64|macos-arm64|macos-x64) ;; *) echo "платформа: win-x64, linux-x64, macos-arm64 или macos-x64" >&2; exit 1;; esac
 [[ "$ver" =~ ^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}$ ]] || { echo "версия: x.y.z" >&2; exit 1; }
 [ -f "$f" ] || { echo "нет файла $f" >&2; exit 1; }
 [ -f "$key" ] || { echo "нет ключа $key" >&2; exit 1; }

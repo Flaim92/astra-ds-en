@@ -16,15 +16,54 @@ struct Audio {
     bool lost;
 };
 
+/* Порог старта вывода. snd_pcm_set_params ставит его равным размеру буфера, а голос держит в устройстве
+ * ~60 мс (OUT_TARGET в voice.c) — столько же или меньше буфера. PipeWire и PulseAudio округляют буфер вверх,
+ * и тогда буфер никогда не заполнялся целиком: вывод открыт, но не играет (собеседников не слышно, микрофон
+ * при этом работает). Старт — как только в устройстве есть 10 мс. */
+#define START_FRAMES 480
+static bool set_start(snd_pcm_t *p) {
+    snd_pcm_sw_params_t *sw;
+    snd_pcm_sw_params_alloca(&sw);
+    if (snd_pcm_sw_params_current(p, sw) < 0) return false;
+    if (snd_pcm_sw_params_set_start_threshold(p, sw, START_FRAMES) < 0) return false;
+    return snd_pcm_sw_params(p, sw) >= 0;
+}
 static snd_pcm_t *open_pcm(const char *name, snd_pcm_stream_t dir, unsigned ch) {
     snd_pcm_t *p = NULL;
     if (snd_pcm_open(&p, name && *name ? name : "default", dir, SND_PCM_NONBLOCK) < 0) return NULL;
     /* 48 кГц, s16; при другой частоте устройства ALSA пересчитает сама (soft_resample=1). */
-    if (snd_pcm_set_params(p, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED, ch, 48000, 1, 60000) < 0) {
+    if (snd_pcm_set_params(p, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED, ch, 48000, 1, 60000) < 0 ||
+        (dir == SND_PCM_STREAM_PLAYBACK && !set_start(p))) {
         snd_pcm_close(p);
         return NULL;
     }
     return p;
+}
+/* Самопроверка: порог старта вывода на устройстве name (-1 — не открылось). */
+long audio_alsa_start_threshold(const char *name) {
+    snd_pcm_t *p = open_pcm(name, SND_PCM_STREAM_PLAYBACK, 2);
+    if (!p) return -1;
+    snd_pcm_sw_params_t *sw;
+    snd_pcm_sw_params_alloca(&sw);
+    snd_pcm_uframes_t th = 0;
+    long r = snd_pcm_sw_params_current(p, sw) < 0 || snd_pcm_sw_params_get_start_threshold(sw, &th) < 0 ? -1 : (long)th;
+    snd_pcm_close(p);
+    return r;
+}
+
+/* Какие PCM показывать в выборе устройств. Подсказки ALSA — это и служебные плагины: null (вечная тишина:
+ * выбравший его микрофон «переставал работать»), dmix/dsnoop, surround*, iec958 (цифровой выход),
+ * hw: (без пересчёта формата — 48 кГц s16 не откроется на многих картах), usbstream, частоты (lavrate,
+ * samplerate, speexrate), upmix/vdownmix. Остаются звуковые серверы и устройства карт с пересчётом. */
+bool audio_alsa_name_ok(const char *name) {
+    static const char *const keep[] = { "pipewire", "pulse", "jack", "sysdefault", "default:", "plughw:", "front:", "hdmi:" };
+    if (!name || !*name || !strcmp(name, "default")) return false;   /* «По умолчанию» в списке уже есть */
+    for (size_t i = 0; i < sizeof keep / sizeof *keep; i++) {
+        size_t n = strlen(keep[i]);
+        if (keep[i][n - 1] == ':' ? !strncmp(name, keep[i], n) : (!strcmp(name, keep[i]) || (!strncmp(name, keep[i], n) && name[n] == ':')))
+            return true;
+    }
+    return false;
 }
 
 Audio *audio_open(const char *mic_hint, const char *out_hint, char *err, size_t errn) {
@@ -131,7 +170,8 @@ int audio_devices(int out, char (*names)[96], int max) {
     for (void **h = hints; *h && k < max; h++) {
         char *name = snd_device_name_get_hint(*h, "NAME");
         char *io = snd_device_name_get_hint(*h, "IOID");
-        bool ok = name && strlen(name) < 96 && (!io || !strcmp(io, out ? "Output" : "Input"));
+        bool ok = name && strlen(name) < 96 && (!io || !strcmp(io, out ? "Output" : "Input")) && audio_alsa_name_ok(name)
+                  && (out || strncmp(name, "hdmi:", 5));   /* у HDMI микрофона нет */
         if (ok) { char *t = san(name, false); snprintf(names[k++], 96, "%s", t); free(t); }
         free(name);
         free(io);

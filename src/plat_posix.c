@@ -1,10 +1,17 @@
-/* Платформенный слой: Linux (POSIX). */
+/* Платформенный слой: Linux и macOS (POSIX). Отличия macOS — под __APPLE__ (недостающие вызовы — compat_apple.h). */
 #ifndef _WIN32
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 #include <errno.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <libproc.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <Security/Security.h>
+#else
 #include <malloc.h>
+#endif
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
@@ -18,10 +25,12 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#ifndef __APPLE__
 #include <sys/eventfd.h>
+#include <sys/prctl.h>
+#endif
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -34,6 +43,9 @@ extern char **environ;
 
 /* ---------- ожидание ---------- */
 void plat_wait(const Waitable *w, int n, int timeout_ms) {
+#ifdef __APPLE__
+    if (gb_wait(w, n, timeout_ms)) return;      /* окно Cocoa: ждать в ран-лупе (события окна видит только он) */
+#endif
     struct pollfd p[32];
     int k = 0;
     for (int i = 0; i < n && k < 32; i++) if (w[i].h >= 0) p[k++] = (struct pollfd){ (int)w[i].h, w[i].ev ? w[i].ev : POLLIN, 0 };
@@ -41,16 +53,32 @@ void plat_wait(const Waitable *w, int n, int timeout_ms) {
     do r = poll(p, (nfds_t)k, timeout_ms); while (r < 0 && errno == EINTR && 0);
 }
 
-struct PlatWake { int fd; };
+/* Linux: eventfd (fd и для записи, и для чтения). macOS: eventfd нет — неблокирующий канал (wfd — запись),
+ * сброс вычитывает всё накопленное. write() в канал безопасен и в обработчике сигнала. */
+struct PlatWake { int fd, wfd; };
 PlatWake *wake_new(void) {
     PlatWake *w = calloc(1, sizeof *w);
-    if (w) w->fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (!w) return NULL;
+#ifdef __APPLE__
+    int p[2];
+    if (pipe2(p, O_NONBLOCK | O_CLOEXEC)) { w->fd = w->wfd = -1; return w; }
+    w->fd = p[0];
+    w->wfd = p[1];
+#else
+    w->fd = w->wfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+#endif
     return w;
 }
+#ifdef __APPLE__
+void wake_signal(PlatWake *w) { if (w) { char one = 1; ssize_t r = write(w->wfd, &one, 1); (void)r; } }   /* полон — уже разбужен */
+void wake_clear(PlatWake *w) { if (w) { char v[64]; while (read(w->fd, v, sizeof v) == (ssize_t)sizeof v) {} } }
+void wake_free(PlatWake *w) { if (w) { close(w->fd); close(w->wfd); free(w); } }
+#else
 void wake_signal(PlatWake *w) { if (w) { uint64_t one = 1; ssize_t r = write(w->fd, &one, 8); (void)r; } }
 void wake_clear(PlatWake *w) { if (w) { uint64_t v; ssize_t r = read(w->fd, &v, 8); (void)r; } }
-Waitable wake_waitable(PlatWake *w) { return (Waitable){ w ? w->fd : -1, POLLIN }; }
 void wake_free(PlatWake *w) { if (w) { close(w->fd); free(w); } }
+#endif
+Waitable wake_waitable(PlatWake *w) { return (Waitable){ w ? w->fd : -1, POLLIN }; }
 
 struct SockWait { int fd; };
 SockWait *sockwait_new(intptr_t sock) { SockWait *s = calloc(1, sizeof *s); if (s) s->fd = (int)sock; return s; }
@@ -79,16 +107,28 @@ void *plat_pages(size_t n) {
     return p == MAP_FAILED ? NULL : p;
 }
 void plat_pages_free(void *p, size_t n) { if (p) munmap(p, n); }
+#ifdef __APPLE__
+void plat_lock(void *p, size_t n) { mlock(p, n); }   /* дампов памяти нет: RLIMIT_CORE 0 (plat_harden) */
+void plat_trim(void) {}                         /* аллокатор macOS отдаёт свободные страницы сам */
+#else
 void plat_lock(void *p, size_t n) { mlock(p, n); madvise(p, n, MADV_DONTDUMP); }
+void plat_trim(void) { malloc_trim(0); }
+#endif
 void plat_unlock(void *p, size_t n) { munlock(p, n); }
 void plat_wipe(void *p, size_t n) { if (p && n) explicit_bzero(p, n); }
-void plat_trim(void) { malloc_trim(0); }
 int64_t plat_cpu_ms(void) {
     struct rusage r;
     getrusage(RUSAGE_SELF, &r);
     return (int64_t)(r.ru_utime.tv_sec + r.ru_stime.tv_sec) * 1000 + (r.ru_utime.tv_usec + r.ru_stime.tv_usec) / 1000;
 }
 size_t plat_private_bytes(void) {
+#ifdef __APPLE__
+    /* phys_footprint — то, что «Мониторинг системы» показывает как память процесса */
+    task_vm_info_data_t vi;
+    mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) != KERN_SUCCESS) return 0;
+    return (size_t)vi.phys_footprint;
+#endif
     /* RssAnon — анонимная (частная) резидентная память */
     FILE *f = fopen("/proc/self/status", "r");
     if (!f) return 0;
@@ -109,12 +149,17 @@ void plat_harden(void (*on_crash)(void)) {
     /* Аллокатор glibc: одна арена на процесс (у голосового потока не будет своей на 64 МБ
      * адресов с хвостами), блоки от 64 КБ — отдельными отображениями, которые сразу возвращаются
      * системе при free, а свободный хвост кучи отдаётся при остатке от 128 КБ. */
+#ifndef __APPLE__
     mallopt(M_ARENA_MAX, 1);
     mallopt(M_MMAP_THRESHOLD, 64 * 1024);
     mallopt(M_TRIM_THRESHOLD, 128 * 1024);
+#endif
     g_on_crash = on_crash;
-    /* Нет дампа памяти и нет ptrace от процессов того же пользователя. */
+    /* Нет дампа памяти и нет ptrace от процессов того же пользователя (macOS: подключиться отладчиком к
+     * подписанной без get-task-allow программе система и так не даёт; дамп — RLIMIT_CORE ниже). */
+#ifndef __APPLE__
     prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+#endif
     struct rlimit rl = { 0, 0 };
     setrlimit(RLIMIT_CORE, &rl);
     signal(SIGPIPE, SIG_IGN);
@@ -214,6 +259,81 @@ bool udp_same(const void *a16, const void *b16) {
 }
 void udp_close(intptr_t s) { if (s >= 0) close((int)s); }
 
+#ifdef __APPLE__
+/* ---------- хранилище секретов macOS: связка ключей (Keychain), общий пароль ----------
+ * Запись kSecClassGenericPassword: служба astra-ds (старая — mincord), учётная запись — имя записи.
+ * Данные идут в Security.framework напрямую, без дочерних процессов. Копии CFData затираются. */
+static bool kr_test;
+void keyring_test_mode(void) { kr_test = true; }
+static char *kr_account(const char *entry, char *buf, size_t n) {
+    if (kr_test) snprintf(buf, n, strcmp(entry, "token") ? "selftest-%s" : "selftest", entry);
+    else snprintf(buf, n, "%s", entry);
+    return buf;
+}
+static CFMutableDictionaryRef kr_query(const char *svc, const char *entry) {
+    char acc[64];
+    CFMutableDictionaryRef q = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    if (!q) return NULL;
+    CFStringRef s = CFStringCreateWithCString(NULL, svc, kCFStringEncodingUTF8);
+    CFStringRef a = CFStringCreateWithCString(NULL, kr_account(entry, acc, sizeof acc), kCFStringEncodingUTF8);
+    CFDictionarySetValue(q, kSecClass, kSecClassGenericPassword);
+    if (s) CFDictionarySetValue(q, kSecAttrService, s);
+    if (a) CFDictionarySetValue(q, kSecAttrAccount, a);
+    if (s) CFRelease(s);
+    if (a) CFRelease(a);
+    return q;
+}
+static int kr_load_svc(const char *svc, const char *entry, char *out, size_t cap) {
+    CFMutableDictionaryRef q = kr_query(svc, entry);
+    if (!q) return -2;
+    CFDictionarySetValue(q, kSecReturnData, kCFBooleanTrue);
+    CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitOne);
+    CFTypeRef r = NULL;
+    OSStatus st = SecItemCopyMatching(q, &r);
+    CFRelease(q);
+    if (st == errSecItemNotFound) return -1;
+    if (st != errSecSuccess || !r || CFGetTypeID(r) != CFDataGetTypeID()) { if (r) CFRelease(r); return -2; }
+    CFIndex n = CFDataGetLength((CFDataRef)r);
+    int rc = -2;
+    if (n > 0 && (size_t)n < cap) {
+        memcpy(out, CFDataGetBytePtr((CFDataRef)r), (size_t)n);
+        out[n] = 0;
+        rc = (int)n;
+    }
+    explicit_bzero((void *)CFDataGetBytePtr((CFDataRef)r), (size_t)n);
+    CFRelease(r);
+    if (rc < 0) explicit_bzero(out, cap);
+    return rc;
+}
+static void kr_delete_svc(const char *svc, const char *entry) {
+    CFMutableDictionaryRef q = kr_query(svc, entry);
+    if (!q) return;
+    SecItemDelete(q);
+    CFRelease(q);
+}
+static bool kr_save_svc(const char *svc, const char *entry, const char *tok, size_t n) {
+    CFMutableDictionaryRef q = kr_query(svc, entry);
+    if (!q) return false;
+    CFDataRef d = CFDataCreate(NULL, (const UInt8 *)tok, (CFIndex)n);
+    if (!d) { CFRelease(q); return false; }
+    CFDictionarySetValue(q, kSecValueData, d);
+    CFDictionarySetValue(q, kSecAttrLabel, CFSTR("Astra DS"));
+    CFDictionarySetValue(q, kSecAttrAccessible, kSecAttrAccessibleWhenUnlockedThisDeviceOnly);   /* не уходит в iCloud и резервные копии */
+    OSStatus st = SecItemAdd(q, NULL);
+    if (st == errSecDuplicateItem) {
+        CFMutableDictionaryRef f = kr_query(svc, entry);
+        CFMutableDictionaryRef u = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        if (f && u) { CFDictionarySetValue(u, kSecValueData, d); st = SecItemUpdate(f, u); }
+        if (f) CFRelease(f);
+        if (u) CFRelease(u);
+    }
+    explicit_bzero((void *)CFDataGetBytePtr(d), n);
+    CFRelease(d);
+    CFRelease(q);
+    return st == errSecSuccess;
+}
+const char *keyring_name(void) { return "macOS Keychain"; }
+#else
 /* ---------- хранилище секретов: Secret Service через secret-tool ----------
  * Токен идёт через stdin дочернего процесса, а не в аргументах (их видно в /proc). */
 /* Самопроверка пишет в отдельные записи и не трогает сохранённые токен и ссылку пользователя:
@@ -325,6 +445,12 @@ static void kr_delete_svc(const char *svc, const char *entry) {
     pid_t pid = spawn_tool(argv, NULL, NULL);
     if (pid > 0) wait_tool(pid);
 }
+const char *keyring_name(void) { return "Secret Service (secret-tool)"; }
+#endif
+#ifndef KR_NEW
+#define KR_NEW "astra-ds"
+#define KR_OLD "mincord"
+#endif
 /* Переименование mincord -> Astra DS (SECURITY П1): записи хранилища под новым именем. Если под новым пусто,
  * а под старым есть — прочитать старое, записать новое, ПЕРЕЧИТАТЬ и сравнить, и только тогда удалить
  * старое; при любом сбое старое не трогаем (повтор при следующем запуске). Удаление — под обоими именами.
@@ -357,8 +483,6 @@ void keyring_delete(const char *entry) {
 /* --keyringtest: записать под СТАРЫМ именем (проверка миграции; только в режиме самопроверки) */
 bool keyring_save_old(const char *entry, const char *data, size_t n) { return kr_test && kr_save_svc(KR_OLD, entry, data, n); }
 int keyring_load_raw(const char *entry, bool old, char *out, size_t cap) { return kr_test ? kr_load_svc(old ? KR_OLD : KR_NEW, entry, out, cap) : -1; }
-
-const char *keyring_name(void) { return "Secret Service (secret-tool)"; }
 
 /* Открыть ссылку-приглашение в браузере (SECURITY С3-а): только https://discord.gg/КОД и
  * https://discord.com/invite/КОД (КОД [A-Za-z0-9-]{2,32}); xdg-open — абсолютный путь из системных
@@ -406,6 +530,10 @@ static bool spawn_sys(const char *const *cands, int nc, char *const argv[]) {
 }
 /* №123: уведомление через notify-send, только если он есть; не чаще раза в 2 с */
 void plat_notify(const char *title, const char *text) {
+#ifdef __APPLE__
+    (void)title; (void)text; (void)spawn_sys;  /* macOS: уведомления — позже, через окно (UserNotifications) */
+    return;
+#endif
     static i64 last;
     i64 now = now_ms();
     if (now - last < 2000) return;
@@ -444,7 +572,11 @@ bool open_url_browser(const char *url) {
     size_t n = strlen(code);
     if (n < 2 || n > 32) return false;
     for (size_t i = 0; i < n; i++) if (!((code[i] >= 'a' && code[i] <= 'z') || (code[i] >= 'A' && code[i] <= 'Z') || (code[i] >= '0' && code[i] <= '9') || code[i] == '-')) return false;
+#ifdef __APPLE__
+    static const char *const cands[] = { "/usr/bin/open" };   /* системная, root, в SIP-защищённом /usr/bin */
+#else
     static const char *const cands[] = { "/usr/bin/xdg-open", "/bin/xdg-open", "/usr/local/bin/xdg-open" };
+#endif
     const char *path = NULL;
     for (size_t i = 0; i < sizeof cands / sizeof *cands && !path; i++) {
         struct stat st;
@@ -464,7 +596,11 @@ bool open_url_browser(const char *url) {
     posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
     posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
     posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+#ifdef __APPLE__
+    char *argv[] = { (char *)"open", (char *)url, NULL };
+#else
     char *argv[] = { (char *)"xdg-open", (char *)url, NULL };
+#endif
     pid_t pid = -1;
     bool ok = posix_spawn(&pid, path, &fa, NULL, argv, env) == 0;   /* дескрипторы программы — O_CLOEXEC */
     posix_spawn_file_actions_destroy(&fa);
@@ -481,7 +617,7 @@ bool open_url_browser(const char *url) {
 }
 
 /* ---------- дочерняя программа ---------- */
-struct PlatFile { int fd; };
+struct PlatFile { int fd; char path[4096]; };   /* path — macOS: fexecve нет, запуск по пути */
 PlatFile *exe_open(const char *name, char *path, size_t pathn) {
     char p[4096];
     ssize_t n = readlink("/proc/self/exe", p, sizeof p - 1);
@@ -500,6 +636,7 @@ PlatFile *exe_open(const char *name, char *path, size_t pathn) {
     PlatFile *f = calloc(1, sizeof *f);
     if (!f) { close(fd); return NULL; }
     f->fd = fd;
+    snprintf(f->path, sizeof f->path, "%s", p);
     return f;
 }
 long exe_read(PlatFile *f, void *buf, size_t n) {
@@ -525,7 +662,9 @@ PlatProc *proc_spawn(PlatFile *f, const char *const *argv, const void *in, size_
     if (pid == 0) {
         /* Дочерний процесс: только безопасные после fork вызовы. Умереть вместе с mincord
          * (сигнал придёт при смерти потока-родителя — это главный поток, он живёт до конца). */
+#ifndef __APPLE__
         prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+#endif
         if (getppid() != parent) _exit(127);   /* родитель умер раньше prctl */
         if (dup2(pp[0], 0) < 0 || dup2(nul, 1) < 0 || dup2(nul, 2) < 0) _exit(127);
         /* Ни одного чужого дескриптора (сокеты curl, хранилище): всё от 3 — закрыть при exec */
@@ -534,7 +673,11 @@ PlatProc *proc_spawn(PlatFile *f, const char *const *argv, const void *in, size_
 #endif
         for (int i = 3; i < 4096; i++) if (i != f->fd) close(i);
         signal(SIGPIPE, SIG_DFL);              /* SIG_IGN наследуется через exec */
+#ifdef __APPLE__
+        execve(f->path, (char *const *)argv, envp);
+#else
         fexecve(f->fd, (char *const *)argv, envp);
+#endif
         _exit(127);
     }
     close(pp[0]);
@@ -578,6 +721,11 @@ void proc_kill(PlatProc *p) {
 }
 long proc_rss_kb(PlatProc *p) {
     if (!p || p->dead) return -1;
+#ifdef __APPLE__
+    struct proc_taskinfo ti;
+    if (proc_pidinfo(p->pid, PROC_PIDTASKINFO, 0, &ti, sizeof ti) != (int)sizeof ti) return -1;
+    return (long)(ti.pti_resident_size / 1024);
+#endif
     char path[64], line[128];
     snprintf(path, sizeof path, "/proc/%d/status", (int)p->pid);
     FILE *f = fopen(path, "r");

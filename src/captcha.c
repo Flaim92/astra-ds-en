@@ -22,7 +22,14 @@
  * страница не уходит — hCaptcha видит домен Discord), контекст эфемерный (без профиля на диске). Ответ приходит
  * в заголовок страницы и пишется в stdout помощника; клиент читает его в отдельном потоке и будит g_wake.
  * Сеть помощника: при включённом VLESS — только через SOCKS5 туннеля (не удалось задать прокси — проверку не
- * открываем, напрямую не идём); WebRTC выключен. Адрес и пароль SOCKS идут через stdin, не в argv. */
+ * открываем, напрямую не идём); WebRTC выключен. Адрес и пароль SOCKS идут через stdin, не в argv.
+ *
+ * macOS (__APPLE__): та же модель процесса-помощника и тот же обмен с клиентом (stdin, stdout, код выхода), только
+ * окно — WKWebView (src/captcha_mac.m, captcha_mac_run). WebKit системный, есть всегда; помощник подгружает его
+ * через dlopen, в процесс клиента он не попадает. Хранилище — WKWebsiteDataStore nonPersistentDataStore. При
+ * включённом VLESS прокси задаётся через proxyConfigurations (SOCKS5, Network.framework), а это есть только с
+ * macOS 14: на более старых системах при VLESS проверку не открываем (как в Linux, напрямую не идём). Ответ страница
+ * отдаёт через WKScriptMessageHandler (без заголовка и его обрезки). Свой исполняемый файл — _NSGetExecutablePath. */
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -31,6 +38,11 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <sys/wait.h>
+#ifdef __APPLE__
+#include <limits.h>
+#include <stdint.h>
+#include <mach-o/dyld.h>
+#endif
 
 extern char **environ;
 
@@ -38,7 +50,14 @@ extern char **environ;
 #define PAGE_URL "https://discord.com/astra-captcha"
 #define RU_TITLE "Astra DS: проверка hCaptcha для Discord"
 
+#ifdef __APPLE__
+#define WK_LOAD_FAIL "WebKit не загрузился: проверку показать нечем, войдите по QR-коду"
+#define WK_MISSING "проверке через VLESS нужна macOS 14 или новее: выключите VLESS или войдите по QR-коду"
+#else
+#define WK_LOAD_FAIL "WebKitGTK не загрузился: установите libwebkit2gtk-4.1 или войдите по QR-коду"
+#define WK_MISSING "нет WebKitGTK (пакет libwebkit2gtk-4.1): проверку показать нечем, войдите по QR-коду"
 static const char *const wk_libs[] = { "libwebkit2gtk-4.1.so.0", "libwebkit2gtk-4.0.so.37" };
+#endif
 
 enum { CS_IDLE, CS_OPEN, CS_OK, CS_FAIL };
 static struct {
@@ -64,6 +83,19 @@ static bool cs_charset(const char *s, const char *extra, size_t max) {
     return true;
 }
 
+#ifdef __APPLE__
+/* macOS: WKWebView есть всегда. При VLESS нужен прокси хранилища WebKit (macOS 14+), иначе проверку не показываем.
+ * Не кэшируем: VLESS включают и выключают на ходу. */
+bool captcha_supported(void) { return vless_state() == VL_OFF || captcha_mac_proxy_ok(); }
+
+/* Полный путь своего исполняемого файла (/proc/self/exe в Darwin нет). */
+static bool self_exe(char *out, size_t n) {
+    char raw[PATH_MAX];
+    uint32_t rn = sizeof raw;
+    if (n < PATH_MAX || _NSGetExecutablePath(raw, &rn) != 0) return false;
+    return realpath(raw, out) != NULL;
+}
+#else
 /* Есть ли WebKitGTK: ищем файл библиотеки, не загружая её в процесс клиента. */
 bool captcha_supported(void) {
     if (C.supported >= 0) return C.supported;
@@ -78,6 +110,7 @@ bool captcha_supported(void) {
         }
     return C.supported;
 }
+#endif
 
 static void *reader(void *a) {
     (void)a;
@@ -104,7 +137,7 @@ static void *reader(void *a) {
     else {
         plat_wipe(C.out, C.cap);
         snprintf(C.err, sizeof C.err, "%s",
-                 code == 2 ? ui_tr("WebKitGTK не загрузился: установите libwebkit2gtk-4.1 или войдите по QR-коду")
+                 code == 2 ? ui_tr(WK_LOAD_FAIL)
                : code == 3 ? ui_tr("hCaptcha не загрузилась (нет связи?)")
                : code == 5 ? ui_tr("VLESS не работает: проверку открыть нельзя (напрямую не идём)")
                : code == 6 ? ui_tr("нет графического сеанса для окна проверки")
@@ -126,9 +159,15 @@ bool captcha_open(const char *sitekey, const char *rqdata, char *out, size_t cap
         return false;
     }
     if (!captcha_supported()) {
-        snprintf(err, errn, ui_tr("нет WebKitGTK (пакет libwebkit2gtk-4.1): проверку показать нечем, войдите по QR-коду"));
+        snprintf(err, errn, "%s", ui_tr(WK_MISSING));
         return false;
     }
+#ifdef __APPLE__
+    char exe[PATH_MAX];
+    if (!self_exe(exe, sizeof exe)) { snprintf(err, errn, ui_tr("поток проверки не запустился")); return false; }
+#else
+    const char *exe = "/proc/self/exe";
+#endif
     char proxy[400] = "";
     if (vless_state() != VL_OFF) {
         char ip[64] = "", user[128] = "", pass[128] = "";
@@ -150,7 +189,7 @@ bool captcha_open(const char *sitekey, const char *rqdata, char *out, size_t cap
     posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
     char *argv[] = { "astra-ds", "--captcha-helper", (char *)sitekey, (char *)(rqdata[0] ? rqdata : "-"), test ? "1" : "0", NULL };
     pid_t pid = -1;
-    if (posix_spawn(&pid, "/proc/self/exe", &fa, NULL, argv, environ) != 0) pid = -1;
+    if (posix_spawn(&pid, exe, &fa, NULL, argv, environ) != 0) pid = -1;
     posix_spawn_file_actions_destroy(&fa);
     close(in[0]);
     close(o[1]);
@@ -211,6 +250,100 @@ void captcha_close(void) {
     C.out = NULL;
 }
 
+/* ---------- процесс-помощник: страница с виджетом (общая для Linux и macOS) ----------
+ * post_js — определение function post(s), которым страница отдаёт "ok:<ответ>" или "err:load": в Linux через
+ * заголовок страницы частями, в macOS через window.webkit.messageHandlers. Остальная страница одна и та же.
+ * Возврат — строка в malloc (вызывающий освобождает) или NULL. */
+static char *page_build(const char *lang, const char *sitekey, const char *rq, bool test, const char *text, const char *post_js) {
+    size_t pn = 12288;
+    char *page = malloc(pn);
+    if (!page) return NULL;
+    int n = snprintf(page, pn,
+        "<!doctype html><html lang=\"%s\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\">"
+        "<title>astra</title><style>html,body{margin:0;height:100%%;background:#313338;color:#dbdee1;font:15px sans-serif}"
+        "body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px}"
+        "#t{max-width:380px;text-align:center;line-height:1.4}</style><script>var SK=\"%s\",RQ=\"%s\",AUTO=%d;%s"
+        "var loaded=0;function onl(){loaded=1;try{var id=hcaptcha.render('c',{sitekey:SK,theme:'dark',size:AUTO?'invisible':'normal',"
+        "callback:function(t){post('ok:'+t)},'error-callback':function(e){try{hcaptcha.reset(id)}catch(x){}}});"
+        "if(RQ)hcaptcha.setData(id,{rqdata:RQ});if(AUTO)hcaptcha.execute(id);}catch(e){post('err:load')}}"
+        "setTimeout(function(){if(!loaded)post('err:load')},30000);</script>"
+        "<script src=\"https://js.hcaptcha.com/1/api.js?render=explicit&onload=onl&hl=%s&recaptchacompat=off\" async defer></script>"
+        "</head><body><div id=\"t\">%s</div><div id=\"c\"></div></body></html>",
+        lang, sitekey, rq, test ? 1 : 0, post_js, lang, text);
+    if (n <= 0 || (size_t)n >= pn) { free(page); return NULL; }
+    return page;
+}
+
+static void read_line(char *s, size_t n) {
+    size_t i = 0;
+    for (;;) {
+        char c;
+        ssize_t r = read(0, &c, 1);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0 || c == '\n') break;
+        if (i + 1 < n) s[i++] = c;
+    }
+    s[i] = 0;
+}
+
+#ifdef __APPLE__
+/* ---------- процесс-помощник macOS: разбор прокси и запуск окна WKWebView (captcha_mac.m) ---------- */
+/* "socks5://[логин:пароль@]адрес:порт" — ровно то, что собрал captcha_open; символы проверены тем же набором. */
+static bool proxy_parse(const char *s, char *host, size_t hn, int *port, char *user, size_t un, char *pass, size_t pwn) {
+    host[0] = user[0] = pass[0] = 0;
+    if (strncmp(s, "socks5://", 9)) return false;
+    s += 9;
+    const char *at = strchr(s, '@');
+    if (at) {
+        const char *c = memchr(s, ':', (size_t)(at - s));
+        if (!c) return false;
+        size_t ul = (size_t)(c - s), pl = (size_t)(at - c - 1);
+        if (!ul || ul >= un || pl >= pwn) return false;
+        memcpy(user, s, ul);
+        user[ul] = 0;
+        memcpy(pass, c + 1, pl);
+        pass[pl] = 0;
+        s = at + 1;
+    }
+    const char *c = strrchr(s, ':');
+    if (!c || c == s || (size_t)(c - s) >= hn) return false;
+    memcpy(host, s, (size_t)(c - s));
+    host[c - s] = 0;
+    char *end = NULL;
+    long p = strtol(c + 1, &end, 10);
+    if (!end || *end || p < 1 || p > 65535) return false;
+    *port = (int)p;
+    return cs_charset(host, ".:", 63) && cs_charset(user, "-_.", 127) && cs_charset(pass, "-_.", 127);
+}
+
+int captcha_helper_main(int argc, char **argv) {
+    if (argc < 5) return 4;
+    const char *sitekey = argv[2], *rq = strcmp(argv[3], "-") ? argv[3] : "";
+    bool test = !strcmp(argv[4], "1");
+    if (!cs_charset(sitekey, "-", 64) || !cs_charset(rq, "+/=._-", 4000) || !sitekey[0]) return 4;
+    char proxy[400], title[300], text[600], lang[8];
+    read_line(proxy, sizeof proxy);
+    read_line(title, sizeof title);
+    read_line(text, sizeof text);
+    read_line(lang, sizeof lang);
+    if (strcmp(lang, "en")) snprintf(lang, sizeof lang, "ru");
+    for (char *p = text; *p; p++) if (*p == '<' || *p == '>' || *p == '&' || *p == '"' || *p == '%') *p = ' ';
+    char host[64] = "", user[128] = "", pass[128] = "";
+    int port = 0;
+    bool via = proxy[0] != 0;
+    bool pok = !via || proxy_parse(proxy, host, sizeof host, &port, user, sizeof user, pass, sizeof pass);
+    plat_wipe(proxy, sizeof proxy);
+    if (!pok) { plat_wipe(pass, sizeof pass); return 5; }   /* VLESS: прокси не разобрался — напрямую не идём */
+    char *page = page_build(lang, sitekey, rq, test, text,
+                            "function post(s){try{window.webkit.messageHandlers.astra.postMessage(s)}catch(e){}}");
+    if (!page) { plat_wipe(pass, sizeof pass); return 4; }
+    /* при успехе captcha_mac_run не возвращается (_exit с кодом); пароль прокси он затирает сам */
+    int code = captcha_mac_run(page, title, via ? host : NULL, port, via ? user : "", pass, sizeof pass);
+    plat_wipe(pass, sizeof pass);
+    free(page);
+    return code;
+}
+#else
 /* ---------- процесс-помощник: окно WebKitGTK (GTK 3) ---------- */
 typedef void *gp;
 static struct {
@@ -247,18 +380,6 @@ static void h_title(gp obj, gp pspec, gp data) {
 static void h_destroy(gp w, gp data) { (void)w; (void)data; H.main_quit(); }
 static gp h_create(gp wv, gp act, gp data) { (void)wv; (void)act; (void)data; return NULL; }   /* новые окна не открываем */
 static int h_timeout(gp data) { (void)data; H.main_quit(); return 0; }
-
-static void read_line(char *s, size_t n) {
-    size_t i = 0;
-    for (;;) {
-        char c;
-        ssize_t r = read(0, &c, 1);
-        if (r < 0 && errno == EINTR) continue;
-        if (r <= 0 || c == '\n') break;
-        if (i + 1 < n) s[i++] = c;
-    }
-    s[i] = 0;
-}
 
 int captcha_helper_main(int argc, char **argv) {
     if (argc < 5) return 4;
@@ -334,29 +455,18 @@ int captcha_helper_main(int argc, char **argv) {
     connect(view, "notify::title", (void *)h_title, NULL, NULL, 0);
     connect(view, "create", (void *)h_create, NULL, NULL, 0);
     timeout_add(600, (void *)h_timeout, NULL);  /* 10 минут на проверку */
-    size_t pn = 12288;
-    char *page = malloc(pn);
-    if (!page) return 4;
-    snprintf(page, pn,
-        "<!doctype html><html lang=\"%s\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\">"
-        "<title>astra</title><style>html,body{margin:0;height:100%%;background:#313338;color:#dbdee1;font:15px sans-serif}"
-        "body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px}"
-        "#t{max-width:380px;text-align:center;line-height:1.4}</style><script>var SK=\"%s\",RQ=\"%s\",AUTO=%d;"
+    /* post: ответ частями через заголовок (см. h_title); здесь % одинарный — строка идёт аргументом, не форматом */
+    char *page = page_build(lang, sitekey, rq, test, text,
         "function post(s){if(s.slice(0,3)!='ok:'){document.title=s;return}var t=s.slice(3),n=Math.ceil(t.length/800),i=0;"
-        "setInterval(function(){document.title='k:'+i+':'+n+':'+t.substr(i*800,800);i=(i+1)%%n},40)}"
-        "var loaded=0;function onl(){loaded=1;try{var id=hcaptcha.render('c',{sitekey:SK,theme:'dark',size:AUTO?'invisible':'normal',"
-        "callback:function(t){post('ok:'+t)},'error-callback':function(e){try{hcaptcha.reset(id)}catch(x){}}});"
-        "if(RQ)hcaptcha.setData(id,{rqdata:RQ});if(AUTO)hcaptcha.execute(id);}catch(e){post('err:load')}}"
-        "setTimeout(function(){if(!loaded)post('err:load')},30000);</script>"
-        "<script src=\"https://js.hcaptcha.com/1/api.js?render=explicit&onload=onl&hl=%s&recaptchacompat=off\" async defer></script>"
-        "</head><body><div id=\"t\">%s</div><div id=\"c\"></div></body></html>",
-        lang, sitekey, rq, test ? 1 : 0, lang, text);
+        "setInterval(function(){document.title='k:'+i+':'+n+':'+t.substr(i*800,800);i=(i+1)%n},40)}");
+    if (!page) return 4;
     load_html(view, page, PAGE_URL);
     show_all(win);
     gtk_main();
     fflush(stdout);
     _exit(H.code);                              /* без деструкторов GTK/WebKit: процесс одноразовый */
 }
+#endif   /* __APPLE__ */
 #else
 
 #define COBJMACROS

@@ -49,6 +49,10 @@ static void up_trunc(char *s, size_t max) {    /* по границе симво
 
 #ifdef _WIN32
 #define UP_PLATFORM "win-x64"
+#elif defined(__APPLE__) && defined(__aarch64__)
+#define UP_PLATFORM "macos-arm64"                /* у каждой платформы свой манифест: Mac не возьмёт файл Linux */
+#elif defined(__APPLE__)
+#define UP_PLATFORM "macos-x64"
 #else
 #define UP_PLATFORM "linux-x64"
 #endif

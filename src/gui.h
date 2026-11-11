@@ -117,6 +117,12 @@ bool gb_vk_key(unsigned vk, bool ctrl, bool alt, Key *out);           /* Ctrl+к
 bool gb_ks_key(unsigned long base, unsigned long ks, bool alt, Key *out);   /* то же для X11 keysym (с Ctrl) */
 #endif                         /* №15: масштаб шрифта, шаг 10 %; 0 — сброс; false — без изменений */
 int gb_zoom_pct(void);
+#ifdef __APPLE__
+/* macOS (gui_mac.m): ожидание главного цикла в ран-лупе Cocoa. plat_wait зовёт первым и при true больше не ждёт:
+ * дескрипторы w ждутся через kqueue вместе с событиями окна. false: окна нет / не главный поток / вложенный вызов. */
+bool gb_wait(const Waitable *w, int n, int timeout_ms);
+bool gb_mac_key(u32 ch, unsigned keycode, bool alt, Key *out);   /* Ctrl+клавиша окна -> Key (для selftest) */
+#endif
 #ifdef ASTRA_VIDEO
 /* ---------- видео просмотра трансляции (gui_grid.c; договор g_video_area/g_video_supported — golive.h) ---------- */
 typedef struct { int x, y, w, h; const u32 *buf; int bw, bh; } GvPaint;   /* область, пиксели; картинка bw x bh (BGRA) */

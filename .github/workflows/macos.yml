@@ -1,0 +1,177 @@
+# Сборка и самопроверка Astra DS на macOS (Apple Silicon и Intel). Запуск — вручную или при push в ветку macos.
+name: macos
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [macos, main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Инструменты
+        run: brew install ninja gnu-sed coreutils
+
+      - name: Кэш зависимостей
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            deps/prefix
+            deps/src
+          key: deps-macos-${{ matrix.arch }}-${{ hashFiles('deps/build-deps.sh') }}
+
+      - name: Зависимости
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash deps/build-deps.sh zlib openssl curl opus speexdsp rnnoise json mlspp libdave jpeg brotli
+
+      # кэш сохраняется сразу: следующий прогон не пересобирает зависимости, даже если упала сборка программы
+      - name: Сохранить кэш зависимостей
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            deps/prefix
+            deps/src
+          key: deps-macos-${{ matrix.arch }}-${{ hashFiles('deps/build-deps.sh') }}
+
+      - name: Сборка
+        run: KEEP_GOING=1 bash build.sh
+
+      - name: Файл программы
+        run: |
+          file build/astra-ds
+          ls -l build/astra-ds
+          otool -L build/astra-ds
+
+      - name: Самопроверка
+        run: |
+          rc=0
+          ./build/astra-ds --selftest > selftest.txt 2>&1 || rc=1
+          grep -E "FAIL|ДЕФЕКТ|Итог|частная память" selftest.txt || true
+          tail -5 selftest.txt
+          echo "--- шлюз Discord (поддельный токен)"
+          ./build/astra-ds --gwtest || rc=1
+          echo "--- связка ключей"
+          ./build/astra-ds --keyringtest || echo "keyringtest: код $? (в CI связка ключей может быть недоступна)"
+          exit $rc
+
+      - name: Отчёт самопроверки
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-macos-${{ matrix.arch }}
+          path: selftest.txt
+          if-no-files-found: ignore
+
+      - name: Архив
+        run: |
+          mkdir -p out/astra-ds
+          cp build/astra-ds out/astra-ds/
+          cp LICENSE out/astra-ds/LICENSE.txt
+          cp third_party/LICENSE out/astra-ds/LICENSE-third-party.txt
+          tar -C out -czf astra-ds-macos-${{ matrix.arch }}.tar.gz astra-ds
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-ds-macos-${{ matrix.arch }}
+          path: astra-ds-macos-${{ matrix.arch }}.tar.gz
+
+  # «Astra DS Video» (VIDEO=1): декодеры трансляций (FFmpeg без VideoToolbox — --disable-autodetect, dav1d),
+  # камера AVFoundation; jpegcam (MJPG с SIMD, имена camj_*) переименовывается llvm-objcopy из brew llvm
+  video:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Инструменты
+        run: brew install ninja gnu-sed coreutils nasm llvm
+
+      - name: Кэш зависимостей
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            deps/prefix
+            deps/src
+          key: deps-macos-video-${{ matrix.arch }}-${{ hashFiles('deps/build-deps.sh') }}
+
+      - name: Зависимости
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash deps/build-deps.sh zlib openssl curl opus speexdsp rnnoise json mlspp libdave jpeg brotli dav1d ffmpeg jpegcam
+
+      - name: Сохранить кэш зависимостей
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            deps/prefix
+            deps/src
+          key: deps-macos-video-${{ matrix.arch }}-${{ hashFiles('deps/build-deps.sh') }}
+
+      - name: Сборка
+        run: VIDEO=1 KEEP_GOING=1 bash build.sh
+
+      - name: Файл программы
+        run: |
+          file build/astra-ds-video
+          ls -l build/astra-ds-video
+          otool -L build/astra-ds-video
+          nm build/astra-ds-video 2>/dev/null | grep -c camj_ || echo "camj_: нет (сборка без jpegcam)"
+
+      - name: Самопроверка
+        run: |
+          rc=0
+          ./build/astra-ds-video --selftest > selftest.txt 2>&1 || rc=1
+          grep -E "FAIL|ДЕФЕКТ|Итог|частная память" selftest.txt || true
+          tail -5 selftest.txt
+          echo "--- шлюз Discord (поддельный токен)"
+          ./build/astra-ds-video --gwtest || rc=1
+          exit $rc
+
+      - name: Отчёт самопроверки
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-macos-video-${{ matrix.arch }}
+          path: selftest.txt
+          if-no-files-found: ignore
+
+      - name: Архив
+        run: |
+          mkdir -p out/astra-ds-video
+          cp build/astra-ds-video out/astra-ds-video/
+          cp LICENSE out/astra-ds-video/LICENSE.txt
+          cp third_party/LICENSE out/astra-ds-video/LICENSE-third-party.txt
+          tar -C out -czf astra-ds-video-macos-${{ matrix.arch }}.tar.gz astra-ds-video
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-ds-video-macos-${{ matrix.arch }}
+          path: astra-ds-video-macos-${{ matrix.arch }}.tar.gz

@@ -1741,11 +1741,23 @@ int login_captcha_probe(void (*check)(bool ok, const char *what)) {
     captcha_close();
     int used = 0, refused = 0;
     captcha_bridge_stats(&used, &refused);
-    got = got && used > 0;
     char b[768];
+#ifdef _WIN32
+    got = got && used > 0;                      /* мост соединений есть только у WebView2 */
     snprintf(b, sizeof b, "капча: WebView2 + страница под discord.com + hcaptcha.com через мост (%d соединений, отказано чужим: %d) -> "
              "ответ за %lld мс%s%s (память процесса: %zu -> пик %zu -> %zu КБ)", used, refused, (long long)(now() - t0),
              got ? "" : " - ", got ? "" : err, pb0 / 1024, peak / 1024, plat_private_bytes() / 1024);
+#else
+    /* macOS (WKWebView) и Linux (WebKitGTK): окно — отдельный процесс-помощник, моста нет, счётчики всегда 0 */
+    (void)used; (void)refused;
+#ifdef __APPLE__
+    const char *eng = "WKWebView";
+#else
+    const char *eng = "WebKitGTK";
+#endif
+    snprintf(b, sizeof b, "капча: %s (процесс-помощник), тестовый ключ hCaptcha -> ответ за %lld мс%s%s (память процесса: %zu -> пик %zu -> %zu КБ)",
+             eng, (long long)(now() - t0), got ? "" : " - ", got ? "" : err, pb0 / 1024, peak / 1024, plat_private_bytes() / 1024);
+#endif
     check(got, b);
     login_finish();
     return got ? 0 : 1;

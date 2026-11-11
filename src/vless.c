@@ -49,6 +49,7 @@ static int XliteFailed(void) { return 0; }      /* Go: «умереть сам»
 int XliteStart(char *cfg, int n);               /* 0 — работает; 1 — параметры; 2 — не создан (DNS?); 3 — порт */
 void XliteStop(void);
 
+#undef LINK_MAX                                 /* macOS: limits.h определяет свой (жёсткие ссылки) */
 #define LINK_MAX 4000
 #define PROBE_URL "https://discord.com/api/v9/gateway"
 #define FAILS_TO_DOWN 3                         /* столько сбоев подряд от сети/голоса — туннель не работает */

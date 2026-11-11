@@ -141,7 +141,7 @@ enum {
     B_PING, B_PINS, B_INBOX, B_PRESENT, B_STATUS, B_CARD_BLOCK, B_CARD_ADD, B_NEWMSG,
     B_PINS_MORE, B_INBOX_T0, B_INBOX_T1, B_ACK_ALL, B_EP_X, B_EMOJI, B_CAP_GO, B_CAP_NO,
     B_ADDSRV, B_GMENU, B_GINVITE, B_ADDFRIEND, B_TXT_EXP, B_TXT_DL, B_STARTASK, B_RV_X, B_EPH_HIDE, B_EMBEDS, B_MRETRY, B_MDISCARD,
-    B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS, B_NS_OFF, B_NS_SPX, B_NS_RNN, B_WATCH, B_WATCH_STOP, B_WATCH_PICK, B_WATCH_FULL, B_WATCH_CHAT, B_WATCH_SHOW, B_CAM, B_CAM_PV, B_CAM_VIEW, B_CAM_TILE, B_ANON,
+    B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS, B_NS_OFF, B_NS_SPX, B_NS_RNN, B_WATCH, B_WATCH_STOP, B_WATCH_PICK, B_WATCH_FULL, B_WATCH_CHAT, B_WATCH_SHOW, B_CAM, B_CAM_PV, B_CAM_VIEW, B_CAM_TILE, B_ANON, B_MICG_DN, B_MICG_UP, B_MICG_0,
     B_SP_PREV, B_SP_NEXT
 };
 enum { MI_REPLY = 1, MI_EDIT, MI_DELETE, MI_REACT, MI_COPY,
@@ -2819,7 +2819,8 @@ static void draw_poll_row(int tx, int y, int tw, int mi, int row) {
         const char *mk = p->multi ? (a->me ? "[x]" : "[ ]") : (a->me ? "(*)" : "( )");
         bool win = closed && best > 0 && a->count == best;
         int u = g_text(x, y, mk, 3, a->me ? C_WHITE : C_MUTED, AT_B) + 1;
-        snprintf(t, sizeof t, res ? "%d%% (%d)" : "", pct, a->count);
+        if (res) snprintf(t, sizeof t, "%d%% (%d)", pct, a->count);
+        else t[0] = 0;
         int rw = res ? vw(t) : 0;
         g_texte(x + u, y, a->text ? a->text : "", w - u - rw - 1, C_TEXT, win || a->me ? AT_B : 0);
         if (res) g_text(x + w - rw, y, t, rw, win ? C_WHITE : C_MUTED, win ? AT_B : 0);
@@ -4088,6 +4089,13 @@ static void draw_settings(int W, int H) {
             for (int i = 0; i < bw; i++)
                 g_ch(bx + i, y + 1, i == thr ? '|' : i < fill ? '#' : '-', i == thr ? C_GOLD : i < fill ? (loud ? C_GREEN : C_TEXT) : C_LINE, i < fill || i == thr ? AT_B : 0);
         }
+        y += 3;
+        snprintf(t, sizeof t, TR("ГРОМКОСТЬ МИКРОФОНА: %d %%"), voice_mic_gain());
+        g_text(x, y, t, w, C_MUTED, AT_B);
+        u = g_button(x, y + 1, TR("-10 %"), w, 0, B_MICG_DN);
+        u += 1 + g_button(x + u + 1, y + 1, TR("+10 %"), w - u - 1, 0, B_MICG_UP);
+        if (voice_mic_gain() != 100) u += 1 + g_button(x + u + 1, y + 1, TR("100 %"), w - u - 1, 0, B_MICG_0);
+        if (voice_mic_gain() > 100) g_texte(x + u + 2, y + 1, TR("громкие места мягко ограничиваются"), w - u - 2, C_MUTED, 0);
         y += 3;
         g_text(x, y, TR("МИКРОФОН И ЗВУК"), w, C_MUTED, AT_B);
         u = g_button(x, y + 1, vs.self_mute ? TR("Микрофон выкл (F5)") : TR("Микрофон вкл (F5)"), w, vs.self_mute ? 2 : 0, B_MIC);
@@ -10588,6 +10596,9 @@ static void button(int id, int x, int y) {
     case B_CAM_TILE: if (U.btn_arg >= 0 && U.btn_arg < 16 && cu_tu[U.btn_arg]) cv_open(cu_tu[U.btn_arg]); break;
 #endif
     case B_HPF: voice_hpf(!voice_hpf_on()); break;
+    case B_MICG_DN: voice_mic_gain_set(voice_mic_gain() - 10); break;
+    case B_MICG_UP: voice_mic_gain_set(voice_mic_gain() + 10); break;
+    case B_MICG_0: voice_mic_gain_set(100); break;
     case B_NS_OFF: case B_NS_SPX: case B_NS_RNN: voice_ns_set(NS_OFF + (id - B_NS_OFF)); break;
     case B_FSEND: if (U.mode == M_FILE) file_submit(); break;
     case B_MOD: {

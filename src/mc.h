@@ -117,6 +117,7 @@ typedef struct {
     bool pending;                               /* №128: правила сервера ещё не приняты (писать нельзя) */
     i64 timeout_until;                          /* №127: мой тайм-аут (communication_disabled_until), unix-секунды; 0 — нет */
     char icon[35];                              /* хэш значка сервера: 32 hex или a_+32 hex, иначе "" */
+    i64 joined;                                 /* когда я вступил (joined_at, unix-секунды; 0 — неизвестно) */
 } Guild;
 
 typedef struct {                                /* кто в каком голосовом канале */
@@ -432,8 +433,37 @@ bool gdm_add(u64 cid, u64 uid, char *err, size_t errn);    /* добавить �
 bool gdm_remove(u64 cid, u64 uid, char *err, size_t errn); /* исключить (только владелец) */
 bool gdm_leave(u64 cid, char *err, size_t errn);           /* выйти из группы */
 /* №2 папки серверов (READY user_settings_proto, поле guild_folders; или старый user_settings.guild_folders) */
-typedef struct { i64 id; char *name; u32 color; bool has_color; int n; u64 *gids; } GuildFolder;
+typedef struct { i64 id; char *name; u32 color; bool has_color; int n; u64 *gids; u8 *meta; int nmeta; } GuildFolder;   /* meta — прочие поля папки как пришли */
 int guild_folders(const GuildFolder **out);                /* число папок (папка из одного сервера без id — просто сервер) */
+/* Полоса серверов в порядке Discord: сверху серверы без записи в guild_folders (новые: позже вступили — выше),
+ * дальше по guild_folders. Каждый сервер S.guilds ровно один раз. fk — индекс папки или RAIL_SINGLE / RAIL_NEW. */
+typedef struct { u64 gid; int fk; } RailEnt;
+enum { RAIL_SINGLE = -1, RAIL_NEW = -2 };
+int guild_rail(RailEnt **out);                             /* *out — в куче (free) */
+/* Перестановка: сразу на полосе, затем PATCH /users/@me/settings-proto/1 (только поле 14); отказ — откат и причина.
+ * src — сервер; whole — двигать его папку целиком. ref — сервер-ориентир; ref_top — относительно записи верхнего
+ * уровня, где ref (его папки целиком), иначе — внутри папки ref. GM_INTO — в конец папки ref; GM_NEWFOLDER —
+ * новая папка из ref и src. false — не изменилось (err — причина, если есть). */
+enum { GM_BEFORE, GM_AFTER, GM_INTO, GM_NEWFOLDER };
+bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, size_t errn);
+void guild_folders_pb(Buf *out);                           /* protobuf PreloadedUserSettings только с полем 14 */
+/* Настройки папки, где сервер gid (только настоящая папка: с id или из нескольких серверов). name: NULL — не менять,
+ * "" — убрать название (не длиннее FOLDER_NAME_MAX символов, края без пробелов). color: 0..0xFFFFFF,
+ * FOLDER_COLOR_KEEP — не менять, FOLDER_COLOR_DEFAULT — убрать (цвет по умолчанию). Запись и откат — как у guild_move. */
+#define FOLDER_NAME_MAX 100
+#define FOLDER_COLOR_KEEP (-1)
+#define FOLDER_COLOR_DEFAULT (-2)
+bool guild_folder_edit(u64 gid, const char *name, i64 color, char *err, size_t errn);
+bool guild_folder_ungroup(u64 gid, char *err, size_t errn);   /* распустить: серверы остаются на месте по порядку */
+bool guild_unfold(u64 gid, char *err, size_t errn);        /* «Убрать из папки»: сервер — отдельно, сразу после папки */
+bool guild_in_folder(u64 gid);                             /* сервер в папке (не одиночная запись) */
+/* Новая папка из серверов вне папок: на месте ref, в ней ref и src; name - как у guild_folder_edit (пусто - без
+ * названия). Новый id, одна запись поля 14, откат при отказе. Окно подтверждения - в ui.c (бросок на сервер). */
+bool guild_folder_create(u64 src, u64 ref, const char *name, char *err, size_t errn);
+bool guild_folder_muted(u64 gid);                          /* все серверы папки, где gid, заглушены */
+int guild_folder_mute(u64 gid, bool mute);                 /* mute_guild каждому серверу папки, где состояние другое */
+void guild_folder_name(u64 gid, char *out, size_t n);         /* название папки целиком (GuildFolder.name — до 64 байт) */
+bool guild_order_busy(void);                               /* запись порядка ещё не подтверждена */
 /* №119 слова-тревоги: только в памяти; сообщение со словом — как упоминание (подсветка и счётчик) */
 void alert_words_set(const char *words);                   /* через запятую, до 16 слов по 32 байта; "" — выключить */
 const char *alert_words(void);
@@ -505,7 +535,7 @@ bool mod_voice_mute(u64 gid, u64 uid, bool mute, bool deaf, char *err, size_t er
 /* ---- Автообновление (update.c; SECURITY.md «Автообновление») ----
  * Проверка — при запуске не чаще раза в сутки (если включено; дата — в хранилище секретов) или по кнопке.
  * Загрузка и замена — только после явного «Обновить» (update_apply). Затем «Перезапустить» (update_restart). */
-#define ASTRA_VERSION "0.2.8"                   /* версия этой сборки: релиз поднимает её (обновление — только на строго большую) */
+#define ASTRA_VERSION "0.2.9"                   /* версия этой сборки: релиз поднимает её (обновление — только на строго большую) */
 enum { UP_IDLE, UP_CHECKING, UP_NONE, UP_AVAILABLE, UP_DOWNLOADING, UP_READY, UP_FAILED };
 typedef struct {
     int phase;                                  /* UP_* */
@@ -767,6 +797,12 @@ void voice_toggle_mute(void);
 void voice_toggle_deaf(void);
 void voice_set_volume(u64 user, float vol);
 float voice_get_volume(u64 user);
+/* звук чужой трансляции при просмотре: своя громкость 0..2 (отдельно от голоса того же человека) и «выключен»;
+ * сохраняется с настройками голоса (sv=ID:pct, выключенный — sv=ID:pct:m) */
+void voice_stream_volume_set(u64 user, float vol);
+float voice_stream_volume(u64 user);
+void voice_stream_mute_set(u64 user, bool mute);
+bool voice_stream_muted(u64 user);
 void voice_vad_adjust(int delta_db);
 int voice_vad_db(void);
 void voice_ptt(bool down);

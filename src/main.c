@@ -521,7 +521,8 @@ static void relogin_step(void) {
  *   t:ТЕКСТ               — набрать текст (до следующей запятой; «\,» — сама запятая, «\\» — обратная черта)
  *   click:X:Y rclick:X:Y mclick:X:Y hover:X:Y wheelup:X:Y wheeldown:X:Y — мышь, X/Y — клетка с 0
  *   shift+click:X:Y ctrl+click:X:Y — мышь с модификаторами; drag:X1:Y1:X2:Y2 — протяжка левой
- *   (нажатие, button 6 по пути, отпускание button 7); shift+enter — перенос строки ('\n'), как в окне
+ *   (нажатие, button 6 по пути, отпускание button 7); hold:X1:Y1:X2:Y2 - то же без отпускания (снимок
+ *   подсветки места, куда ляжет перетаскиваемое); shift+enter - перенос строки ('\n'), как в окне
  *   size:ШxВ              — размер сетки в клетках (по умолчанию 110x34)
  *   wait:МС               — прокрутить цикл событий МС миллисекунд (таймеры интерфейса)
  *   snap                  — промежуточный снимок ФАЙЛ-1.bmp, ФАЙЛ-2.bmp, ...
@@ -692,7 +693,8 @@ static bool shot_step(const char *t, const char *path, int *snaps) {
         shot_spin(0);
         return true;
     }
-    if (!strncmp(t, "drag:", 5) && sscanf(t + 5, "%d:%d:%d:%d", &a, &b, &rw, &rh) == 4) {
+    bool hold = !strncmp(t, "hold:", 5);
+    if ((hold || !strncmp(t, "drag:", 5)) && sscanf(t + 5, "%d:%d:%d:%d", &a, &b, &rw, &rh) == 4) {
         /* протяжка: нажатие (9 — только нажатие), движение с зажатой (6) по шагам, отпускание (7) */
         k = (Key){ .code = K_MOUSE, .x = a, .y = b, .button = 99 };   /* 99 — только нажатие (окно -> button 1) */
         term_inject(&k);
@@ -702,8 +704,7 @@ static bool shot_step(const char *t, const char *path, int *snaps) {
             k = (Key){ .code = K_MOUSE, .x = a + (rw - a) * i / steps, .y = b + (rh - b) * i / steps, .button = 6 };
             term_inject(&k);
         }
-        k = (Key){ .code = K_MOUSE, .x = rw, .y = rh, .button = 7 };
-        term_inject(&k);
+        if (!hold) { k = (Key){ .code = K_MOUSE, .x = rw, .y = rh, .button = 7 }; term_inject(&k); }
         shot_spin(0);
         return true;
     }

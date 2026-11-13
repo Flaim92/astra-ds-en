@@ -35,6 +35,7 @@ static const unsigned char SILENCE[3] = { 0xF8, 0xFF, 0xFE };
 
 /* ======================= общее состояние (под мьютексом) ======================= */
 typedef struct { u64 user; float vol; } Vol;
+typedef struct { u64 user; float vol; bool mute; } SVol;   /* звук чужой трансляции: громкость и «выключен» */
 static struct {
     PlatMutex *mu;
     VoiceStatus st;
@@ -55,6 +56,7 @@ static struct {
     atomic_int last_vclose;                     /* код закрытия голосового ws (для сообщения об ошибке) */
     char gw_sess[96];                           /* сессия gateway, в которой отправлен op 4 */
     Vol vols[64]; int nvols;
+    SVol svols[64]; int nsvols;                 /* громкость звука трансляций (просмотр): отдельно от голоса */
     char dev[2][96];                            /* №140: выбранные устройства (0 — микрофон, 1 — вывод); "" — как в O */
     VoiceStats stats;                           /* ревью 17: снимок счётчиков (под mu) */
     atomic_int dev_gen;                         /* смена устройства: поток звонка переоткрывает звук */
@@ -182,6 +184,71 @@ void voice_set_volume(u64 user, float vol) {
     mutex_unlock(V.mu);
     voice_settings_touch();
     ui_notice(ui_tr("громкость %s: %d%%"), user_name(user), (int)(vol * 100 + 0.5f));
+}
+/* Громкость звука чужой трансляции (при просмотре): в Discord у трансляции свой регулятор, отдельный от голоса
+ * стримера. 0..200 %, плюс «выключить звук трансляции» (уровень при этом помнится). Под V.mu. */
+static int svol_slot(u64 user, bool add) {
+    int i;
+    for (i = 0; i < V.nsvols && V.svols[i].user != user; i++) {}
+    if (i < V.nsvols) return i;
+    if (!add) return -1;
+    if (V.nsvols < 64) i = V.nsvols++;
+    else {                                       /* список полон: занять место записи со значением по умолчанию */
+        for (i = 0; i < 64 && (V.svols[i].mute || (int)(V.svols[i].vol * 100 + 0.5f) != 100); i++) {}
+        if (i == 64) return -1;
+    }
+    V.svols[i] = (SVol){ user, 1.0f, false };
+    return i;
+}
+static void svol_put(u64 user, float vol, int mute) {   /* vol < 0 / mute < 0 — не менять */
+    if (!V.mu || !user) return;
+    mutex_lock(V.mu);
+    int i = svol_slot(user, true);
+    if (i >= 0) {
+        if (vol >= 0) V.svols[i].vol = vol > 2.0f ? 2.0f : vol;
+        if (mute >= 0) V.svols[i].mute = mute != 0;
+    }
+    mutex_unlock(V.mu);
+}
+float voice_stream_volume(u64 user) {
+    float v = 1.0f;
+    if (!V.mu) return v;
+    mutex_lock(V.mu);
+    int i = svol_slot(user, false);
+    if (i >= 0) v = V.svols[i].vol;
+    mutex_unlock(V.mu);
+    return v;
+}
+bool voice_stream_muted(u64 user) {
+    bool m = false;
+    if (!V.mu) return m;
+    mutex_lock(V.mu);
+    int i = svol_slot(user, false);
+    if (i >= 0) m = V.svols[i].mute;
+    mutex_unlock(V.mu);
+    return m;
+}
+void voice_stream_volume_set(u64 user, float vol) {
+    if (!(vol >= 0.005f)) vol = 0;               /* и NaN */
+    if (vol > 2.0f) vol = 2.0f;
+    vol = (int)(vol * 100 + 0.5f) / 100.0f;     /* шаги по 10 % не копят ошибку округления */
+    svol_put(user, vol, -1);
+    voice_settings_touch();
+    ui_notice(ui_tr("громкость трансляции %s: %d%%"), user_name(user), (int)(vol * 100 + 0.5f));
+}
+void voice_stream_mute_set(u64 user, bool mute) {
+    svol_put(user, -1, mute);
+    voice_settings_touch();
+    ui_notice(mute ? ui_tr("звук трансляции %s выключен") : ui_tr("звук трансляции %s включён"), user_name(user));
+}
+static float stream_gain(u64 user) {             /* для микшера: выключено — 0 */
+    float v = 1.0f;
+    if (!V.mu) return v;
+    mutex_lock(V.mu);
+    int i = svol_slot(user, false);
+    if (i >= 0) v = V.svols[i].mute ? 0 : V.svols[i].vol;
+    mutex_unlock(V.mu);
+    return v;
 }
 void voice_vad_adjust(int d) {
     int v = atomic_load(&V.vad_db) + d;
@@ -758,6 +825,21 @@ static bool src_pull(Src *s, int32_t *acc, int want, int vq) {
     if (take < want) { s->playing = false; s->plc_run = 0; s->st.stops++; }   /* PLC исчерпан — говорящий замолчал */
     return true;
 }
+/* источники -> acc (space стерео-кадров). Соединение просмотра трансляции — громкость трансляции её автора
+ * (voice_stream_volume), а не громкость его голоса; звонок — громкость собеседника. */
+static void mix_sources(VW *w, int32_t *acc, int space) {
+    float vols[MAX_SRC];
+    bool st = false;
+    u64 author = 0;
+#ifdef ASTRA_VIDEO
+    st = w->watch;
+    author = w->wauthor;
+#endif
+    for (int i = 0; i < w->nsrc; i++) vols[i] = st ? stream_gain(author ? author : w->src[i].user) : voice_get_volume(w->src[i].user);
+    i64 tnow = now_ms();
+    for (int i = 0; i < w->nsrc; i++) src_pend_tick(&w->src[i], tnow);
+    for (int i = 0; i < w->nsrc; i++) src_pull(&w->src[i], acc, space, (int)(vols[i] * 256));
+}
 static void mix_out(VW *w) {
     if (!w->au) return;
     int queued = audio_render_queued(w->au), room = audio_render_space(w->au);
@@ -771,11 +853,7 @@ static void mix_out(VW *w) {
     int32_t *acc = w->mix_acc;
     int16_t *out = w->mix_out;
     memset(acc, 0, (size_t)space * 2 * sizeof(int32_t));
-    float vols[MAX_SRC];
-    for (int i = 0; i < w->nsrc; i++) vols[i] = voice_get_volume(w->src[i].user);
-    i64 tnow = now_ms();
-    for (int i = 0; i < w->nsrc; i++) src_pend_tick(&w->src[i], tnow);
-    for (int i = 0; i < w->nsrc; i++) src_pull(&w->src[i], acc, space, (int)(vols[i] * 256));
+    mix_sources(w, acc, space);
     if (w->demo && !atomic_load(&V.deaf)) {
         /* тестовый тон 440 Гц, тихо, чтобы проверить вывод без сети */
         for (int f = 0; f < space; f++) {
@@ -1164,14 +1242,9 @@ static void vw_text(VW *w, const char *text, size_t len) {
         }
         if (w->stream) {
             ShareState sh;
-            share_state(&sh);
-            int vw = sh.w > 0 ? sh.w : 1280, vh = sh.h > 0 ? sh.h : 720, vf = sh.fps > 0 ? sh.fps : 30;   /* как официальный: 720p30 */
+            share_state(&sh);                    /* размер, к/с и пик битрейта - по качеству эфира (share_quality) */
             char v[640];
-            snprintf(v, sizeof v, "{\"op\":12,\"d\":{\"audio_ssrc\":%u,\"video_ssrc\":%u,\"rtx_ssrc\":%u,\"streams\":[{\"type\":\"video\","
-                     "\"rid\":\"100\",\"ssrc\":%u,\"active\":true,\"quality\":100,\"rtx_ssrc\":%u,\"max_bitrate\":3500000,"
-                     "\"max_framerate\":%d,\"max_resolution\":{\"type\":\"fixed\",\"width\":%d,\"height\":%d}}]}}",
-                     (unsigned)w->ssrc, (unsigned)w->vssrc, (unsigned)w->vrtx, (unsigned)w->vssrc, (unsigned)w->vrtx, vf, vw, vh);
-            ws_text(w, v);
+            if (voice_stream_op12_json(v, sizeof v, w->ssrc, w->vssrc, w->vrtx, sh.w, sh.h, sh.fps, sh.kbps_max * 1000) > 0) ws_text(w, v);
             snprintf(v, sizeof v, "{\"op\":5,\"d\":{\"speaking\":1,\"delay\":0,\"ssrc\":%u}}", (unsigned)w->ssrc);
             ws_text(w, v);                      /* как у них: setSpeaking(true) вместе с видео */
             break;
@@ -2473,6 +2546,13 @@ int voice_settings_format(char *b, size_t cap) {
         if (m < 0 || (size_t)m >= cap - (size_t)k) break;   /* не влезло — остальные не сохраняются */
         k += m;
     }
+    for (int i = 0; i < V.nsvols; i++) {         /* звук трансляций: sv=ID:pct, выключенный — sv=ID:pct:m */
+        int pct = (int)(V.svols[i].vol * 100 + 0.5f);
+        if (pct == 100 && !V.svols[i].mute) continue;
+        int m = snprintf(b + k, cap - (size_t)k, "sv=%llu:%d%s\n", (unsigned long long)V.svols[i].user, pct, V.svols[i].mute ? ":m" : "");
+        if (m < 0 || (size_t)m >= cap - (size_t)k) break;
+        k += m;
+    }
     if (V.mu) mutex_unlock(V.mu);
     return k;
 }
@@ -2522,6 +2602,12 @@ bool voice_settings_parse(const char *s) {
                         if (i < 64) V.vols[i] = (Vol){ id, pct / 100.0f };
                         mutex_unlock(V.mu);
                     }
+                } else if (!strcmp(key, "sv") && V.mu) {   /* sv=ID:pct или sv=ID:pct:m (звук трансляции выключен) */
+                    char *c = NULL;
+                    unsigned long long id = *val >= '1' && *val <= '9' ? strtoull(val, &c, 10) : 0;
+                    long pct = c && *c == ':' && c[1] >= '0' && c[1] <= '9' ? strtol(c + 1, &end, 10) : -1;
+                    bool mute = pct >= 0 && end && !strcmp(end, ":m");
+                    if (id && pct >= 0 && pct <= 200 && end && (!*end || mute)) svol_put(id, pct / 100.0f, mute);
                 }
             }
         }
@@ -2668,7 +2754,60 @@ static void cont_test(int *jumps, int *gaps, int *dev_empty, long *played) {
     free(acc);
     free(pk); free(pkn); free(at); free(order);
 }
+#ifdef ASTRA_VIDEO
+/* Громкость трансляции в микшере: синус 8000 в кольце источника user, смешать 20 мс соединением просмотра
+ * (watch, автор user) или звонка; вернуть пик после нарастания (первые 300 кадров — плавный вход). */
+static int svol_peak(bool watch, u64 user) {
+    VW *w = xcalloc(1, sizeof *w);
+    w->watch = w->stream = watch;
+    w->wauthor = watch ? user : 0;
+    Src *s = &w->src[w->nsrc++];
+    s->user = user;
+    s->fifo = xmalloc(FIFO_FRAMES * 2 * sizeof(int16_t));
+    int16_t *fr = xmalloc(FRAME * 2 * sizeof(int16_t));
+    for (int i = 0; i < FRAME; i++) fr[i * 2] = fr[i * 2 + 1] = (int16_t)(8000 * sin(2 * 3.14159265358979 * 440 * i / 48000.0));
+    for (int i = 0; i < 5; i++) fifo_push(s, fr, FRAME);
+    int32_t *acc = xcalloc(FRAME * 2, sizeof *acc);
+    mix_sources(w, acc, FRAME);
+    int pk = 0;
+    for (int i = 300 * 2; i < FRAME * 2; i++) if (abs(acc[i]) > pk) pk = abs(acc[i]);
+    free(acc); free(fr); free(s->fifo); free(w);
+    return pk;
+}
+#endif
 int voice_selftest(void (*check)(bool ok, const char *what)) {
+#ifdef ASTRA_VIDEO
+    {   /* звук чужой трансляции: своя громкость, голос того же человека не задевает; «выключить» — тишина */
+        const u64 u = 4343;
+        voice_set_volume(u, 1.0f);
+        int v0 = svol_peak(false, u), s0 = svol_peak(true, u);
+        voice_set_volume(u, 1.5f);               /* громкость голоса стримера — не звук трансляции */
+        voice_stream_volume_set(u, 0.5f);
+        int s1 = svol_peak(true, u), v1 = svol_peak(false, u);
+        voice_stream_mute_set(u, true);
+        int s2 = svol_peak(true, u), v2 = svol_peak(false, u);
+        bool kept = voice_stream_muted(u) && voice_stream_volume(u) > 0.49f && voice_stream_volume(u) < 0.51f;   /* уровень помнится */
+        voice_stream_mute_set(u, false);
+        voice_stream_volume_set(u, 2.0f);
+        int s3 = svol_peak(true, u);
+        voice_stream_volume_set(u, 3.0f);
+        bool hi = voice_stream_volume(u) == 2.0f;
+        voice_stream_volume_set(u, -1.0f);
+        bool lo = voice_stream_volume(u) == 0.0f && svol_peak(true, u) == 0;
+        for (int i = 0; i < 7; i++) voice_stream_volume_set(u, voice_stream_volume(u) + 0.1f);   /* шаги кнопок */
+        bool step = (int)(voice_stream_volume(u) * 100 + 0.5f) == 70;
+        voice_stream_volume_set(u, 1.0f);
+        voice_set_volume(u, 1.0f);
+        #define SV_NEAR(a, b) (abs((a) - (b)) * 50 <= (b))   /* в пределах 2 % */
+        bool ok = v0 > 7000 && SV_NEAR(s0, v0) && SV_NEAR(s1, v0 / 2) && SV_NEAR(v1, v0 * 3 / 2) && s2 == 0 && SV_NEAR(v2, v0 * 3 / 2) &&
+                  kept && SV_NEAR(s3, v0 * 2) && hi && lo && step;
+        #undef SV_NEAR
+        char w[300];
+        snprintf(w, sizeof w, "звук трансляции: громкость 50/200 %% и «выключить» действуют только на неё, голос того же человека (150 %%) не задет (пики: голос %d/%d/%d, трансляция %d/%d/%d/%d)",
+                 v0, v1, v2, s0, s1, s2, s3);
+        check(ok, w);
+    }
+#endif
     {
         int jumps, gaps, empty;
         long played;

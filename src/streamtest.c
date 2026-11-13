@@ -133,6 +133,7 @@ static double thread_cpu_ms(void) {
 static double psnr_y(const uint8_t *a, const uint8_t *b, size_t n);
 typedef struct {
     int ow, oh, fps, scene, kbps;                /* scene: 0 desk, 1 scroll, 2 video */
+    int ah;                                      /* строк в буфере Y: oh до целых блоков 16 (1080 -> 1088, кодер пишет туда) */
     int sw, sh, sx, sy;                          /* источник: размер и левый верхний угол на экране */
     HDC src;                                     /* экран или синтетический «экран» в памяти */
     HDC vdc; HBITMAP vbm; uint32_t *vpix;        /* синтетика */
@@ -355,7 +356,7 @@ static int grab_convert(ST *st, int mx0, int my0, int mx1, int my1, double *t_ca
 
 /* Кадр и полоса захвата — затереть до освобождения: на экране мог быть пароль. */
 static void st_wipe(ST *st) {
-    size_t n = (size_t)st->ow * st->oh;
+    size_t n = (size_t)st->ow * (st->ah ? st->ah : st->oh);
     if (st->y) SecureZeroMemory(st->y, n);
     if (st->u) SecureZeroMemory(st->u, n / 4);
     if (st->v) SecureZeroMemory(st->v, n / 4);
@@ -363,7 +364,7 @@ static void st_wipe(ST *st) {
 }
 static int share_loop(int n, int mode, int secs);
 int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
-    if (getenv("ST_SHARELOOP")) return share_loop(atoi(getenv("ST_SHARELOOP")), ow < 1280 ? 1 : 0, secs);
+    if (getenv("ST_SHARELOOP")) return share_loop(atoi(getenv("ST_SHARELOOP")), ow >= 1920 ? SHARE_Q_1080 : ow < 1280 ? SHARE_Q_720_ECO : SHARE_Q_720, secs);
     ST st;
     memset(&st, 0, sizeof st);
     st.ow = ow; st.oh = oh; st.fps = fps; st.scene = scene; st.kbps = kbps;
@@ -440,11 +441,12 @@ int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
     st.xmap = malloc(sizeof(int) * (size_t)ow);
     for (int x = 0; x < ow; x++) st.xmap[x] = st.stretch ? x : x * st.sw / ow;
     st_xmap(&st, ow);
-    st.y = calloc((size_t)ow * oh, 1);
-    st.mb.mbw = ow / 16; st.mb.mbh = oh / 16;    /* отпечаток 0 — «ещё не было»: первый кадр весь новый */
+    st.ah = (oh + 15) & ~15;                     /* 1080 -> 1088: кодер пишет восстановленный кадр целыми блоками */
+    st.y = calloc((size_t)ow * st.ah, 1);
+    st.mb.mbw = (ow + 15) / 16; st.mb.mbh = st.ah / 16;   /* отпечаток 0 - «ещё не было»: первый кадр весь новый */
     st.mb.sig = calloc((size_t)st.mb.mbw * st.mb.mbh, sizeof(uint32_t));
     st.mb.age = calloc((size_t)st.mb.mbw * st.mb.mbh, 1); st.mb.map = calloc((size_t)st.mb.mbw * st.mb.mbh, 1);
-    st.u = calloc((size_t)ow * oh / 4, 1); st.v = calloc((size_t)ow * oh / 4, 1);
+    st.u = calloc((size_t)ow * st.ah / 4, 1); st.v = calloc((size_t)ow * st.ah / 4, 1);
 
     H264E_create_param_t cp;
     memset(&cp, 0, sizeof cp);
@@ -453,6 +455,7 @@ int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
     if (getenv("ST_FAST")) { cp.gop = fps * 2; cp.vbv_size_bytes = (kbps * 35 / 18) * 1000 / 8; }
     cp.fine_rate_control_flag = 0;
     cp.const_input_flag = getenv("ST_CONSTIN") ? 1 : 0;   /* 0: кодер пишет во вход (экономит кадр); сравнение — по своей копии Y */
+    cp.padded_input_flag = !cp.const_input_flag; /* буфер - до целых блоков: 1080p без лишнего опорного кадра */
     int szp = 0, szs = 0;
     if (H264E_sizeof(&cp, &szp, &szs)) { printf("streamtest: кодер не принял параметры\n"); return 1; }
     H264E_persist_t *enc = malloc((size_t)szp);
@@ -592,7 +595,7 @@ int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
 }
 
 /* ======================= Демонстрация экрана (видео-версия): поток захвата и кодирования =======================
- * share_start — источник (окно или весь экран) и режим (0 — 720p 24 к/с, 1 — 480p 15 к/с); всё — в своём потоке,
+ * share_start - источник (окно или весь экран) и качество (SHARE_Q_*, share.h); всё - в своём потоке,
  * интерфейс только читает share_state. Кадры никуда не пишутся: отправка в Discord (Go Live) — позже, сейчас
  * считаются байты. Сам останавливается, если окно закрыли или экран заблокирован. */
 static CRITICAL_SECTION sh_cs;
@@ -807,11 +810,14 @@ static DWORD WINAPI sa_main(LPVOID arg) {
     if (com) CoUninitialize();
     return 0;
 }
-/* Выход всегда 1280x720 @ 30 к/с, как у Discord: картинка вписана с сохранением пропорций, без апскейла, поля чёрные.
- * Кодер получает один и тот же размер весь эфир — смена размера окна не трогает поток Go Live. */
-#define SH_OW 1280
-#define SH_OH 720
-#define SH_FPS 30
+/* Выход - по качеству (share_quality: 1280x720 или, с Nitro, 1920x1080; 30 к/с), как у Discord: картинка вписана
+ * с сохранением пропорций, без апскейла, поля чёрные. Кодер получает один и тот же размер весь эфир - смена размера
+ * окна не трогает поток Go Live.
+ * Замер 13.11.2026 (ST_SHARELOOP=1 ST_NOAUDIO=1, 10 с, Ryzen 7 5700G, экран 1920x1080, сцена на весь экран), поток
+ * трансляции, % одного ядра 720p -> 1080p: static 7,0 -> 7,6; scroll 22,9 -> 30,8 (кодер 2,2 -> 5,0 мс/кадр, оба
+ * 30 к/с); video (шум, упор в битрейт) 23,0 -> 26,6 (кодер 3,2 -> 6,6 мс). BitBlt - 12-16 мс/кадр в обоих (ожидание
+ * DWM, не CPU). Пик памяти +7,1 -> +10,7 МБ. 60 к/с не включаем: кодер без ограничения битрейта на шуме - 6,9 мс
+ * (720p) и 11,1 мс (1080p) на кадр, 1080p60 - ~0,7 ядра на один кодер, а такт захвата и темп (share_conv.h) - под 30. */
 /* PrintWindow пишет только в 32-битный DIB размером со всё окно: так снимаем окна до 1920x1080 (DIB <= 7,9 МБ) —
  * их видно и под другими окнами. Больше (2K/4K) — BitBlt видимой части полосами (~1-3 МБ), перекрыли — последний кадр. */
 #define SH_PW_MAXPIX (1920 * 1080)
@@ -947,22 +953,24 @@ static DWORD WINAPI sh_main(LPVOID arg) {
     st.pw = sh_hwnd;
     st.sw = GetSystemMetrics(SM_CXSCREEN); st.sh = GetSystemMetrics(SM_CYSCREEN);   /* весь экран (основной монитор) */
     if (st.sw < 16 || st.sh < 16 || st.sw > 16384 || st.sh > 16384) { ReleaseDC(NULL, screen); sh_finish("источник слишком мал"); return 0; }
-    int fps = SH_FPS, kbps = sh_mode ? 1000 : 1800;
-    int kbps_max = sh_mode ? 2000 : 3500;        /* пик за любую секунду: цель + запас ведра */
-    st.ow = SH_OW; st.oh = SH_OH;
+    ShareQuality q = share_quality(sh_mode);
+    int fps = q.fps, kbps = q.kbps;
+    int kbps_max = q.kbps_max;                   /* пик за любую секунду: цель + запас ведра */
+    st.ow = q.w; st.oh = q.h; st.ah = (q.h + 15) & ~15;   /* 1080 -> 1088 строк: кодер пишет восстановленный кадр целыми блоками */
     st.fps = fps; st.kbps = kbps; st.src = screen; st.bpp = 16; st.rop = SRCCOPY;
     st.stretch = 0;                              /* BitBlt: StretchBlt экономит полосу, но CPU 60-73 % и 14-17 к/с */
     st.xmap = malloc(sizeof(int) * (size_t)st.ow);
-    size_t ysz = (size_t)st.ow * st.oh, csz = ysz / 4;
+    size_t ysz = (size_t)st.ow * st.ah, csz = ysz / 4;
     st.y = vm_alloc(ysz);
     st.u = vm_alloc(csz); st.v = vm_alloc(csz);
-    st.mb.mbw = st.ow / 16; st.mb.mbh = st.oh / 16;
+    st.mb.mbw = (st.ow + 15) / 16; st.mb.mbh = st.ah / 16;   /* сетка кодера: карта mb_static - на все его блоки */
     size_t nmb = (size_t)st.mb.mbw * st.mb.mbh;
     st.mb.sig = calloc(nmb, sizeof(uint32_t)); st.mb.age = calloc(nmb, 1); st.mb.map = calloc(nmb, 1);
     if (st.y && st.u && st.v) { memset(st.y, 16, ysz); memset(st.u, 128, csz); memset(st.v, 128, csz); }   /* чёрный, не зелёный */
     H264E_create_param_t cp;
     memset(&cp, 0, sizeof cp);
     cp.width = st.ow; cp.height = st.oh; cp.gop = fps * 8;   /* ключевые — только по таймеру sh_gop_ms и по PLI зрителя: два несогласованных источника давали IDR раз в ~2 с */ cp.vbv_size_bytes = kbps_max * 1000 / 8;
+    cp.padded_input_flag = 1;                    /* буфер до целых блоков: 1080p - обрезка в SPS, без лишнего опорного кадра */
     int szp = 0, szs = 0;
     H264E_persist_t *enc = NULL;
     H264E_scratch_t *scr = NULL;
@@ -977,7 +985,7 @@ static DWORD WINAPI sh_main(LPVOID arg) {
     }
     HANDLE sa_thr = NULL;
     if (ok) {
-        sh_lock(); sh.w = st.ow; sh.h = st.oh; sh.fps = fps; sh_unlock();
+        sh_lock(); sh.w = st.ow; sh.h = st.oh; sh.fps = fps; sh.kbps_max = kbps_max; sh_unlock();
         InterlockedExchange(&sa_stop, 0);
         if (sa_want) sa_thr = CreateThread(NULL, 256 * 1024, sa_main, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
         else sa_status(false, "без звука");
@@ -1215,11 +1223,13 @@ bool share_start(int mode, uintptr_t hwnd, char *err, size_t n) {
         GetWindowTextW(h, w, 80);
         if (pid != sh_known[k].pid || wcscmp(w, sh_known[k].t)) { snprintf(err, n, "окно изменилось - выберите источник заново"); return false; }
     }
+    ShareQuality q = share_quality(mode);
     sh_lock();
     memset(&sh, 0, sizeof sh);
     sh.active = true;
+    sh.w = q.w; sh.h = q.h; sh.fps = q.fps; sh.kbps_max = q.kbps_max;   /* сразу: op 12 трансляции может уйти раньше первого кадра */
     sh_unlock();
-    sh_hwnd = (HWND)hwnd; sh_mode = mode ? 1 : 0;
+    sh_hwnd = (HWND)hwnd; sh_mode = mode >= 0 && mode < SHARE_Q_N ? mode : SHARE_Q_720;
     InterlockedExchange(&sh_stop, 0);
     sh_thr = CreateThread(NULL, 256 * 1024, sh_main, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
     if (!sh_thr) { sh_finish("поток не создан"); snprintf(err, n, "не удалось запустить захват"); return false; }
@@ -1481,7 +1491,7 @@ int streamtest_run(int secs, int ow, int oh, int fps, int scene, int kbps) {
     for (int i = 1; i <= n; i++) {
         char err[160] = "";
         long a0 = st_status_kb("RssAnon");
-        if (!share_start(ow < 1280 ? 1 : 0, 0, err, sizeof err)) { printf("  %d: старт не удался: %s\n", i, err); bad++; continue; }
+        if (!share_start(ow >= 1920 ? SHARE_Q_1080 : ow < 1280 ? SHARE_Q_720_ECO : SHARE_Q_720, 0, err, sizeof err)) { printf("  %d: старт не удался: %s\n", i, err); bad++; continue; }
         ShareState q;
         double c0 = st_clock(CLOCK_MONOTONIC);
         /* ST_STOPCHOOSE=МС: share_stop, пока открыто системное окно выбора, — проверка, что ожидание прерывается */

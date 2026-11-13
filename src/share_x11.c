@@ -3,8 +3,8 @@
  *
  * Захват — со своего соединения с X-сервером в потоке трансляции (соединение окна интерфейса не трогаем).
  * Кадр берётся с корневого окна: весь экран или прямоугольник окна-источника. MIT-SHM (libXext подгружается
- * через dlopen, в зависимости сборки не входит); нет расширения — обычный XGetImage. Выход всегда 1280x720@30
- * с полями, кодер minih264, кадры -> golive_frame.
+ * через dlopen, в зависимости сборки не входит); нет расширения - обычный XGetImage. Выход 1280x720@30 или, с Nitro,
+ * 1920x1080@30 (share_quality, share.h) с полями, кодер minih264, кадры -> golive_frame.
  *
  * Окно-источник снимается с экрана, поэтому чужое окно поверх него попало бы в эфир. Как и в Windows-версии,
  * это не допускается: пока источник перекрыт другим окном (по _NET_CLIENT_LIST_STACKING), свёрнут или на другом
@@ -67,9 +67,7 @@
 #include "../third_party/minih264/minih264e.h"
 #pragma GCC diagnostic pop
 
-#define SH_OW 1280
-#define SH_OH 720
-#define SH_FPS 30
+static int sh_ow = 1280, sh_oh = 720;            /* кадр эфира: share_quality(sh_mode), задаётся в начале sh_main */
 #define SH_GOP_MS 4000.0
 
 static pthread_mutex_t sh_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -273,15 +271,15 @@ static bool cap_grab(Cap *c, int x, int y, int w, int h) {
 /* Место картинки sw x sh в кадре; при смене размера — поля чёрные, отпечатки блоков сброшены. */
 static void cap_fit(Cap *c) {
     if (c->fit_w == c->sw && c->fit_h == c->sh) return;
-    double kx = (double)SH_OW / c->sw, ky = (double)SH_OH / c->sh, sc = kx < ky ? kx : ky;
+    double kx = (double)sh_ow / c->sw, ky = (double)sh_oh / c->sh, sc = kx < ky ? kx : ky;
     if (sc > 1) sc = 1;
     c->dw = (int)(c->sw * sc + 0.5) & ~1; c->dh = (int)(c->sh * sc + 0.5) & ~1;
     if (c->dw < 2) c->dw = 2;
     if (c->dh < 2) c->dh = 2;
-    if (c->dw > SH_OW) c->dw = SH_OW;
-    if (c->dh > SH_OH) c->dh = SH_OH;
-    c->dx = ((SH_OW - c->dw) / 2) & ~1; c->dy = ((SH_OH - c->dh) / 2) & ~1;
-    size_t n = (size_t)SH_OW * SH_OH;
+    if (c->dw > sh_ow) c->dw = sh_ow;
+    if (c->dh > sh_oh) c->dh = sh_oh;
+    c->dx = ((sh_ow - c->dw) / 2) & ~1; c->dy = ((sh_oh - c->dh) / 2) & ~1;
+    size_t n = (size_t)sh_ow * sh_oh;
     memset(c->y, 16, n); memset(c->u, 128, n / 4); memset(c->v, 128, n / 4);
     shc_reset(&c->mb);
     c->xident = true;
@@ -308,11 +306,11 @@ static int cap_convert(Cap *c, const u8 *data, size_t bpl, int height, int rgb, 
         if (unc) rp = shpw_row(rp, (size_t)(xm ? xm[j0] : j0) * 4, (size_t)((xm ? xm[j1 - 1] : j1 - 1) + 1) * 4);
         const u32 *row = (const u32 *)(const void *)rp;
         int oy = c->dy + i;
-        u8 *yr = c->y + (size_t)oy * SH_OW + c->dx, *ur = NULL, *vr = NULL;
-        if (!(oy & 1)) { ur = c->u + (size_t)(oy / 2) * (SH_OW / 2) + c->dx / 2; vr = c->v + (size_t)(oy / 2) * (SH_OW / 2) + c->dx / 2; }
+        u8 *yr = c->y + (size_t)oy * sh_ow + c->dx, *ur = NULL, *vr = NULL;
+        if (!(oy & 1)) { ur = c->u + (size_t)(oy / 2) * (sh_ow / 2) + c->dx / 2; vr = c->v + (size_t)(oy / 2) * (sh_ow / 2) + c->dx / 2; }
         shc_row32x(row, xm, j0, j1, yr, ur, vr, rgb);
         if ((oy & 15) == 15 || i == i1 - 1)
-            changed += shc_hash_row(&c->mb, c->y, c->u, c->v, SH_OW, SH_OW / 2, oy >> 4, hx0, hx1, ox0, ox1, oy0, oy1);
+            changed += shc_hash_row(&c->mb, c->y, c->u, c->v, sh_ow, sh_ow / 2, oy >> 4, hx0, hx1, ox0, ox1, oy0, oy1);
     }
     return changed;
 }
@@ -632,7 +630,10 @@ static void *sh_main(void *arg) {
     H264E_persist_t *enc = NULL;
     H264E_scratch_t *scr = NULL;
     int szp = 0, szs = 0;
-    size_t ysz = (size_t)SH_OW * SH_OH, csz = ysz / 4;
+    const ShareQuality q = share_quality(sh_mode);
+    sh_ow = q.w; sh_oh = q.h;
+    const int ah = (sh_oh + 15) & ~15;           /* 1080 -> 1088 строк: кодер пишет восстановленный кадр целыми блоками */
+    size_t ysz = (size_t)sh_ow * ah, csz = ysz / 4;
     const bool wl = sh_wl;
     bool wl_pw = false;
     int wl_src = 0;                              /* тип источника от портала: 1 — монитор, 2 — окно */
@@ -674,15 +675,16 @@ static void *sh_main(void *arg) {
         c.shm = c.q && c.create && c.attach && c.detach && c.get && c.q(c.d);
     }
     }
-    int fps = SH_FPS, kbps = sh_mode ? 1000 : 1800, kbps_max = sh_mode ? 2000 : 3500;
-    c.xmap = malloc(sizeof(int) * SH_OW);
+    int fps = q.fps, kbps = q.kbps, kbps_max = q.kbps_max;
+    c.xmap = malloc(sizeof(int) * sh_ow);
     c.y = malloc(ysz); c.u = malloc(csz); c.v = malloc(csz);
-    c.mb.mbw = SH_OW / 16; c.mb.mbh = SH_OH / 16;
+    c.mb.mbw = (sh_ow + 15) / 16; c.mb.mbh = ah / 16;   /* сетка кодера: карта mb_static - на все его блоки */
     c.mb.sig = calloc((size_t)c.mb.mbw * c.mb.mbh, sizeof(u32));
     c.mb.age = calloc((size_t)c.mb.mbw * c.mb.mbh, 1); c.mb.map = calloc((size_t)c.mb.mbw * c.mb.mbh, 1);
     H264E_create_param_t cp;
     memset(&cp, 0, sizeof cp);
-    cp.width = SH_OW; cp.height = SH_OH; cp.gop = fps * 8;   /* ключевые — по таймеру SH_GOP_MS и PLI */ cp.vbv_size_bytes = kbps_max * 1000 / 8;
+    cp.width = sh_ow; cp.height = sh_oh; cp.gop = fps * 8;   /* ключевые - по таймеру SH_GOP_MS и PLI */ cp.vbv_size_bytes = kbps_max * 1000 / 8;
+    cp.padded_input_flag = 1;                    /* буфер до целых блоков: 1080p - обрезка в SPS, без лишнего опорного кадра */
     bool ok = c.xmap && c.y && c.u && c.v && c.mb.sig && c.mb.age && c.mb.map && !H264E_sizeof(&cp, &szp, &szs);
     if (ok) {
         memset(c.y, 16, ysz); memset(c.u, 128, csz); memset(c.v, 128, csz);
@@ -692,7 +694,7 @@ static void *sh_main(void *arg) {
     }
     if (!ok) { why = "не удалось запустить кодер"; goto out; }
     pthread_mutex_lock(&sh_mu);
-    sh.w = SH_OW; sh.h = SH_OH; sh.fps = fps;
+    sh.w = sh_ow; sh.h = sh_oh; sh.fps = fps; sh.kbps_max = kbps_max;
     sh.audio = false;
     /* Wayland, окно: портал не говорит, чьё оно, — звук не берём (чужой звук в эфир не пускаем) */
     bool wl_win_mute = wl && wl_src != 1 && sa_want;
@@ -708,7 +710,7 @@ static void *sh_main(void *arg) {
     rp.encode_speed = 10; rp.qp_min = 18; rp.qp_max = 51;
     H264E_io_yuv_t io;
     io.yuv[0] = c.y; io.yuv[1] = c.u; io.yuv[2] = c.v;
-    io.stride[0] = SH_OW; io.stride[1] = SH_OW / 2; io.stride[2] = SH_OW / 2;
+    io.stride[0] = sh_ow; io.stride[1] = sh_ow / 2; io.stride[2] = sh_ow / 2;
     double per = kbps * 1000.0 / 8 / fps, cap = (kbps_max - kbps) * 1000.0 / 8, bucket = 0;
     double t0 = now_msf(), next = t0, win0 = t0, last_idr = -1e9, last_out = -1e9, tick_ms = 1000.0 / fps, last_chk = -1e9;
     long long bytes = 0, win_bytes = 0;
@@ -908,13 +910,15 @@ bool share_start(int mode, uintptr_t hwnd, char *err, size_t n) {
         XCloseDisplay(d);
         if (!same) { snprintf(err, n, "окно изменилось - выберите источник заново"); return false; }
     }
+    const ShareQuality q = share_quality(mode);
     pthread_mutex_lock(&sh_mu);
     memset(&sh, 0, sizeof sh);
     sh.active = true;
     sh.choosing = wl;                            /* до ответа системного окна эфир не начинается (ui.c ждёт) */
+    sh.w = q.w; sh.h = q.h; sh.fps = q.fps; sh.kbps_max = q.kbps_max;   /* сразу: op 12 трансляции может уйти раньше первого кадра */
     pthread_mutex_unlock(&sh_mu);
     sh_wl = wl;
-    sh_win = (Window)hwnd; sh_mode = mode ? 1 : 0;
+    sh_win = (Window)hwnd; sh_mode = mode >= 0 && mode < SHARE_Q_N ? mode : SHARE_Q_720;
     sh_stop = 0; sh_done = 0; sh_want_idr = 1;
     if (pthread_create(&sh_thr, NULL, sh_main, NULL)) { sh_finish("поток не создан"); snprintf(err, n, "не удалось запустить захват"); return false; }
     sh_thr_on = true;

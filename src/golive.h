@@ -37,6 +37,8 @@ void voice_stream_info(VStreamInfo *o);         /* --livetest: состояни�
 void voice_stream_frame(const u8 *annexb, size_t n, bool keyframe, u32 ts90k);
 void voice_stream_audio(const u8 *opus, size_t n, u32 ts48k);   /* звук трансляции: кадр Opus 20 мс, отметка 48 кГц */
 int voice_stream_selftest(void (*check)(bool ok, const char *what));
+/* op 12 трансляции (ssrc и качество эфира: размер, к/с, max_bitrate в бит/с; нули - 720p30): длина или -1 */
+int voice_stream_op12_json(char *b, size_t n, unsigned audio_ssrc, unsigned video_ssrc, unsigned rtx_ssrc, int w, int h, int fps, int max_bps);
 void golive_vstatus(int voice_phase, const char *err);   /* состояние соединения трансляции (VS_*) -> GL_*/
 /* Просмотр чужой трансляции (зритель): op 20 STREAM_WATCH -> STREAM_CREATE/SERVER_UPDATE -> своё соединение. */
 enum { GW_OFF, GW_WAIT, GW_CONNECTING, GW_LIVE, GW_FAILED };

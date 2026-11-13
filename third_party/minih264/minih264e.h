@@ -125,6 +125,11 @@ typedef struct H264E_create_param_tag
 
     int sps_id;
 
+    // [mincord] If set: input buffers have room for whole macroblocks ((width+15)&~15 x (height+15)&~15 with the
+    // given strides), so the input can be used as a scratch even if the frame size is not a multiple of 16
+    // (1920x1080: SPS gets cropping, no extra reference frame as with const_input_flag)
+    int padded_input_flag;
+
 #if H264E_SVC_API
     //          SVC extension
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -11084,7 +11089,7 @@ static int enc_check_create_params(const H264E_create_param_t *par)
         return H264E_STATUS_BAD_PARAMETER;  // non-positive frame size
     }
     if ((unsigned)(par->const_input_flag | par->fine_rate_control_flag |
-        par->vbv_overflow_empty_frame_flag | par->vbv_underflow_stuffing_flag) > 1)
+        par->vbv_overflow_empty_frame_flag | par->vbv_underflow_stuffing_flag | par->padded_input_flag) > 1)   // [mincord]
     {
         return H264E_STATUS_BAD_PARAMETER;  // Any flag is not 0 or 1
     }
@@ -11096,7 +11101,7 @@ static int enc_check_create_params(const H264E_create_param_t *par)
     {
         return H264E_STATUS_SIZE_NOT_MULTIPLE_2; // frame size must be multiple of 2
     }
-    if (((par->width | par->height) & 15) && !par->const_input_flag)
+    if (((par->width | par->height) & 15) && !par->const_input_flag && !par->padded_input_flag)   // [mincord]
     {
         // if input buffer reused as scratch (par->const_input_flag == 0)
         // frame size must be multiple of 16

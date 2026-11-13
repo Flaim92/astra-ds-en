@@ -279,6 +279,70 @@ static void dec_emit(void *u, const u8 *p, size_t len, bool marker) {
     DecPk *t = u;
     if (t->k < 2048 && len <= sizeof t->p[0]) { memcpy(t->p[t->k], p, len); t->n[t->k] = len; t->m[t->k] = marker; t->k++; }
 }
+/* Трансляция 1080p (share_quality, Nitro): кодер как в эфире - вход служит рабочим буфером, строк до целых блоков
+ * (1088), padded_input_flag ([mincord]) -> SPS с обрезкой; libavcodec должен отдать ровно 1920x1080, а кодер - не
+ * писать за 1088-ю строку (страж за буферами). Два кадра: ключевой и P. */
+static void vdec_fhd_selftest(void (*check)(bool ok, const char *what)) {
+    enum { W = 1920, H = 1080, AH = 1088, GUARD = 256 };
+    size_t ysz = (size_t)W * AH, csz = ysz / 4;
+    u8 *Y = malloc(ysz + GUARD), *U = malloc(csz + GUARD), *V = malloc(csz + GUARD);
+    H264E_create_param_t cp;
+    memset(&cp, 0, sizeof cp);
+    cp.width = W; cp.height = H; cp.gop = 30; cp.vbv_size_bytes = 750000; cp.padded_input_flag = 1;
+    H264E_create_param_t c2 = cp;
+    c2.padded_input_flag = 0;
+    int szp = 0, szs = 0, s2p = 0, s2s = 0;
+    bool refuse = H264E_sizeof(&c2, &s2p, &s2s) != 0;   /* без флага 1080 не принимается, как в исходнике */
+    bool ok = Y && U && V && !H264E_sizeof(&cp, &szp, &szs);
+    H264E_persist_t *enc = ok ? malloc((size_t)szp) : NULL;
+    H264E_scratch_t *scr = ok ? malloc((size_t)szs) : NULL;
+    ok = enc && scr && !H264E_init(enc, &cp);
+    if (ok) { memset(Y + ysz, 0xA5, GUARD); memset(U + csz, 0xA5, GUARD); memset(V + csz, 0xA5, GUARD); }
+    H264E_run_param_t rp;
+    memset(&rp, 0, sizeof rp);
+    rp.encode_speed = 10; rp.desired_frame_bytes = 120000; rp.qp_min = 10; rp.qp_max = 30;
+    H264E_io_yuv_t io;
+    io.yuv[0] = Y; io.yuv[1] = U; io.yuv[2] = V;
+    io.stride[0] = W; io.stride[1] = W / 2; io.stride[2] = W / 2;
+    VidDec *d = ok ? vdec_new(VC_H264) : NULL;
+    int pics = 0, gw = 0, gh = 0, worst = 0, bottom = 0;
+    for (int f = 0; ok && d && f < 2; f++) {
+        /* вход заново каждый кадр (кодер пишет во вход восстановленный кадр); последние 8 строк - мусор, их не видно */
+        for (int yy = 0; yy < AH; yy++) for (int xx = 0; xx < W; xx++)
+            Y[(size_t)yy * W + xx] = yy < H ? (u8)(40 + ((xx + f * 4) / 2 + yy) % 160) : (u8)(yy * 31 + xx);
+        memset(U, 120, csz); memset(V, 136, csz);
+        unsigned char *cod = NULL;
+        int cn = 0;
+        if (H264E_encode(enc, scr, &rp, &io, &cod, &cn) || cn <= 0) { ok = false; break; }
+        u8 *fb = calloc(1, (size_t)cn + 64);     /* + AV_INPUT_BUFFER_PADDING_SIZE нулей */
+        if (!fb) { ok = false; break; }
+        memcpy(fb, cod, (size_t)cn);
+        VidPic pic;
+        int dr = vdec_frame(d, fb, (size_t)cn, false, &pic);
+        free(fb);
+        if (dr != VD_PIC || pic.bits != 8) { ok = false; break; }
+        pics++; gw = pic.w; gh = pic.h;
+        long long sum = 0, sb = 0;
+        for (int yy = 0; yy < H && yy < pic.h; yy++) for (int xx = 0; xx < W && xx < pic.w; xx++) {
+            int e = pic.p[0][yy * pic.s[0] + xx] - (40 + ((xx + f * 4) / 2 + yy) % 160);
+            e = e < 0 ? -e : e;
+            sum += e;
+            if (yy >= H - 8) sb += e;            /* нижний неполный ряд блоков - без мусора из запасных строк */
+        }
+        int mad = (int)(sum / ((long long)W * H)), madb = (int)(sb / ((long long)W * 8));
+        if (mad > worst) worst = mad;
+        if (madb > bottom) bottom = madb;
+        vdec_done(d);
+    }
+    bool guard = ok;
+    for (int i = 0; guard && i < GUARD; i++) guard = Y[ysz + i] == 0xA5 && U[csz + i] == 0xA5 && V[csz + i] == 0xA5;
+    vdec_free(d);
+    free(enc); free(scr); free(Y); free(U); free(V);
+    char m[300];
+    snprintf(m, sizeof m, "трансляция 1080p: minih264 (вход 1920x1088, обрезка в SPS) -> libavcodec: %d/2 кадров %dx%d, ошибка яркости %d (нижние 8 строк %d), страж за буфером цел, без флага 1080 - отказ",
+             pics, gw, gh, worst, bottom);
+    check(ok && pics == 2 && gw == W && gh == H && worst <= 6 && bottom <= 8 && guard && refuse && vdec_bytes() == 0, m);
+}
 int vdec_selftest(void (*check)(bool ok, const char *what)) {
     /* ST_VID720=1 — замер памяти на кадре 1280x720 (обычно 96x64, быстро) */
     const char *big = getenv("ST_VID720");
@@ -364,6 +428,7 @@ int vdec_selftest(void (*check)(bool ok, const char *what)) {
         vdec_free(x);
     }
     check(all && vdec_bytes() == 0, "Go Live зритель: декодеры H264/H265/VP8/VP9/AV1 создаются, мусорный кадр — без картинки и без сбоя, память кадров 0");
+    vdec_fhd_selftest(check);
     return 0;
 }
 #endif

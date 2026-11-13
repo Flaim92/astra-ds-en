@@ -40,6 +40,13 @@ bool img_avatar(uint64_t user_id, const char *avatar_hash, int w, int h, ImgCell
 /* Значок сервера (Guild.icon, тот же формат хэша): cdn.discordapp.com/icons/{id}/{hash}.jpg, тот же
  * порядок «только видимое». Мелкая сетка — 18x9, 24x12. NULL/"" — значка нет: false (рисуйте сокращение названия, как Discord). */
 bool img_icon(uint64_t guild_id, const char *icon_hash, int w, int h, ImgCell *out);
+/* Мини-значок w x h (плитка свёрнутой папки): уменьшается из уже готовых клеток этого значка любого размера
+ * не меньше w x h, без новой загрузки. Готовых нет — значок заказывается в размере bw x bh (каким его рисует
+ * полоса серверов: тогда раскрытая папка берёт его же), false. */
+bool img_icon_mini(uint64_t guild_id, const char *icon_hash, int bw, int bh, int w, int h, ImgCell *out);
+/* Уменьшить готовые клетки sw x sh до dw x dh (dw <= sw, dh <= sh): средний видимый цвет частей, подбор символа
+ * тем же способом, что при разборе картинки. */
+void img_shrink(const ImgCell *src, int sw, int sh, int dw, int dh, ImgCell *dst);
 
 /* Круглая маска (как кружки Discord): эллипс, вписанный в w x h клеток с учётом того, что клетка
  * вдвое выше ширины (w = 2h — круг: 2x1 ... 48x24). Клетки вне круга -> ch = 0 (прозрачные, fg = bg =

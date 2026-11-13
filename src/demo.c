@@ -140,7 +140,13 @@ static const char READY[] =
     "{\"id\":\"2700\",\"properties\":{\"name\":\"Курсы\",\"owner_id\":\"1006\"},\"roles\":[{\"id\":\"2700\",\"permissions\":\"3263553\"}],"
     "\"channels\":[{\"id\":\"3750\",\"type\":0,\"name\":\"лекции\",\"position\":0}]}],"
     /* папки — в protobuf, как у настоящего клиента (гоняет разбор user_settings_proto) */
-    "\"user_settings_proto\":\"GAVybQopChA0CAAAAAAAAMQJAAAAAAAAEgIIARoKCgjQmNCz0YDRiyIFCNzK7gEKFgoQKAoAAAAAAACMCgAAAAAAABICCAISKNAHAAAAAAAANAgAAAAAAADECQAAAAAAACgKAAAAAAAAjAoAAAAAAAA=\","
+    /* Порядок guild_folders нарочно не совпадает с порядком guilds выше: папка без имени (2600, 2700), затем
+     * «Игры» (2100, 2500); «Уютного уголка» (2000) в guild_folders нет — он сверху, как новый.
+     * Дальше серверы, которые приходят после READY: одиночный 2200, папка из одного [2201] (оранжевая, без имени),
+     * «Тройка» [2202 2205 2203] (фиолетовая), «Четвёрка» [2204 2206 2207 2208] — на плитках свёрнутых папок видно
+     * 1, 2, 3 и 4 мини-значка. Полоса: 2000, [2600 2700], [Игры 2100 2500], 2200, [2201], [2202 2205 2203],
+     * [2204 2206 2207 2208] (проверяет selftest). */
+    "\"user_settings_proto\":\"GAVygwIKFgoQKAoAAAAAAACMCgAAAAAAABICCAIKKQoQNAgAAAAAAADECQAAAAAAABICCAEaCgoI0JjQs9GA0YsiBQjcyu4BCgoKCJgIAAAAAAAAChUKCJkIAAAAAAAAEgIIAyIFCKL8mQcKNQoYmggAAAAAAACdCAAAAAAAAJsIAAAAAAAAEgIIBBoOCgzQotGA0L7QudC60LAiBQi2s+0ECjoKIJwIAAAAAAAAnggAAAAAAACfCAAAAAAAAKAIAAAAAAAAEgIIBRoSChDQp9C10YLQstGR0YDQutCwEijQBwAAAAAAADQIAAAAAAAAxAkAAAAAAAAoCgAAAAAAAIwKAAAAAAAA\","
     "\"merged_members\":[[{\"user_id\":\"1000\",\"roles\":[\"2004\"]},{\"user_id\":\"1004\",\"roles\":[\"2001\"]},"
     "{\"user_id\":\"1005\",\"roles\":[\"2003\"]},{\"user_id\":\"1006\",\"roles\":[\"2002\"]}],[{\"user_id\":\"1000\",\"roles\":[]}],"
     /* №128: в «Шахматном клубе» (2500) правила ещё не приняты — писать нельзя, есть «Принять правила» */

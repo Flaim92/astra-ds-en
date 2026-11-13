@@ -712,6 +712,55 @@ bool img_icon(u64 gid, const char *hash, int w, int h, ImgCell *out) {
     return cdn_square("icons", gid, hash, w, h, out);
 }
 
+/* Уменьшение готовых клеток: каждая часть (2x4 на клетку) нового размера — среднее видимых цветов частей
+ * исходника, которые на неё приходятся; символ и цвета — тем же подбором, что при разборе JPEG. */
+void img_shrink(const ImgCell *src, int sw, int sh, int dw, int dh, ImgCell *dst) {
+    static const u8 black[3] = { 0, 0, 0 };
+    int SW = 2 * sw, SH = 4 * sh, DW = 2 * dw, DH = 4 * dh;
+    for (int y = 0; y < dh; y++)
+        for (int x = 0; x < dw; x++) {
+            Acc a[8];
+            const Acc *q[8];
+            memset(a, 0, sizeof a);
+            for (int pi = 0; pi < 8; pi++) {
+                int X = 2 * x + (pi & 1), Y = 4 * y + (pi >> 1);
+                int x0 = X * SW / DW, x1 = (X + 1) * SW / DW, y0 = Y * SH / DH, y1 = (Y + 1) * SH / DH;
+                if (x1 <= x0) x1 = x0 + 1;
+                if (y1 <= y0) y1 = y0 + 1;
+                for (int sy = y0; sy < y1 && sy < SH; sy++)
+                    for (int sx = x0; sx < x1 && sx < SW; sx++) {
+                        double c[3];
+                        cell_part(&src[(sy / 4) * sw + sx / 2], (sy & 3) * 2 + (sx & 1), black, c);
+                        a[pi].r += (u32)(c[0] + 0.5); a[pi].g += (u32)(c[1] + 0.5); a[pi].b += (u32)(c[2] + 0.5); a[pi].n++;
+                    }
+                q[pi] = &a[pi];
+            }
+            cell_make(q, &dst[y * dw + x]);
+        }
+}
+
+/* Мини-значок сервера (плитка папки): из уже готовых клеток этого значка любого размера не меньше w x h
+ * (тот, что рисует полоса, или мелкая сетка) — без новой загрузки. Готового нет — заказать значок в размере
+ * bw x bh (как его нарисует сама полоса: потом пригодится и раскрытой папке) и вернуть false. */
+bool img_icon_mini(u64 gid, const char *hash, int bw, int bh, int w, int h, ImgCell *out) {
+    if (!s_on || !out || !hash || !*hash || w < 1 || h < 1 || bw < w || bh < h || bw > IMG_MAX_W || bh > IMG_MAX_H) return false;
+    if (!gid || !avatar_hash_ok(hash)) return false;
+    u64 key = square_key("icons", gid, hash);
+    Ent *best = NULL;
+    for (int i = 0; i < NENT; i++) {
+        Ent *e = &s_e[i];
+        if (e->state == ST_READY && e->key == key && e->kind == K_AV && e->w >= w && e->h >= h && (!best || e->w * e->h > best->w * best->h)) best = e;
+    }
+    if (best) { best->gen = s_gen; img_shrink(best->cells, best->w, best->h, w, h, out); return true; }
+    Ent *e = find(key, K_AV, bw, bh);
+    if (e) { e->gen = s_gen; return false; }   /* уже заказан (качается) */
+    if (O.demo) return false;
+    char url[160];
+    snprintf(url, sizeof url, "https://cdn.discordapp.com/icons/%llu/%s.jpg?size=%d", (unsigned long long)gid, hash, square_size(bw, bh));
+    want(key, K_AV, bw, bh, url);
+    return false;
+}
+
 /* ---------- круглая маска ----------
  * Эллипс вписан в w x h клеток с учётом того, что клетка вдвое выше ширины (при w = 2h — круг).
  * Для каждой из 8 частей клетки считается доля площади внутри (выборка 4x4 точки на часть).

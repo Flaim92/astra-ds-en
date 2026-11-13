@@ -14,6 +14,20 @@
 #define VS_PT_H264 105
 #define VS_PT_RTX 106
 #define VS_MTU 1100
+/* op 12 трансляции: max_resolution / max_framerate / max_bitrate - по качеству эфира (share_quality: 720p30 или
+ * 1080p30 с Nitro). Нули (качество ещё неизвестно) - как у официального клиента без Nitro: 720p30, 3,5 Мбит/с.
+ * Возврат - длина или -1 (буфер мал). */
+int voice_stream_op12_json(char *b, size_t n, unsigned assrc, unsigned vssrc, unsigned rtx, int w, int h, int fps, int max_bps) {
+    ShareQuality d = share_quality(SHARE_Q_720);
+    if (w <= 0 || h <= 0) { w = d.w; h = d.h; }
+    if (fps <= 0) fps = d.fps;
+    if (max_bps <= 0) max_bps = d.kbps_max * 1000;
+    int k = snprintf(b, n, "{\"op\":12,\"d\":{\"audio_ssrc\":%u,\"video_ssrc\":%u,\"rtx_ssrc\":%u,\"streams\":[{\"type\":\"video\","
+                     "\"rid\":\"100\",\"ssrc\":%u,\"active\":true,\"quality\":100,\"rtx_ssrc\":%u,\"max_bitrate\":%d,"
+                     "\"max_framerate\":%d,\"max_resolution\":{\"type\":\"fixed\",\"width\":%d,\"height\":%d}}]}}",
+                     assrc, vssrc, rtx, vssrc, rtx, max_bps, fps, w, h);
+    return k > 0 && (size_t)k < n ? k : -1;
+}
 #define VS_QMAX 4
 
 static struct {

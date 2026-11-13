@@ -450,6 +450,7 @@ static void guild_load(const cJSON *go, const cJSON *my_member) {
     if (jbool(go, "unavailable")) return;
     u64 gid = jid(go, "id");
     Guild *g = guild_find(gid);
+    i64 joined0 = g ? g->joined : 0;
     if (!g) {
         S.guilds = xrealloc(S.guilds, (size_t)(S.nguilds + 1) * sizeof(Guild));
         g = &S.guilds[S.nguilds++];
@@ -464,6 +465,8 @@ static void guild_load(const cJSON *go, const cJSON *my_member) {
         g->notify = nt;
     }
     g->id = gid;
+    g->joined = iso_to_unix(jstr(go, "joined_at"));   /* для порядка новых серверов на полосе */
+    if (!g->joined) g->joined = joined0;
     const cJSON *nm = gprop(go, "name");
     g->name = san(cJSON_IsString(nm) ? nm->valuestring : "?", false);
     g->owner_id = id_of(gprop(go, "owner_id"));
@@ -597,9 +600,7 @@ static bool presence_apply(const cJSON *p) {
 /* Действия (записи): в демо — только локально, без сети. */
 /* Ответ Discord на действие с друзьями: при ошибке — его текст и код (а не только «403»), управляющие
  * символы заменяются пробелом. ctx — что делали (строка интерфейса). */
-static void on_rel_done(Resp *r, void *ctx) {
-    if (r->status >= 200 && r->status < 300) return;
-    const char *what = ctx ? (const char *)ctx : ui_tr("друзья");
+static void resp_fail(Resp *r, const char *what) {
     char m[120] = "";
     long code = 0;
     if (r->body.p && r->body.len) {
@@ -616,6 +617,10 @@ static void on_rel_done(Resp *r, void *ctx) {
     else if (m[0] && code) ui_notice(ui_tr("%s: Discord ответил %ld: %s (код %ld)"), what, r->status, m, code);
     else if (m[0]) ui_notice(ui_tr("%s: Discord ответил %ld: %s"), what, r->status, m);
     else ui_notice(ui_tr("%s: Discord ответил %ld"), what, r->status);
+}
+static void on_rel_done(Resp *r, void *ctx) {
+    if (r->status >= 200 && r->status < 300) return;
+    resp_fail(r, ctx ? (const char *)ctx : ui_tr("друзья"));
 }
 /* PUT /users/@me/relationships/<id> как у официального клиента: с X-Context-Properties = base64({"location":..}),
  * без него Discord может отвечать 403 */
@@ -2941,7 +2946,7 @@ void invite_create(u64 cid, int max_age_s, int max_uses) {
 /* ---------- заглушить и уровень уведомлений (PATCH /users/@me/guilds/{g|@me}/settings) ---------- */
 /* Ревью 9 М5: модель меняется сразу; при ошибке ответа — откат к прежнему значению (кольцо записей). */
 enum { SR_GMUTE, SR_CMUTE, SR_GNOTIFY, SR_CNOTIFY };
-#define STR_MAX 8
+#define STR_MAX 256                             /* «Не беспокоить» папки - по записи на каждый её сервер (до 200) */
 static struct { u64 id; u8 kind, old; const char *what; unsigned gen; } STR[STR_MAX];
 static unsigned sr_gen;
 static void on_settings(Resp *r, void *ctx) {
@@ -3898,20 +3903,35 @@ bool gdm_leave(u64 cid, char *err, size_t errn) {
     return true;
 }
 
-/* ---------- №2 папки серверов ---------- */
+/* ---------- №2 папки серверов и порядок полосы ----------
+ * Порядок задаёт Discord: user_settings_proto, поле 14 guild_folders -> поле 1 folders (одиночный сервер —
+ * «папка» без id из одного сервера). Серверы без записи в guild_folders (новые) — сверху, как у официального
+ * клиента. Порядок прихода серверов (READY, GUILD_CREATE) на полосу не влияет. */
 static GuildFolder *FD;
 static int nfd;
+static bool fd_known;                           /* порядок от Discord получен (protobuf или старый user_settings) */
+static bool fd_lossy;                           /* разбор поля 14 оборван или упёрся в предел — записывать нельзя */
+static u8 *fd_extra;                            /* прочие подполя GuildFolders (guild_positions, неизвестные) — как пришли */
+static size_t fd_nextra;
 static void fgs_free(void);
+static void fd_free_arr(GuildFolder *a, int n) {
+    for (int i = 0; i < n; i++) { free(a[i].name); free(a[i].gids); free(a[i].meta); }
+    free(a);
+}
 static void folders_free(void) {
     fgs_free();
-    for (int i = 0; i < nfd; i++) { free(FD[i].name); free(FD[i].gids); }
-    free(FD);
+    fd_free_arr(FD, nfd);
     FD = NULL;
     nfd = 0;
+    free(fd_extra);
+    fd_extra = NULL;
+    fd_nextra = 0;
+    fd_known = fd_lossy = false;
 }
 int guild_folders(const GuildFolder **out) { *out = FD; return nfd; }
+#define FD_MAX 1024                             /* записей guild_folders и серверов в папке (у Discord до 200 серверов) */
 static GuildFolder *folder_new(void) {
-    if (nfd >= 100) return NULL;
+    if (nfd >= FD_MAX) { fd_lossy = true; return NULL; }
     FD = xrealloc(FD, (size_t)(nfd + 1) * sizeof *FD);
     memset(&FD[nfd], 0, sizeof *FD);
     return &FD[nfd++];
@@ -3920,37 +3940,65 @@ static GuildFolder *folder_new(void) {
 #define FGS_CAP 4096                            /* 32 КБ только на время разбора; до 2048 gid во всех папках */
 static u64 *fgs;
 static int fgs_n;
-static bool fgs_add(u64 g) {
+static int fgs_add(u64 g) {                     /* 1 — новый, 0 — повтор, -1 — множество полно */
     if (!fgs) fgs = xcalloc(FGS_CAP, sizeof(u64));
-    if (fgs_n >= FGS_CAP / 2) return false;
     u32 h = (u32)((g * 0x9E3779B97F4A7C15ULL) >> 49);
     for (;;) {
         u32 i = h & (FGS_CAP - 1);
-        if (!fgs[i]) { fgs[i] = g; fgs_n++; return true; }
-        if (fgs[i] == g) return false;
+        if (!fgs[i]) { if (fgs_n >= FGS_CAP / 2) return -1; fgs[i] = g; fgs_n++; return 1; }
+        if (fgs[i] == g) return 0;
         h++;
     }
 }
 static void fgs_free(void) { free(fgs); fgs = NULL; fgs_n = 0; }
 static void folder_add_gid(GuildFolder *f, u64 g) {
-    if (!g || f->n >= 200) return;
-    if (!fgs_add(g)) return;                    /* повтор в этой же или другой папке — отбросить */
+    if (!g) return;
+    int a = fgs_add(g);
+    if (a < 0 || (a && f->n >= FD_MAX)) { fd_lossy = true; return; }
+    if (!a) return;                             /* повтор в этой же или другой папке — отбросить */
     f->gids = xrealloc(f->gids, (size_t)(f->n + 1) * sizeof(u64));
     f->gids[f->n++] = g;
+}
+/* protobuf: запись */
+static void pbw_varint(Buf *b, u64 v) { do { u8 c = (u8)(v & 0x7F); v >>= 7; if (v) c |= 0x80; buf_put(b, &c, 1); } while (v); }
+static void pbw_len(Buf *b, int field, const void *p, size_t n) { pbw_varint(b, (u64)field << 3 | 2); pbw_varint(b, n); buf_put(b, p, n); }
+static void pbw_wrapped_u(Buf *b, int field, u64 v) {   /* google.protobuf.*Value {1: varint} */
+    Buf w = {0};
+    pbw_varint(&w, 1 << 3 | 0);
+    pbw_varint(&w, v);
+    pbw_len(b, field, w.p, w.len);
+    buf_free(&w);
+}
+static void meta_add(GuildFolder *f, const void *p, size_t n) {
+    if (!n) return;
+    f->meta = xrealloc(f->meta, (size_t)f->nmeta + n);
+    memcpy(f->meta + f->nmeta, p, n);
+    f->nmeta += (int)n;
 }
 static void folders_json(const cJSON *arr) {
     const cJSON *x, *g;
     cJSON_ArrayForEach(x, arr) {
         GuildFolder *f = folder_new();
         if (!f) break;
+        Buf m = {0};
         f->id = jint(x, "id", 0);
+        if (f->id) pbw_wrapped_u(&m, 2, (u64)f->id);
         const char *nm = jstr(x, "name");
-        if (nm && *nm) { char *t = san(nm, false); if (strlen(t) > 64) { size_t k = 64; while (k && ((unsigned char)t[k] & 0xC0) == 0x80) k--; t[k] = 0; } f->name = t; }
+        if (nm && *nm) {
+            Buf w = {0};
+            pbw_len(&w, 1, nm, strlen(nm));
+            pbw_len(&m, 3, w.p, w.len);
+            buf_free(&w);
+            char *t = san(nm, false); if (strlen(t) > 64) { size_t k = 64; while (k && ((unsigned char)t[k] & 0xC0) == 0x80) k--; t[k] = 0; } f->name = t;
+        }
         const cJSON *col = jget(x, "color");
-        if (cJSON_IsNumber(col)) { f->color = (u32)col->valuedouble & 0xFFFFFFu; f->has_color = true; }
+        if (cJSON_IsNumber(col) && col->valuedouble >= 0) { f->color = (u32)col->valuedouble & 0xFFFFFFu; f->has_color = true; pbw_wrapped_u(&m, 4, (u64)col->valuedouble); }
+        meta_add(f, m.p, m.len);
+        buf_free(&m);
         cJSON_ArrayForEach(g, jget(x, "guild_ids")) folder_add_gid(f, id_of(g));
     }
     fgs_free();
+    fd_known = true;
 }
 /* protobuf: varint / длина; false — испорчено */
 static bool pb_varint(const u8 *p, size_t n, size_t *i, u64 *v) {
@@ -3984,25 +4032,28 @@ static bool pb_wrapped(const u8 *p, size_t n, u64 *v, const u8 **s, size_t *sl) 
     }
     return false;
 }
-static void pb_folder(const u8 *p, size_t n) {
+/* Одна папка. Всё, кроме guild_ids, сохраняется как пришло (meta): при записи id, имя, цвет и
+ * неизвестные поля уходят обратно байт в байт. false — испорчено. */
+static bool pb_folder(const u8 *p, size_t n) {
     GuildFolder *f = folder_new();
-    if (!f) return;
+    if (!f) return false;
     size_t i = 0;
     while (i < n) {
         u64 key, l;
-        if (!pb_varint(p, n, &i, &key)) return;
+        size_t k0 = i;
+        if (!pb_varint(p, n, &i, &key)) return false;
         int fn = (int)(key >> 3), wt = (int)(key & 7);
         if (fn == 1 && wt == 2) {               /* guild_ids: packed fixed64 */
-            if (!pb_varint(p, n, &i, &l) || l > n - i) return;
+            if (!pb_varint(p, n, &i, &l) || l > n - i || l % 8) return false;
             for (size_t k = 0; k + 8 <= l; k += 8) { u64 g = 0; for (int b = 7; b >= 0; b--) g = g << 8 | p[i + k + (size_t)b]; folder_add_gid(f, g); }
             i += (size_t)l;
         } else if (fn == 1 && wt == 1) {        /* не упакованный fixed64 */
-            if (n - i < 8) return;
+            if (n - i < 8) return false;
             u64 g = 0; for (int b = 7; b >= 0; b--) g = g << 8 | p[i + (size_t)b];
             folder_add_gid(f, g);
             i += 8;
         } else if ((fn == 2 || fn == 3 || fn == 4) && wt == 2) {
-            if (!pb_varint(p, n, &i, &l) || l > n - i) return;
+            if (!pb_varint(p, n, &i, &l) || l > n - i) return false;
             u64 v = 0; const u8 *s = NULL; size_t sl = 0;
             if (fn == 2 && pb_wrapped(p + i, (size_t)l, &v, NULL, NULL)) f->id = (i64)v;
             if (fn == 3 && pb_wrapped(p + i, (size_t)l, NULL, &s, &sl) && sl && sl < 200) {
@@ -4013,8 +4064,13 @@ static void pb_folder(const u8 *p, size_t n) {
             }
             if (fn == 4 && pb_wrapped(p + i, (size_t)l, &v, NULL, NULL)) { f->color = (u32)v & 0xFFFFFFu; f->has_color = true; }
             i += (size_t)l;
-        } else if (!pb_skip(p, n, &i, wt)) return;
+            meta_add(f, p + k0, i - k0);
+        } else {
+            if (!pb_skip(p, n, &i, wt)) return false;
+            meta_add(f, p + k0, i - k0);
+        }
     }
+    return true;
 }
 static int b64v(char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
@@ -4024,9 +4080,12 @@ static int b64v(char c) {
     if (c == '/' || c == '_') return 63;
     return -1;
 }
-/* user_settings_proto (base64 PreloadedUserSettings): поле 14 guild_folders -> поле 1 folders */
-static void folders_proto(const char *b64, size_t L) {
-    if (!L || L > (512u << 10)) return;
+static bool gf_pending(void);
+/* user_settings_proto (base64 PreloadedUserSettings): поле 14 guild_folders -> поле 1 folders.
+ * partial: пришла только часть настроек (USER_SETTINGS_PROTO_UPDATE partial) — без поля 14 папки не трогать.
+ * Пока своя запись порядка не подтверждена, поле 14 с шлюза не применяется (иначе мигнёт старый порядок). */
+static void folders_proto(const char *b64, size_t L, bool partial) {
+    if (!b64 || !L || L > (512u << 10)) return;
     u8 *p = xmalloc(L * 3 / 4 + 4);
     size_t n = 0;
     u32 acc = 0; int bits = 0;
@@ -4037,31 +4096,45 @@ static void folders_proto(const char *b64, size_t L) {
         if (bits >= 8) { bits -= 8; p[n++] = (u8)(acc >> bits); }
     }
     size_t i = 0;
+    bool has14 = false, bad = false, keep = gf_pending();
     while (i < n) {
         u64 key, l;
-        if (!pb_varint(p, n, &i, &key)) break;
+        if (!pb_varint(p, n, &i, &key)) { bad = true; break; }
         if ((key >> 3) == 14 && (key & 7) == 2) {
-            if (!pb_varint(p, n, &i, &l) || l > n - i) break;
+            if (!pb_varint(p, n, &i, &l) || l > n - i) { bad = true; break; }
             size_t j = i, e = i + (size_t)l;
+            has14 = true;
+            if (keep) { i = e; continue; }
+            folders_free();
+            Buf ex = {0};
             while (j < e) {
                 u64 k2, l2;
-                if (!pb_varint(p, e, &j, &k2)) break;
+                size_t j0 = j;
+                if (!pb_varint(p, e, &j, &k2)) { fd_lossy = true; break; }
                 if ((k2 >> 3) == 1 && (k2 & 7) == 2) {
-                    if (!pb_varint(p, e, &j, &l2) || l2 > e - j) break;
-                    pb_folder(p + j, (size_t)l2);
+                    if (!pb_varint(p, e, &j, &l2) || l2 > e - j) { fd_lossy = true; break; }
+                    if (!pb_folder(p + j, (size_t)l2)) fd_lossy = true;
                     j += (size_t)l2;
-                } else if (!pb_skip(p, e, &j, (int)(k2 & 7))) break;
+                } else if (!pb_skip(p, e, &j, (int)(k2 & 7))) { fd_lossy = true; break; }
+                else buf_put(&ex, p + j0, j - j0);
             }
+            if (ex.len) { fd_extra = xmalloc(ex.len); memcpy(fd_extra, ex.p, ex.len); fd_nextra = ex.len; }
+            buf_free(&ex);
+            fd_known = true;
             i = e;
             continue;
         }
         if ((key >> 3) == 11 && (key & 7) == 2) {     /* №104: status -> custom_status */
-            if (!pb_varint(p, n, &i, &l) || l > n - i) break;
+            if (!pb_varint(p, n, &i, &l) || l > n - i) { bad = true; break; }
             cst_from_proto(p + i, (size_t)l);
             i += (size_t)l;
             continue;
         }
-        if (!pb_skip(p, n, &i, (int)(key & 7))) break;
+        if (!pb_skip(p, n, &i, (int)(key & 7))) { bad = true; break; }
+    }
+    if (!has14 && !partial && !keep) {         /* полные настройки без поля 14: папок нет; испорченные — порядок неизвестен */
+        folders_free();
+        fd_known = !bad;
     }
     free(p);
     fgs_free();                                 /* множество — только на время разбора */
@@ -4070,20 +4143,480 @@ static void folders_ready(const cJSON *d) {
     /* обычно папки уже разобраны в ready_slim (folders_slim: protobuf не доходит до cJSON) */
     const char *pr = jstr(d, "user_settings_proto");
     const cJSON *uf = jget(jget(d, "user_settings"), "guild_folders");
-    if (pr) { folders_free(); folders_proto(pr, strlen(pr)); }
-    if (!nfd && uf) { folders_free(); folders_json(uf); }
+    if (pr) folders_proto(pr, strlen(pr), false);   /* сам заменяет папки (кроме времени своей записи порядка) */
+    if (!nfd && uf && !gf_pending()) { folders_free(); folders_json(uf); }
 }
 /* ready_slim: строка user_settings_proto [a, b) — разобрать папки и выбросить */
-static void folders_slim(const char *a, size_t n) { folders_free(); folders_proto(a, n); }
-static void folders_event(const cJSON *d) {   /* USER_SETTINGS_PROTO_UPDATE: settings {type 1, proto} */
+static void folders_slim(const char *a, size_t n) { folders_proto(a, n, false); }
+static void folders_event(const cJSON *d) {   /* USER_SETTINGS_PROTO_UPDATE: settings {type 1, proto}, partial */
     const cJSON *s = jget(d, "settings");
     if (jint(s, "type", 0) != 1 || !jstr(s, "proto")) return;
-    folders_free();
-    folders_proto(jstr(s, "proto"), strlen(jstr(s, "proto")));
+    folders_proto(jstr(s, "proto"), strlen(jstr(s, "proto")), jbool(d, "partial"));
     ui_dirty();
 }
 void folders_test_proto(const char *b64);
-void folders_test_proto(const char *b64) { folders_free(); folders_proto(b64, strlen(b64)); }
+void folders_test_proto(const char *b64) { folders_free(); folders_proto(b64, strlen(b64), false); }
+
+/* Полоса серверов: сначала серверы без записи в guild_folders (новые: позже вступили — выше, затем по id),
+ * дальше записи guild_folders по порядку. Каждый сервер S.guilds — ровно один раз. */
+static bool fd_real(const GuildFolder *f) { return f->id || f->n > 1; }   /* папка, а не одиночный сервер */
+static int u64_cmp(const void *a, const void *b) { u64 x = *(const u64 *)a, y = *(const u64 *)b; return x < y ? -1 : x > y; }
+static int fresh_cmp(const void *a, const void *b) {
+    const Guild *x = guild_find(*(const u64 *)a), *y = guild_find(*(const u64 *)b);
+    if (x->joined != y->joined) return x->joined > y->joined ? -1 : 1;
+    return x->id > y->id ? -1 : x->id < y->id;
+}
+int guild_rail(RailEnt **out) {
+    RailEnt *r = xmalloc((size_t)(S.nguilds + 1) * sizeof *r);
+    int n = 0, tot = 0;
+    for (int k = 0; k < nfd; k++) tot += FD[k].n;
+    u64 *all = xmalloc((size_t)(tot + 1) * sizeof(u64)), *fresh = xmalloc((size_t)(S.nguilds + 1) * sizeof(u64));
+    int na = 0, nf = 0;
+    for (int k = 0; k < nfd; k++) for (int q = 0; q < FD[k].n; q++) all[na++] = FD[k].gids[q];
+    qsort(all, (size_t)na, sizeof(u64), u64_cmp);
+    for (int i = 0; i < S.nguilds; i++) if (!bsearch(&S.guilds[i].id, all, (size_t)na, sizeof(u64), u64_cmp)) fresh[nf++] = S.guilds[i].id;
+    qsort(fresh, (size_t)nf, sizeof(u64), fresh_cmp);   /* ключ (joined, id) уникален — порядок однозначен */
+    for (int i = 0; i < nf; i++) r[n++] = (RailEnt){ fresh[i], RAIL_NEW };
+    for (int k = 0; k < nfd && n < S.nguilds; k++)
+        for (int q = 0; q < FD[k].n && n < S.nguilds; q++)
+            if (guild_find(FD[k].gids[q])) r[n++] = (RailEnt){ FD[k].gids[q], fd_real(&FD[k]) ? k : RAIL_SINGLE };
+    free(all);
+    free(fresh);
+    *out = r;
+    return n;
+}
+
+/* ---- перестановка: сразу в интерфейсе, затем PATCH /users/@me/settings-proto/1 только с полем 14.
+ * Discord сливает частичный protobuf с текущими настройками: прочие поля не трогаются, поле 14
+ * заменяется целиком. Отказ — вернуть последний подтверждённый порядок и показать причину. */
+static GuildFolder *FDC;                        /* подтверждённый Discord порядок (есть, пока запись не завершена) */
+static int nfdc;
+static bool fdc_on, gf_fly, gf_again, gf_hold;  /* gf_hold — selftest: «отправлено», ответ подаёт проверка */
+static bool gf_edit;                            /* в записи есть правка папки (название, цвет, роспуск): своё сообщение об отказе */
+static GuildFolder *FDS;                        /* отправленный порядок (ждёт ответа) */
+static int nfds;
+static GuildFolder *fd_dup(const GuildFolder *a, int n) {
+    GuildFolder *r = xcalloc((size_t)(n > 0 ? n : 1), sizeof *r);
+    for (int i = 0; i < n; i++) {
+        r[i] = a[i];
+        r[i].name = a[i].name ? xstrdup(a[i].name) : NULL;
+        r[i].gids = a[i].n ? xmalloc((size_t)a[i].n * sizeof(u64)) : NULL;
+        if (a[i].n) memcpy(r[i].gids, a[i].gids, (size_t)a[i].n * sizeof(u64));
+        r[i].meta = a[i].nmeta ? xmalloc((size_t)a[i].nmeta) : NULL;
+        if (a[i].nmeta) memcpy(r[i].meta, a[i].meta, (size_t)a[i].nmeta);
+    }
+    return r;
+}
+static bool gf_pending(void) { return fdc_on || gf_fly; }
+bool guild_order_busy(void) { return gf_pending(); }
+static void fdc_restore(void) {                 /* вернуть подтверждённый порядок */
+    if (!fdc_on) return;
+    fd_free_arr(FD, nfd);
+    FD = FDC; nfd = nfdc;
+    FDC = NULL; nfdc = 0; fdc_on = false;
+}
+static void fdc_drop(void) { fd_free_arr(FDC, nfdc); FDC = NULL; nfdc = 0; fdc_on = false; }
+/* содержимое поля 14 (сообщение GuildFolders) */
+static void fd_encode(Buf *out) {
+    for (int k = 0; k < nfd; k++) {
+        if (!FD[k].n) continue;
+        Buf f = {0};
+        pbw_varint(&f, 1 << 3 | 2);
+        pbw_varint(&f, (u64)FD[k].n * 8);
+        for (int q = 0; q < FD[k].n; q++) { u8 le[8]; for (int b = 0; b < 8; b++) le[b] = (u8)(FD[k].gids[q] >> (8 * b)); buf_put(&f, le, 8); }
+        if (FD[k].nmeta) buf_put(&f, FD[k].meta, (size_t)FD[k].nmeta);
+        pbw_len(out, 1, f.p, f.len);
+        buf_free(&f);
+    }
+    if (fd_nextra) buf_put(out, fd_extra, fd_nextra);
+}
+void guild_folders_pb(Buf *out) {               /* PreloadedUserSettings только с полем 14 */
+    Buf in = {0};
+    fd_encode(&in);
+    pbw_len(out, 14, in.p ? in.p : "", in.len);
+    buf_free(&in);
+}
+static void gf_send(void);
+static void on_gf_done(Resp *r, void *ctx) {
+    (void)ctx;
+    gf_fly = false;
+    if (r->status >= 200 && r->status < 300) {
+        if (gf_again) {                         /* пока шёл запрос, порядок меняли ещё: подтверждено отправленное */
+            fdc_drop();
+            FDC = FDS; nfdc = nfds; fdc_on = true;
+            FDS = NULL; nfds = 0;
+            gf_again = false;
+            gf_send();
+            return;
+        }
+        fdc_drop();
+        fd_free_arr(FDS, nfds); FDS = NULL; nfds = 0;
+        if (r->body.p && r->body.len) {         /* ответ — настройки целиком: порядок, как его сохранил Discord */
+            cJSON *j = json_parse(r->body.p, r->body.len);
+            const char *s = jstr(j, "settings");
+            if (s) folders_proto(s, strlen(s), true);
+            json_done();
+        }
+        gf_edit = false;
+        ui_dirty();
+        return;
+    }
+    gf_again = false;
+    fd_free_arr(FDS, nfds); FDS = NULL; nfds = 0;
+    fdc_restore();
+    resp_fail(r, gf_edit ? ui_tr("изменения папок серверов не сохранены") : ui_tr("порядок серверов не сохранён"));
+    gf_edit = false;
+    ui_dirty();
+}
+static void gf_send(void) {
+    if (gf_fly) { gf_again = true; return; }
+    fd_free_arr(FDS, nfds);
+    FDS = fd_dup(FD, nfd); nfds = nfd;
+    if (gf_hold) { gf_fly = true; return; }
+    if (O.demo) { fdc_drop(); return; }        /* демо: только локально */
+    Buf pb = {0}, body = {0};
+    guild_folders_pb(&pb);
+    buf_puts(&body, "{\"settings\":\"");
+    base64_enc(pb.p, pb.len, &body);
+    buf_puts(&body, "\"}");
+    gf_fly = true;
+    http_async("PATCH", "/users/@me/settings-proto/1", body.p, on_gf_done, NULL);
+    buf_free(&pb);
+    buf_free(&body);
+}
+static int fd_find(u64 g, int *q) {
+    for (int k = 0; k < nfd; k++) for (int j = 0; j < FD[k].n; j++) if (FD[k].gids[j] == g) { if (q) *q = j; return k; }
+    return -1;
+}
+static void fd_insert(int at, GuildFolder e) {
+    FD = xrealloc(FD, (size_t)(nfd + 1) * sizeof *FD);
+    memmove(&FD[at + 1], &FD[at], (size_t)(nfd - at) * sizeof *FD);
+    FD[at] = e;
+    nfd++;
+}
+static GuildFolder fd_take(int k) {
+    GuildFolder e = FD[k];
+    memmove(&FD[k], &FD[k + 1], (size_t)(nfd - k - 1) * sizeof *FD);
+    nfd--;
+    return e;
+}
+static void gids_insert(GuildFolder *f, int at, u64 g) {
+    f->gids = xrealloc(f->gids, (size_t)(f->n + 1) * sizeof(u64));
+    memmove(&f->gids[at + 1], &f->gids[at], (size_t)(f->n - at) * sizeof(u64));
+    f->gids[at] = g;
+    f->n++;
+}
+static GuildFolder fd_single(u64 g) {
+    GuildFolder e = {0};
+    e.gids = xmalloc(sizeof(u64));
+    e.gids[0] = g;
+    e.n = 1;
+    return e;
+}
+static void fd_entry_free(GuildFolder *e) { free(e->name); free(e->gids); free(e->meta); memset(e, 0, sizeof *e); }
+/* новые серверы (без записи) — одиночными записями сверху, как их и показывает полоса */
+static void fd_materialize(void) {
+    RailEnt *r;
+    int n = guild_rail(&r), m = 0;
+    for (int i = 0; i < n; i++) if (r[i].fk == RAIL_NEW) fd_insert(m++, fd_single(r[i].gid));
+    free(r);
+}
+static i64 fd_new_id(void) {
+    u64 x = (u64)wall_ms() * 0x9E3779B97F4A7C15ULL;
+    for (;;) {
+        i64 id = (i64)(x >> 33) + 1;            /* как у официального клиента: случайное до 2^32 */
+        bool used = false;
+        for (int k = 0; k < nfd; k++) if (FD[k].id == id) used = true;
+        if (!used) return id;
+        x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+    }
+}
+static void meta_put(GuildFolder *f, int field, const Buf *val);
+static void fd_set_name(GuildFolder *f, const char *nm);
+static const char *gm_new_name;                 /* название новой папки (GM_NEWFOLDER), уже очищенное; NULL - без */
+bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, size_t errn) {
+    if (err && errn) *err = 0;
+    if (!fd_known || fd_lossy) { if (err) snprintf(err, errn, "%s", ui_tr("порядок серверов ещё не получен от Discord")); return false; }
+    if (!guild_find(src) || !guild_find(ref) || (src == ref && (whole || (how != GM_INTO && !ref_top)))) return false;
+    RailEnt *r;
+    int n = guild_rail(&r), si = -1, ri = -1;
+    for (int i = 0; i < n; i++) { if (r[i].gid == src) si = i; if (r[i].gid == ref) ri = i; }
+    int sfk = si >= 0 ? r[si].fk : -1, rfk = ri >= 0 ? r[ri].fk : -1;
+    free(r);
+    if (si < 0 || ri < 0) return false;
+    if (whole && sfk < 0) whole = false;
+    if (whole && sfk == rfk) return false;      /* папку — относительно самой себя */
+    if (how == GM_INTO && (whole || rfk < 0)) return false;
+    if (how == GM_NEWFOLDER && (whole || rfk >= 0)) return false;   /* только сервер на сервер вне папок */
+    if (src == ref) {
+        /* ref == src: сервер брошен на плитку своей же папки (у плитки ref — первый сервер папки, а это часто он
+         * сам) — в неё (GM_INTO) или перед / после неё (ref_top). ref здесь означает только папку: ориентир —
+         * другой сервер этой папки. Иначе после изъятия src ориентир не находился: fd_find -> -1, запись в
+         * FD[-1] (порча кучи, падение). Папки нет (одиночный) или в ней больше никого — менять нечего. */
+        u64 other = 0;
+        int k = sfk >= 0 ? fd_find(src, NULL) : -1;
+        for (int q = 0; k >= 0 && q < FD[k].n && !other; q++) if (FD[k].gids[q] != src && guild_find(FD[k].gids[q])) other = FD[k].gids[q];
+        if (!other) return false;
+        ref = other;
+    }
+    bool first = !fdc_on;
+    if (first) { FDC = fd_dup(FD, nfd); nfdc = nfd; fdc_on = true; }
+    Buf before = {0}, after = {0};
+    fd_materialize();
+    fd_encode(&before);
+    int sq = 0, sk = fd_find(src, &sq), rq = 0, rk;
+    GuildFolder moved;
+    if (whole) moved = fd_take(sk);
+    else {
+        memmove(&FD[sk].gids[sq], &FD[sk].gids[sq + 1], (size_t)(FD[sk].n - sq - 1) * sizeof(u64));
+        if (!--FD[sk].n) { GuildFolder e = fd_take(sk); fd_entry_free(&e); }   /* опустевшая запись исчезает */
+        moved = fd_single(src);
+    }
+    rk = fd_find(ref, &rq);
+    bool in = !whole && !ref_top && fd_real(&FD[rk]);
+    if (how == GM_BEFORE || how == GM_AFTER) {
+        if (in) gids_insert(&FD[rk], rq + (how == GM_AFTER), src);
+        else { fd_insert(rk + (how == GM_AFTER), moved); memset(&moved, 0, sizeof moved); }
+    } else if (how == GM_INTO) gids_insert(&FD[rk], FD[rk].n, src);
+    else {                                      /* GM_NEWFOLDER: ref и src - новая папка на месте ref */
+        FD[rk].id = fd_new_id();
+        Buf m = {0};
+        pbw_wrapped_u(&m, 2, (u64)FD[rk].id);
+        meta_put(&FD[rk], 2, &m);
+        buf_free(&m);
+        if (gm_new_name && *gm_new_name) fd_set_name(&FD[rk], gm_new_name);
+        gids_insert(&FD[rk], FD[rk].n, src);
+    }
+    fd_entry_free(&moved);
+    fd_encode(&after);
+    bool same = before.len == after.len && (!before.len || !memcmp(before.p, after.p, before.len));
+    buf_free(&before);
+    buf_free(&after);
+    if (same) {                                 /* ничего не изменилось — не отправлять */
+        if (first) fdc_restore();
+        return false;
+    }
+    ui_dirty();
+    gf_send();
+    return true;
+}
+
+/* ---- №2 настройки папки: название и цвет, роспуск ----
+ * Название — поле 3 (google.protobuf.StringValue), цвет — поле 4 (google.protobuf.UInt64Value) сообщения папки.
+ * Меняется только своё поле в meta, остальные (id, неизвестные) остаются байт в байт и на своих местах.
+ * Запись — та же, что у перестановки (PATCH settings-proto/1 только с полем 14), откат при отказе — тот же. */
+static void meta_put(GuildFolder *f, int field, const Buf *val) {   /* val — готовое поле целиком; NULL — убрать */
+    Buf m = {0};
+    bool put = false;
+    size_t i = 0, n = (size_t)f->nmeta;
+    while (i < n) {
+        u64 key;
+        size_t k0 = i;
+        if (!pb_varint(f->meta, n, &i, &key) || !pb_skip(f->meta, n, &i, (int)(key & 7))) { buf_put(&m, f->meta + k0, n - k0); break; }
+        int fn = (int)(key >> 3);
+        if (fn == field) {                      /* прежнее значение: новое — на его место */
+            if (val && !put) buf_put(&m, val->p, val->len);
+            put = true;
+            continue;
+        }
+        if (!put && val && fn > field && fn <= 4) { buf_put(&m, val->p, val->len); put = true; }   /* порядок полей, как у Discord */
+        buf_put(&m, f->meta + k0, i - k0);
+    }
+    if (!put && val) buf_put(&m, val->p, val->len);
+    free(f->meta);
+    f->meta = m.len ? xmalloc(m.len) : NULL;
+    if (m.len) memcpy(f->meta, m.p, m.len);
+    f->nmeta = (int)m.len;
+    buf_free(&m);
+}
+/* Название из ввода: края без пробелов, управляющие символы — пробел. false — длиннее предела или не UTF-8. */
+static bool folder_name_clean(const char *s, char *out, size_t on, char *err, size_t errn) {
+    size_t o = 0;
+    int cps = 0;
+    while (*s == ' ' || *s == '\t') s++;
+    for (const unsigned char *p = (const unsigned char *)s; *p; ) {
+        int k = *p < 0x80 ? 1 : (*p & 0xE0) == 0xC0 ? 2 : (*p & 0xF0) == 0xE0 ? 3 : (*p & 0xF8) == 0xF0 ? 4 : 0;
+        for (int j = 1; j < k; j++) if ((p[j] & 0xC0) != 0x80) k = 0;
+        if (!k) { if (err) snprintf(err, errn, "%s", ui_tr("название папки: неверный текст")); return false; }
+        if (++cps > FOLDER_NAME_MAX || o + (size_t)k >= on) { if (err) snprintf(err, errn, ui_tr("название папки длиннее %d символов"), FOLDER_NAME_MAX); return false; }
+        if (k == 1 && (*p < 0x20 || *p == 0x7F)) out[o++] = ' ';
+        else { memcpy(out + o, p, (size_t)k); o += (size_t)k; }
+        p += k;
+    }
+    while (o && out[o - 1] == ' ') o--;
+    out[o] = 0;
+    return true;
+}
+/* Общее для правок папки: проверка, снимок подтверждённого порядка, правка, сравнение, отправка. */
+static int fd_edit_k;
+static bool fd_edit_run(u64 gid, void (*fn)(void *), void *arg, char *err, size_t errn) {
+    if (err && errn) *err = 0;
+    if (!fd_known || fd_lossy) { if (err) snprintf(err, errn, "%s", ui_tr("порядок серверов ещё не получен от Discord")); return false; }
+    int k = fd_find(gid, NULL);
+    if (k < 0 || !fd_real(&FD[k])) return false;
+    bool first = !fdc_on;
+    if (first) { FDC = fd_dup(FD, nfd); nfdc = nfd; fdc_on = true; }
+    Buf before = {0}, after = {0};
+    fd_encode(&before);
+    fd_edit_k = k;
+    fn(arg);
+    fd_encode(&after);
+    bool same = before.len == after.len && (!before.len || !memcmp(before.p, after.p, before.len));
+    buf_free(&before);
+    buf_free(&after);
+    if (same) { if (first) fdc_restore(); return false; }
+    gf_edit = true;
+    ui_dirty();
+    gf_send();
+    return true;
+}
+/* Название папки (поле 3, StringValue) и его показ; nm уже очищено folder_name_clean, "" - убрать. */
+static void fd_set_name(GuildFolder *f, const char *nm) {
+    Buf w = {0}, v = {0};
+    if (*nm) { pbw_len(&w, 1, nm, strlen(nm)); pbw_len(&v, 3, w.p, w.len); }
+    meta_put(f, 3, *nm ? &v : NULL);
+    buf_free(&w); buf_free(&v);
+    free(f->name);
+    f->name = NULL;
+    if (*nm) { char *t = san(nm, false); if (strlen(t) > 64) { size_t q = 64; while (q && ((unsigned char)t[q] & 0xC0) == 0x80) q--; t[q] = 0; } f->name = t; }
+}
+typedef struct { const char *name; i64 color; } FolderEdit;
+static void fe_apply(void *a) {
+    const FolderEdit *e = a;
+    GuildFolder *f = &FD[fd_edit_k];
+    if (e->name) fd_set_name(f, e->name);
+    if (e->color == FOLDER_COLOR_DEFAULT) { meta_put(f, 4, NULL); f->color = 0; f->has_color = false; }
+    else if (e->color >= 0) {
+        Buf v = {0};
+        pbw_wrapped_u(&v, 4, (u64)e->color & 0xFFFFFFu);
+        meta_put(f, 4, &v);
+        buf_free(&v);
+        f->color = (u32)e->color & 0xFFFFFFu; f->has_color = true;
+    }
+}
+bool guild_folder_edit(u64 gid, const char *name, i64 color, char *err, size_t errn) {
+    char nm[FOLDER_NAME_MAX * 4 + 1];
+    if (err && errn) *err = 0;
+    if (name && !folder_name_clean(name, nm, sizeof nm, err, errn)) return false;
+    if (color < FOLDER_COLOR_DEFAULT || color > 0xFFFFFF) return false;
+    FolderEdit e = { name ? nm : NULL, color };
+    return fd_edit_run(gid, fe_apply, &e, err, errn);
+}
+static void fu_apply(void *a) {                  /* папка -> её серверы одиночными записями на том же месте, по порядку */
+    (void)a;
+    GuildFolder e = fd_take(fd_edit_k);
+    for (int q = 0; q < e.n; q++) fd_insert(fd_edit_k + q, fd_single(e.gids[q]));
+    fd_entry_free(&e);
+}
+bool guild_folder_ungroup(u64 gid, char *err, size_t errn) { return fd_edit_run(gid, fu_apply, NULL, err, errn); }
+/* «Убрать из папки»: сервер встаёт отдельным сразу после своей папки. Единственный сервер папки — папка
+ * распускается (сервер остаётся на её месте). */
+bool guild_unfold(u64 gid, char *err, size_t errn) {
+    if (err && errn) *err = 0;
+    int k = fd_find(gid, NULL);
+    if (k < 0 || !fd_real(&FD[k]) || !guild_find(gid)) return false;
+    u64 anchor = 0;
+    for (int q = 0; q < FD[k].n && !anchor; q++) if (FD[k].gids[q] != gid && guild_find(FD[k].gids[q])) anchor = FD[k].gids[q];
+    if (!anchor) return guild_folder_ungroup(gid, err, errn);
+    return guild_move(gid, false, GM_AFTER, anchor, true, err, errn);
+}
+bool guild_in_folder(u64 gid) { int k = fd_find(gid, NULL); return k >= 0 && fd_real(&FD[k]); }
+/* Новая папка из двух серверов вне папок: на месте ref, в ней ref и src, с названием (можно пустое).
+ * Одна запись поля 14, как у перестановки; отказ Discord - откат, причина на экране. */
+bool guild_folder_create(u64 src, u64 ref, const char *name, char *err, size_t errn) {
+    char nm[FOLDER_NAME_MAX * 4 + 1] = "";
+    if (err && errn) *err = 0;
+    if (name && !folder_name_clean(name, nm, sizeof nm, err, errn)) return false;
+    gm_new_name = nm;
+    bool ok = guild_move(src, false, GM_NEWFOLDER, ref, false, err, errn);
+    gm_new_name = NULL;
+    if (ok) gf_edit = true;                     /* отказ - «изменения папок серверов не сохранены» */
+    return ok;
+}
+/* «Не беспокоить» папки: все её серверы заглушены (из пришедших; хотя бы один есть). */
+bool guild_folder_muted(u64 gid) {
+    int k = fd_find(gid, NULL), got = 0;
+    if (k < 0) return false;
+    for (int q = 0; q < FD[k].n; q++) {
+        Guild *g = guild_find(FD[k].gids[q]);
+        if (!g) continue;
+        if (!g->muted) return false;
+        got++;
+    }
+    return got > 0;
+}
+/* Заглушить или включить все серверы папки, где gid (тем же PATCH .../settings, что меню сервера); только те,
+ * у кого состояние другое. Вернуть число запросов. */
+int guild_folder_mute(u64 gid, bool mute) {
+    int k = fd_find(gid, NULL), n = 0;
+    if (k < 0) { Guild *g = guild_find(gid); if (!g || (bool)g->muted == mute) return 0; mute_guild(gid, mute); return 1; }
+    int cnt = FD[k].n;
+    u64 *ids = xmalloc((size_t)(cnt > 0 ? cnt : 1) * sizeof(u64));   /* копия: ответ может поменять FD */
+    memcpy(ids, FD[k].gids, (size_t)cnt * sizeof(u64));
+    for (int q = 0; q < cnt; q++) {
+        Guild *g = guild_find(ids[q]);
+        if (g && (bool)g->muted != mute) { mute_guild(ids[q], mute); n++; }
+    }
+    free(ids);
+    return n;
+}
+void guild_folder_name(u64 gid, char *out, size_t n) {   /* название целиком (для правки), без управляющих символов */
+    if (!n) return;
+    out[0] = 0;
+    int k = fd_find(gid, NULL);
+    if (k < 0) return;
+    const GuildFolder *f = &FD[k];
+    size_t i = 0, m = (size_t)f->nmeta;
+    while (i < m) {
+        u64 key, l;
+        if (!pb_varint(f->meta, m, &i, &key)) return;
+        if ((key >> 3) == 3 && (key & 7) == 2) {
+            const u8 *s = NULL;
+            size_t sl = 0;
+            if (!pb_varint(f->meta, m, &i, &l) || l > m - i) return;
+            if (pb_wrapped(f->meta + i, (size_t)l, NULL, &s, &sl) && sl && sl < 1024) {
+                char *t = xmalloc(sl + 1);
+                memcpy(t, s, sl); t[sl] = 0;
+                char *c = san(t, false);
+                size_t cl = strlen(c);
+                if (cl >= n) { cl = n - 1; while (cl && ((unsigned char)c[cl] & 0xC0) == 0x80) cl--; }
+                memcpy(out, c, cl); out[cl] = 0;
+                free(c); free(t);
+            }
+            return;
+        }
+        if (!pb_skip(f->meta, m, &i, (int)(key & 7))) return;
+    }
+}
+/* selftest: сохранить порядок и вернуть его после проверки (проверки не сбивают демо-полосу) */
+static struct { GuildFolder *fd; int n; u8 *ex; size_t nex; bool known, lossy, on; } FDT;
+void folders_test_push(void);
+void folders_test_push(void) {
+    FDT.fd = fd_dup(FD, nfd); FDT.n = nfd;
+    FDT.ex = fd_nextra ? xmalloc(fd_nextra) : NULL; FDT.nex = fd_nextra;
+    if (fd_nextra) memcpy(FDT.ex, fd_extra, fd_nextra);
+    FDT.known = fd_known; FDT.lossy = fd_lossy; FDT.on = true;
+}
+void folders_test_pop(void);
+void folders_test_pop(void) {
+    if (!FDT.on) return;
+    fdc_drop();
+    fd_free_arr(FDS, nfds); FDS = NULL; nfds = 0;
+    gf_fly = gf_again = gf_hold = gf_edit = false;
+    folders_free();
+    FD = FDT.fd; nfd = FDT.n; fd_extra = FDT.ex; fd_nextra = FDT.nex; fd_known = FDT.known; fd_lossy = FDT.lossy;
+    memset(&FDT, 0, sizeof FDT);
+}
+/* selftest: запись «уходит», но без сети — ответ Discord подаёт guild_order_test_reply */
+void guild_order_test_hold(bool on);
+void guild_order_test_hold(bool on) { gf_hold = on; }
+void guild_order_test_reply(long status, const char *body);
+void guild_order_test_reply(long status, const char *body) {
+    Resp r = { status, {0} };
+    if (body) buf_puts(&r.body, body);
+    on_gf_done(&r, NULL);
+    buf_free(&r.body);
+}
 
 /* ---------- №119 слова-тревоги ---------- */
 static char aw_raw[16 * 33 + 16];               /* как ввели (для настроек) */
@@ -5193,7 +5726,7 @@ static const Sch S_VS[] = { {"user_id", NULL}, {"channel_id", NULL}, {"self_mute
     {"mute", NULL}, {"deaf", NULL}, {"member", S_MEMBER}, END };
 static const Sch S_GPROP[] = { {"name", NULL}, {"owner_id", NULL}, {"icon", NULL}, {"banner", NULL}, END };
 static const Sch S_GUILD[] = { {"id", NULL}, {"unavailable", NULL}, {"properties", S_GPROP}, {"name", NULL},
-    {"owner_id", NULL}, {"icon", NULL}, {"banner", NULL}, {"roles", S_ROLE}, {"channels", S_CHAN}, {"voice_states", S_VS}, {"threads", S_THR}, END };
+    {"owner_id", NULL}, {"icon", NULL}, {"banner", NULL}, {"joined_at", NULL}, {"roles", S_ROLE}, {"channels", S_CHAN}, {"voice_states", S_VS}, {"threads", S_THR}, END };
 static const Sch S_RSE[] = { {"id", NULL}, {"last_message_id", NULL}, {"mention_count", NULL}, {"read_state_type", NULL}, END };
 static const Sch S_RS[] = { {"entries", S_RSE}, {"id", NULL}, {"last_message_id", NULL}, {"mention_count", NULL},
     {"read_state_type", NULL}, END };   /* read_state: объект {entries} или сразу массив записей */

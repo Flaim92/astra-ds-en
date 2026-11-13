@@ -94,6 +94,7 @@ enum {
     A_AR_LIST,                                   /* arg: 0 список друзей, 1 результаты поиска, 2 выбор друга */
     A_AR_TXT,                                    /* блок текстового вложения (колесо): arg — индекс в S.msgs */
     A_AR_MEMB,                                   /* список участников сервера справа (колесо) */
+    A_AR_WATCH,                                  /* видео чужой трансляции (колесо — громкость её звука) */
     A_BLOCK,                                     /* фон карточки или меню: клик не проходит насквозь */
     A_GUILD, A_ROW, A_MSG, A_REACT, A_MENU, A_BTN, A_INPUT,
     A_OPENCH,                                    /* arg — индекс в S.chans (экран «Друзья») */
@@ -141,7 +142,7 @@ enum {
     B_PING, B_PINS, B_INBOX, B_PRESENT, B_STATUS, B_CARD_BLOCK, B_CARD_ADD, B_NEWMSG,
     B_PINS_MORE, B_INBOX_T0, B_INBOX_T1, B_ACK_ALL, B_EP_X, B_EMOJI, B_CAP_GO, B_CAP_NO,
     B_ADDSRV, B_GMENU, B_GINVITE, B_ADDFRIEND, B_TXT_EXP, B_TXT_DL, B_STARTASK, B_RV_X, B_EPH_HIDE, B_EMBEDS, B_MRETRY, B_MDISCARD,
-    B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS, B_NS_OFF, B_NS_SPX, B_NS_RNN, B_WATCH, B_WATCH_STOP, B_WATCH_PICK, B_WATCH_FULL, B_WATCH_CHAT, B_WATCH_SHOW, B_CAM, B_CAM_PV, B_CAM_VIEW, B_CAM_TILE, B_ANON, B_MICG_DN, B_MICG_UP, B_MICG_0, B_HIDECAP,
+    B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS, B_NS_OFF, B_NS_SPX, B_NS_RNN, B_WATCH, B_WATCH_STOP, B_WATCH_PICK, B_WATCH_FULL, B_WATCH_CHAT, B_WATCH_SHOW, B_CAM, B_CAM_PV, B_CAM_VIEW, B_CAM_TILE, B_ANON, B_MICG_DN, B_MICG_UP, B_MICG_0, B_HIDECAP, B_WSV_DN, B_WSV_UP, B_WSV_0, B_WSV_MUTE,
     B_SP_PREV, B_SP_NEXT
 };
 enum { MI_REPLY = 1, MI_EDIT, MI_DELETE, MI_REACT, MI_COPY,
@@ -154,10 +155,11 @@ enum { MI_REPLY = 1, MI_EDIT, MI_DELETE, MI_REACT, MI_COPY,
        MI_FORWARD, MI_REACTS,                                /* пакет А: переслать, кто поставил реакцию */
        MI_G_MUTE, MI_G_NOTIFY, MI_C_MUTE, MI_C_NOTIFY,       /* заглушить, уровень уведомлений */
        MI_THREAD, MI_T_JOIN, MI_GDM_ADD, MI_GDM_LEAVE, MI_FOCUS30, MI_FOCUS60, MI_FOCUS120, MI_FOCUSOFF, MI_C_VSTATUS, MI_STATUS_SET, MI_C_ARCH, MI_T_RENAME, MI_T_ARCH, MI_T_LOCK, MI_T_MEMB, MI_GDM_RENAME,                                 /* пакет Б: создать ветку; вступить/покинуть ветку */
-       MI_MRETRY, MI_MDISCARD,
-       MI_V_VOL, MI_V_UP, MI_V_DN, MI_V_MUTE, MI_V_PROF, MI_V_MOVE, MI_V_SMUTE, MI_V_MIC, MI_V_DEAF };   /* меню участника голосового канала */                             /* неотправленное: повторить, отменить */
-enum { MENU_MSG = 1, MENU_SET, MENU_FRIEND, MENU_STATUS, MENU_GUILD, MENU_CHAN, MENU_VMEM };
-#define MENU_LEFT(k) ((k) == MENU_SET || (k) == MENU_STATUS || (k) == MENU_GUILD || (k) == MENU_CHAN || (k) == MENU_VMEM)
+       MI_MRETRY, MI_MDISCARD, MI_G_UNFOLD,
+       MI_V_VOL, MI_V_UP, MI_V_DN, MI_V_MUTE, MI_V_PROF, MI_V_MOVE, MI_V_SMUTE, MI_V_MIC, MI_V_DEAF,
+       MI_F_RENAME, MI_F_COLOR, MI_F_MUTE, MI_F_UNGROUP, MI_FC_DEF, MI_FC_0 };   /* №2 меню папки серверов; MI_FC_0 + i - цвет FOLD_PAL[i] */   /* меню участника голосового канала */                             /* неотправленное: повторить, отменить */
+enum { MENU_MSG = 1, MENU_SET, MENU_FRIEND, MENU_STATUS, MENU_GUILD, MENU_CHAN, MENU_VMEM, MENU_FOLDER, MENU_FCOLOR };
+#define MENU_LEFT(k) ((k) == MENU_SET || (k) == MENU_STATUS || (k) == MENU_GUILD || (k) == MENU_CHAN || (k) == MENU_VMEM || (k) == MENU_FOLDER || (k) == MENU_FCOLOR)
 enum { RP_NONE, RP_PINS, RP_INBOX };
 /* как подсвечивать при наведении */
 enum { HV_BG, HV_ACC, HV_MSG, HV_RED, HV_UL, HV_PILL, HV_ICON };
@@ -165,9 +167,9 @@ typedef struct { short x, y, w, h; u8 act, sub, hv, tip; int arg; } Hit;
 /* подсказки словом при наведении на значки (Hit.tip) */
 enum { T_NONE, T_INVITE, T_EVENTS, T_BOOST, T_MIC, T_DEAF, T_SET, T_LEAVE, T_CAM, T_SCREEN, T_FX, T_SOUNDB,
        T_NOISE, T_ADDSRV, T_MEMBERS, T_HELP, T_CALL, T_GIFT, T_GIF, T_STICKER, T_EMOJI, T_HOME, T_ATTACH,
-       T_CHATX, T_SEARCH, T_E2EE, T_ADDDM, T_FRTAB, T_NITRO, T_VSTAT, T_CHSET, T_FIND, T_MORE, T_WRITE, T_MB_REACT, T_MB_REPLY, T_MB_EDIT, T_PING, T_PINS, T_INBOX, T_STATUS, T_NEWMSG, T_DATE
+       T_CHATX, T_SEARCH, T_E2EE, T_ADDDM, T_FRTAB, T_NITRO, T_VSTAT, T_CHSET, T_FIND, T_MORE, T_WRITE, T_MB_REACT, T_MB_REPLY, T_MB_EDIT, T_PING, T_PINS, T_INBOX, T_STATUS, T_NEWMSG, T_DATE, T_FOLDER
 #ifdef ASTRA_VIDEO
-       , T_WSTOP, T_WFULL, T_WCHAT, T_WPICK, T_WSHOW, T_CAMPV, T_CAMOFF, T_CAMVIEW, T_ANON
+       , T_WSTOP, T_WFULL, T_WCHAT, T_WPICK, T_WSHOW, T_CAMPV, T_CAMOFF, T_CAMVIEW, T_ANON, T_WSVOL, T_WSMUTE
 #endif
        , T_END };
 #ifdef ASTRA_VIDEO
@@ -178,20 +180,21 @@ enum { T_NONE, T_INVITE, T_EVENTS, T_BOOST, T_MIC, T_DEAF, T_SET, T_LEAVE, T_CAM
 #define TIP_CAM "Камера: только в Astra DS Video"
 #endif
 static const char *const TIPS[] = {
-    "", "Пригласить: нет в Astra DS", "Мероприятия: нет в Astra DS", "Бусты сервера: нет в Astra DS",
+    "", "Пригласить на сервер", "Мероприятия: нет в Astra DS", "Бусты сервера: нет в Astra DS",
     "Микрофон (F5)", "Звук (F6)", "Настройки пользователя", "Отключиться (F7)", TIP_CAM,
     TIP_SCREEN, "Смена голоса (F11, Alt+V)", "Звуковая панель: нет в Astra DS",
-    "Подавление шума: в настройках - Голос и видео", "Добавить сервер: нет в Astra DS", "Список участников",
+    "Подавление шума: в настройках - Голос и видео", "Добавить сервер: создать или присоединиться", "Список участников",
     "Справка (F1)", "Позвонить (F4)", "Подарок: нет в Astra DS", "GIF: нет в Astra DS", "Стикеры: нет в Astra DS",
     "Эмодзи: пишите :код: или вставьте эмодзи", "Личные сообщения", "Отправить файл (Ctrl+O), до 10 МБ",
     "Скрыть чат", "Поиск (Ctrl+F)", "Сквозное шифрование голоса", "Новая личная беседа",
-    "Добавить в друзья: нет в Astra DS", "Nitro: нет в Astra DS", "Статус канала: нет в Astra DS",
-    "Настройки канала: нет в Astra DS", "Начать беседу с другом", "Ещё", "Написать", "Добавить реакцию", "Ответить", "Изменить", "Упоминать автора ответа",
-    "Закреплённые сообщения", "Входящие (Ctrl+I)", "Сменить статус", "К первому непрочитанному", "",
+    "Добавить в друзья", "Nitro: нет в Astra DS", "Статус канала: нет в Astra DS",
+    "Настройки канала: правый щелчок по каналу в списке", "Начать беседу с другом", "Ещё", "Написать", "Добавить реакцию", "Ответить", "Изменить", "Упоминать автора ответа",
+    "Закреплённые сообщения", "Входящие (Ctrl+I)", "Сменить статус", "К первому непрочитанному", "", "",
 #ifdef ASTRA_VIDEO
     "Выйти из просмотра", "Во весь экран и обратно (Alt+F, Esc)", "Показать чат, просмотр идёт (Alt+W)",
     "Смотреть эту трансляцию (Alt+стрелки)", "Показать трансляцию (Alt+W)",
     "Скрыть или показать себя", "Выключить камеру (F12, Alt+C)", "Смотреть камеру крупно (Alt+стрелки - соседняя)", "Скрывать глаза: вкл/выкл (Alt+E)",
+    "Громкость звука трансляции (Alt+- Alt+=, колесо над видео)", "Звук трансляции: вкл/выкл (Alt+M)",
 #endif
 };
 _Static_assert(sizeof TIPS / sizeof *TIPS == T_END, "TIPS и T_* разошлись");
@@ -886,7 +889,7 @@ int term_zoom_pct(void) { return 100; }
  * где вне картинок только фон и линии ('-' '_'): строка с текстом (название канала между участниками голоса,
  * значок [CS]) прерывает слой. В окно уходят MAX_SEND участков с наибольшим приоритетом группы. */
 enum { OV_ATT, OV_STRIP, OV_QR };
-enum { PK_AVR, PK_ICON };                        /* аватар (круг) / значок сервера (квадрат) */
+enum { PK_AVR, PK_ICON, PK_FOLDER };            /* аватар (круг) / значок сервера (квадрат) / плитка свёрнутой папки (2x2) */
 enum { G_NONE, G_RAIL, G_SIDE, G_PANEL, G_FEED, G_MEMB, G_LOGO, G_TILES, G_LOGIN, G_HDR, G_SRCH, G_POP };
 static const u8 G_PRIO[] = { 0, 6, 4, 5, 7, 3, 8, 8, 9, 1, 7, 10 };
 typedef struct { short x, y, w, ih, r0, nr; u8 kind; u64 id; } Part;   /* строки r0..r0+nr-1 картинки w x ih с клетки (x, y) */
@@ -1094,6 +1097,19 @@ static bool pic_icon(const Guild *g, int w, int h, ImgCell *out) {
     if (!g || !g->icon[0]) return false;
     if (O.demo) { synth(g->id, SY_ICON, w, h, out); return true; }
     return img_icon(g->id, g->icon, w, h, out);
+}
+/* Мини-значок w x h для плитки папки: из готового значка (полосы или мелкой сетки), без своей загрузки;
+ * bw x bh — размер, в котором значок заказать, если готового ещё нет (как его рисует полоса). */
+static bool pic_icon_mini(const Guild *g, int bw, int bh, int w, int h, ImgCell *out) {
+    if (!g || !g->icon[0]) return false;
+    if (O.demo) {
+        ImgCell base[FINE_K * 6 * FINE_K * 3];
+        if (bw * bh > (int)(sizeof base / sizeof *base) || w > bw || h > bh) return false;
+        synth(g->id, SY_ICON, bw, bh, base);
+        img_shrink(base, bw, bh, w, h, out);
+        return true;
+    }
+    return img_icon_mini(g->id, g->icon, bw, bh, w, h, out);
 }
 static bool pic_attach(const char *url, int maxw, int maxh, ImgCell *out, int *ow, int *oh) {
     if (O.demo) {
@@ -1303,6 +1319,7 @@ static int hit_area(int x, int y) {
 static void g_pill(int x, int y, int w, u32 bg);
 static int g_text(int x, int y, const char *s, int w, u32 fg, int a);
 static void date_full(i64 ts, char *out, size_t n);
+static void fold_title(int fk, char *out, size_t n);
 static void hover_paint(void) {
     U.hov_on = false;
     if (U.hx < 0 || U.hy < 0) return;
@@ -1347,6 +1364,7 @@ static void hover_paint(void) {
         const char *t = tr(TIPS[U.hov.tip]);
         char dbuf[96];
         if (U.hov.tip == T_DATE && U.hov.arg >= 0 && U.hov.arg < S.nmsgs) { date_full(S.msgs[U.hov.arg].ts, dbuf, sizeof dbuf); t = dbuf; }
+        if (U.hov.tip == T_FOLDER) { fold_title(U.hov.arg, dbuf, sizeof dbuf); t = dbuf; }   /* №2: название папки или её серверы */
         int w = vw(t) + 4, y = U.hov.y > 0 ? U.hov.y - 1 : U.hov.y + U.hov.h;
         int x = U.hov.x + U.hov.w / 2 - w / 2;
         if (x + w > U.gw) x = U.gw - w;
@@ -3345,14 +3363,15 @@ typedef struct { const char *k, *d; } HelpItem;
 static const char PANIC_HERE[] = "";
 static const HelpItem HELP[] = {
     { NULL, "МЫШЬ" },
-    { "левый щелчок", "сервер, канал, сообщение, кнопка; категория - свернуть/развернуть; голосовой канал - экран канала с кнопкой \"Присоединиться\"" },
-    { "правый щелчок", "по сообщению - меню: ответить, изменить, удалить, реакция, копировать" },
+    { "левый щелчок", "сервер, канал, сообщение, кнопка; категория, папка - свернуть/развернуть; голосовой канал - экран канала с кнопкой \"Присоединиться\"" },
+    { "правый щелчок", "меню сообщения (ответить, изменить, удалить, реакция, копировать), сервера, папки" },
+    { "протяжка сервера", "на плитку папки - в неё; выше плитки или под папку - из неё" },
     { "колесо", "листать ленту, каналы, серверы, справку" },
     { "щелчок по реакции", "поставить или снять свою" },
     { NULL, "ПАНЕЛИ" },
     { "Tab / Shift+Tab", "переключить колонку: серверы, каналы, сообщения, ввод" },
-    { "Up / Down", "выбор в колонке" },
-    { "Enter", "открыть канал или категорию; на голосовом - экран канала, ещё Enter - войти" },
+    { "Up / Down", "выбор; Alt - переставить сервер" },
+    { "Enter", "открыть канал, категорию или папку; на голосовом - экран канала, ещё Enter - войти" },
     { "PgUp / PgDn", "листать сообщения; PgUp вверху подгружает более старые" },
     { "Ctrl+Q", "выход; Ctrl+= - 0 - масштаб окна" },
     { NULL, "СООБЩЕНИЯ" },
@@ -3734,10 +3753,51 @@ static void draw_help(int W, int H) {
     free(hl);
 }
 
+/* №2 меню папки: какая папка (её первый сервер — папку ищем по нему: номера могут сдвинуться, пока меню открыто) */
+static u64 menu_fgid;
+/* цвета папки — из палитры Discord (как в «Настройках папки»); «по умолчанию» — без цвета, плитка 5865F2 */
+static const struct { u32 c; const char *n; } FOLD_PAL[] = {
+    { 0x1abc9cu, "Бирюзовый" }, { 0x2ecc71u, "Зелёный" }, { 0x3498dbu, "Синий" }, { 0x9b59b6u, "Фиолетовый" },
+    { 0xe91e63u, "Розовый" }, { 0xf1c40fu, "Жёлтый" }, { 0xe67e22u, "Оранжевый" }, { 0xe74c3cu, "Красный" },
+    { 0x95a5a6u, "Серый" }, { 0x607d8bu, "Сине-серый" },
+};
+enum { NFPAL = (int)(sizeof FOLD_PAL / sizeof *FOLD_PAL) };
+_Static_assert(MI_FC_0 + NFPAL < 256, "пункты меню — u8 в Hit.sub");
+static void fold_menu(u64 gid, int x, int y);
+static void menu_open(int kind, int mi, int x, int y);
+static const GuildFolder *menu_folder(void) {
+    const GuildFolder *fd = NULL;
+    int n = guild_folders(&fd);
+    for (int k = 0; k < n; k++) for (int q = 0; q < fd[k].n; q++) if (fd[k].gids[q] == menu_fgid) return &fd[k];
+    return NULL;
+}
 /* Пункты меню; вернуть число. danger — красный пункт (удалить). */
 static int menu_items(int kind, const Message *m, int *ids, const char **names, bool *danger) {
     int n = 0;
     static char fxl[64];
+    if (kind == MENU_FOLDER) {
+        ids[n] = MI_F_RENAME; danger[n] = false; names[n++] = TR("Переименовать");
+        ids[n] = MI_F_COLOR; danger[n] = false; names[n++] = TR("Цвет...");
+        {   /* «Не беспокоить»: заглушены все серверы папки - галочка */
+            static char ml[64];
+            snprintf(ml, sizeof ml, "%s %s", guild_folder_muted(menu_fgid) ? "[x]" : "[ ]", TR("Не беспокоить"));
+            ids[n] = MI_F_MUTE; danger[n] = false; names[n++] = ml;
+        }
+        ids[n] = MI_F_UNGROUP; danger[n] = true; names[n++] = TR("Распустить папку");
+        return n;
+    }
+    if (kind == MENU_FCOLOR) {                   /* перед названием — образец цвета (draw_menu), у текущего — '*' */
+        static char cl[NFPAL + 1][64];
+        const GuildFolder *f = menu_folder();
+        bool def = !f || !f->has_color || !f->color;
+        snprintf(cl[0], sizeof cl[0], "   %s %s", def ? "*" : " ", TR("По умолчанию"));
+        ids[n] = MI_FC_DEF; danger[n] = false; names[n++] = cl[0];
+        for (int i = 0; i < NFPAL; i++) {
+            snprintf(cl[i + 1], sizeof cl[0], "   %s %s", !def && f->color == FOLD_PAL[i].c ? "*" : " ", tr(FOLD_PAL[i].n));
+            ids[n] = MI_FC_0 + i; danger[n] = false; names[n++] = cl[i + 1];
+        }
+        return n;
+    }
     if (kind == MENU_SET) {
         VoiceFx fx = voicefx_get();
         snprintf(fxl, sizeof fxl, TR("Смена голоса: %s     F11"), fx == VFX_LOW ? TR("ниже") : fx == VFX_HIGH ? TR("выше") : TR("выкл"));
@@ -3750,6 +3810,7 @@ static int menu_items(int kind, const Message *m, int *ids, const char **names, 
     }
     if (kind == MENU_GUILD) {
         u64 g = cur_guild_id();
+        if (guild_in_folder(g)) { ids[n] = MI_G_UNFOLD; danger[n] = false; names[n++] = TR("Убрать из папки"); }
         ids[n] = MI_G_INV; danger[n] = false; names[n++] = TR("Пригласить людей");
         if (can_manage_guild(g)) { ids[n] = MI_G_SET; danger[n] = false; names[n++] = TR("Настройки сервера"); }
         if (can_manage_channels(g)) {
@@ -3909,6 +3970,8 @@ static void draw_menu(int ax, int ay, int aw, int ah) {
         int y = y0 + 1 + i;
         if (i == U.menu_sel) g_pill(x0 + 1, y, bw - 2, dg[i] ? C_DANGER : C_ACC);
         g_text(x0 + 3, y, nm[i], iw, i == U.menu_sel ? C_WHITE : dg[i] ? C_RED : C_TEXT, 0);
+        if (U.menu_kind == MENU_FCOLOR)          /* образец цвета папки */
+            g_rect(x0 + 3, y, 2, 1, ids[i] >= MI_FC_0 && ids[i] < MI_FC_0 + NFPAL ? FOLD_PAL[ids[i] - MI_FC_0].c : 0x5865f2u);
         hit_add(x0 + 1, y, bw - 2, 1, A_MENU, (u8)ids[i], 0, dg[i] ? HV_RED : HV_ACC);
     }
 }
@@ -3956,7 +4019,10 @@ static char sh_t[24][80];
 static const char *sh_names[25];
 static uintptr_t sh_ids[24];
 static int sh_n;
-static const char *const SH_MODES[] = { "720p 30 к/с, 1,8 Мбит/с", "720p 30 к/с, экономный поток 1 Мбит/с" };
+/* поле «КАЧЕСТВО»: индексы - SHARE_Q_* (share.h). Без Nitro (premium_type 0 и 3) пункт 1080p виден, но неактивен:
+ * серым, с подсказкой, «Начать трансляцию» на нём отказывает (как у Discord: Full HD - Nitro Classic и Nitro) */
+static const char *const SH_MODES[SHARE_Q_N] = { "720p 30 к/с, 1,8 Мбит/с", "720p 30 к/с, экономный поток 1 Мбит/с", "1080p 30 к/с, 4 Мбит/с (Nitro)" };
+static const char *const SH_MODES_NN[SHARE_Q_N] = { "720p 30 к/с, 1,8 Мбит/с", "720p 30 к/с, экономный поток 1 Мбит/с", "1080p 30 к/с - нужен Nitro" };
 static void share_ui_stop(const char *why) {
     if (!sh_running) return;
     golive_stop();
@@ -4617,6 +4683,8 @@ static void tab_close(int i) {
     if (was == S.open_ch && TB.n) tab_go(i < TB.n ? i : TB.n - 1);
     U.dirty = true;
 }
+void ui_tabs_test_only_open(void);               /* selftest: вкладки — только открытый канал (после проверок со щелчками) */
+void ui_tabs_test_only_open(void) { TB.n = 0; if (S.open_ch) tab_add(S.open_ch); U.dirty = true; }
 /* Полоса вкладок в шапке (когда их две и больше): «#имя x»; выбранная — подсвечена. */
 static void draw_tabs(int x0, int x1) {
     int x = x0;
@@ -6577,11 +6645,12 @@ static const char *guild_description(u64 g) { (void)g; return ""; }
 
 enum { FF_TEXT, FF_CHOICE, FF_TOGGLE, FF_TRI, FF_INFO };
 enum { FM_NONE, FM_ADDSRV, FM_GCREATE, FM_JOIN, FM_JOINCARD, FM_INVITE, FM_GSET, FM_GDELETE, FM_LEAVE, FM_CHCREATE,
-       FM_CATCREATE, FM_CHEDIT, FM_CHDELETE, FM_PERMS, FM_ADDFRIEND, FM_THREAD, FM_ALERTS, FM_FILTER, FM_VSTATUS, FM_TRENAME, FM_FPOST, FM_GRENAME, FM_MEPROF, FM_FALT, FM_MOD, FM_STATUS, FM_NOTE, FM_SHARE, FM_CAM };
+       FM_CATCREATE, FM_CHEDIT, FM_CHDELETE, FM_PERMS, FM_ADDFRIEND, FM_THREAD, FM_ALERTS, FM_FILTER, FM_VSTATUS, FM_TRENAME, FM_FPOST, FM_GRENAME, FM_MEPROF, FM_FALT, FM_MOD, FM_STATUS, FM_NOTE, FM_SHARE, FM_CAM, FM_FRENAME, FM_FNEW };
 enum { FB_OK = 1, FB_CANCEL, FB_X1, FB_X2, FB_RETRY };     /* кнопки формы (sub у A_FORMB) */
 /* буфер поля — в куче на время окна: лимит поля в символах x 4 байта (тема 1024 символа целиком), иначе 256 */
 static void utf8_cpy(char *d, size_t n, const char *s);
-typedef struct { u8 kind; const char *label; char *val; size_t cap; int ch, nch; const char *const *chs; u32 oh; int och; int maxc; } FField;
+typedef struct { u8 kind; const char *label; char *val; size_t cap; int ch, nch; const char *const *chs; u32 oh; int och; int maxc;
+                 u32 dis; } FField;                /* dis: биты недоступных пунктов FF_CHOICE (видны серым) */
 static struct {
     int id, nf, foc;
     bool loading;                                /* значения ещё грузятся: поля не заполнены, «Сохранить» недоступно */
@@ -6666,6 +6735,7 @@ static void perms_load(void) {
 }
 static u64 fm_mid;                               /* «Создать ветку»: из какого сообщения */
 static u64 fm_note_uid;                          /* №100: чья заметка в форме */
+static u64 fm_nf_src;                            /* «Новая папка»: перетаскиваемый сервер (FM.gid - сервер-цель) */
 static const char *const ST_CH[] = { "В сети", "Не активен", "Не беспокоить", "Невидимый" };
 static const char *const ST_DUR[] = { "бессрочно", "15 минут", "1 час", "8 часов", "24 часа", "3 дня" };
 static const int ST_DUR_MIN[] = { 0, 15, 60, 480, 1440, 4320 };
@@ -6821,7 +6891,7 @@ static void fm_open(int id, u64 gid, u64 cid) {
         sh_names[sh_n] = "Весь экран";
         snprintf(FM.title, sizeof FM.title, "%s", TR("Демонстрация экрана"));
 #ifdef _WIN32
-        snprintf(FM.sub, sizeof FM.sub, "%s", TR("Эфир 1280x720, 30 к/с. Окно: видно только оно, даже под другими окнами; свёрнутое - зрители видят последний кадр. Весь экран: видно всё. Astra DS в эфир не попадает, включится режим стримера."));
+        snprintf(FM.sub, sizeof FM.sub, "%s", TR("Эфир 720p, с Nitro - и 1080p, 30 к/с. Окно: видно только оно, даже под другими окнами; свёрнутое - зрители видят последний кадр. Весь экран: видно всё. Astra DS в эфир не попадает, включится режим стримера."));
 #else
         if (share_wayland()) {                   /* Wayland: экран или окно выбирается в системном окне компоновщика */
             sh_n = 0;
@@ -6831,7 +6901,12 @@ static void fm_open(int id, u64 gid, u64 cid) {
         snprintf(FM.sub, sizeof FM.sub, "%s", TR("Внимание: в X11 при показе всего экрана видны все окна, в том числе это."));
 #endif
         fm_choice(fm_add(FF_CHOICE, "ИСТОЧНИК", NULL), sh_names, sh_n + 1, 0);
-        fm_choice(fm_add(FF_CHOICE, "КАЧЕСТВО", NULL), SH_MODES, 2, 0);
+        {
+            bool nitro = share_quality_nitro(S.me_premium);
+            FField *qf = fm_add(FF_CHOICE, "КАЧЕСТВО", NULL);
+            fm_choice(qf, nitro ? SH_MODES : SH_MODES_NN, SHARE_Q_N, SHARE_Q_720);
+            if (!nitro) qf->dis = 1u << SHARE_Q_1080;
+        }
         fm_add(FF_TOGGLE, "Транслировать звук", NULL)->ch = 1;   /* окно — звук его программы; экран — всё, кроме Astra DS */
         fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Начать трансляцию"), FB_OK, 1);
         break;
@@ -6862,6 +6937,25 @@ static void fm_open(int id, u64 gid, u64 cid) {
         fm_add(FF_TEXT, id == FM_TRENAME ? TR("НАЗВАНИЕ ВЕТКИ") : TR("НАЗВАНИЕ ГРУППЫ"), c && c->name ? c->name : "");
         fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Сохранить"), FB_OK, 1);
         break;
+    case FM_FRENAME: {                           /* №2 папка серверов: gid — её сервер */
+        char nm[FOLDER_NAME_MAX * 4 + 1];
+        guild_folder_name(gid, nm, sizeof nm);
+        snprintf(FM.title, sizeof FM.title, TR("Переименовать папку"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Пусто - папка без названия. Не длиннее %d символов."), FOLDER_NAME_MAX);
+        fm_set(fm_add(FF_TEXT, "НАЗВАНИЕ ПАПКИ", NULL), nm);
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Сохранить"), FB_OK, 1);
+        break;
+    }
+    case FM_FNEW: {                              /* сервер брошен на сервер: gid - цель, fm_nf_src - перетаскиваемый */
+        Guild *gs = guild_find(fm_nf_src);
+        snprintf(FM.title, sizeof FM.title, TR("Новая папка"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Папка из серверов %s и %s. Название можно не вводить (до %d символов)."),
+                 g && g->name ? g->name : "?", gs && gs->name ? gs->name : "?", FOLDER_NAME_MAX);
+        fm_add(FF_TEXT, "НАЗВАНИЕ ПАПКИ", "");
+        fm_add(FF_TOGGLE, "Не беспокоить", NULL);   /* заглушить все серверы новой папки */
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Создать"), FB_OK, 1);
+        break;
+    }
     case FM_FPOST:
         snprintf(FM.title, sizeof FM.title, TR("Новый пост в %s"), lab);
         fm_add(FF_TEXT, "НАЗВАНИЕ ПОСТА", "");
@@ -7116,7 +7210,8 @@ static void draw_form(int W, int H) {
         g_pill(x - 1, y, iw + 2, C_RAIL);
         if (f->kind == FF_CHOICE) {
             g_text(x, y, "<", 1, C_TEXT, AT_B);
-            g_ctext(x + 2, y, iw - 4, f->nch ? tr(f->chs[f->ch]) : "", foc ? C_WHITE : C_TEXT, AT_B);
+            bool off = f->ch >= 0 && f->ch < 32 && (f->dis >> f->ch & 1);   /* недоступный пункт: серым, без жирного */
+            g_ctext(x + 2, y, iw - 4, f->nch ? tr(f->chs[f->ch]) : "", off ? C_MUTED : foc ? C_WHITE : C_TEXT, off ? 0 : AT_B);
             g_text(x + iw - 1, y, ">", 1, C_TEXT, AT_B);
             hit_add(x - 1, y, 3, 1, A_FORMF, 4, i, HV_UL);
             hit_add(x + iw - 2, y, 3, 1, A_FORMF, 5, i, HV_UL);
@@ -7467,16 +7562,452 @@ static void draw_search(int x, int w, int H) {
  * Значок с картинкой — квадрат из img.c (в окне поверх — мелкая сетка, полосой подряд идущих значков);
  * без картинки — сокращение названия в скобках, как на эталоне: [CS] [M] [GT]. */
 #define RAIL_W 10
-/* №2: развёрнутые папки (по id) — только в памяти */
+/* №2: развёрнутые папки (fold_id) — только в памяти. Папка без id — по её первому серверу, а не по номеру
+ * записи: номера сдвигаются при любой перестановке (и при fd_materialize новых серверов сверху), и раскрытой
+ * оказывалась бы соседняя папка. */
 static i64 fold_open_ids[16];
+static i64 fold_id(const GuildFolder *fd, int k) {
+    if (fd[k].id) return fd[k].id;
+    return fd[k].n ? -(i64)(fd[k].gids[0] & 0x7FFFFFFFFFFFFFFFull) : 0;
+}
 static bool folder_open(i64 id) { for (int i = 0; i < 16; i++) if (fold_open_ids[i] == id && id) return true; return false; }
 static void folder_toggle(int k) {
     const GuildFolder *fd = NULL;
     int n = guild_folders(&fd);
     if (k < 0 || k >= n) return;
-    i64 id = fd[k].id ? fd[k].id : -(i64)(k + 1);
+    i64 id = fold_id(fd, k);
+    if (!id) return;
     for (int i = 0; i < 16; i++) if (fold_open_ids[i] == id) { fold_open_ids[i] = 0; return; }
     for (int i = 0; i < 16; i++) if (!fold_open_ids[i]) { fold_open_ids[i] = id; return; }
+}
+/* Клавиатура: курсор на плитке папки (fold_id; 0 — курсор на выбранном сервере). Курсор на папке сервер не
+ * меняет: Enter раскрывает и сворачивает, m — меню папки, Alt+Up/Down — двигает папку целиком. */
+static i64 rail_fcur;
+static int fold_by_id(i64 id) {                  /* номер папки по fold_id, -1 — нет */
+    const GuildFolder *fd = NULL;
+    int n = guild_folders(&fd);
+    for (int k = 0; k < n && id; k++) if (fold_id(fd, k) == id && (fd[k].id || fd[k].n > 1)) return k;
+    return -1;
+}
+
+/* ---- №2 плитка свёрнутой папки, как в Discord: сетка 2x2 уменьшенных значков первых до 4 серверов на фоне
+ * цвета папки; пустые клетки (1-3 сервера) — просто фон. Без значка — буквы, как на обычной плитке.
+ * Раскладка для масштаба K (1 — обычные клетки 6x3, 2..4 — мелкая сетка 6K x 3K): значок 2K x K (квадрат),
+ * остаток делят поля и промежуток. K=1: значки 2x1 по углам плитки; K=4: 8x4, поля 2 и 1, промежуток 4 и 2. */
+typedef struct { int qw, qh, mx, my, gx, gy; } FLay;
+static FLay fold_lay(int K) {
+    FLay l;
+    l.qh = K; l.qw = 2 * K;
+    int rw = 6 * K - 2 * l.qw, rh = 3 * K - 2 * l.qh;
+    l.mx = rw / 4; l.gx = rw - 2 * l.mx;
+    l.my = rh / 4; l.gy = rh - 2 * l.my;
+    return l;
+}
+static u32 fold_color(const GuildFolder *f) { return f->has_color && f->color ? f->color : 0x5865f2u; }
+static u32 fold_bg(const GuildFolder *f, bool open) { return mix(fold_color(f), C_RAIL, open ? 170 : 120); }
+static int fold_firsts(const GuildFolder *f, const Guild **g4) {   /* первые до 4 серверов папки, что есть в store */
+    int n = 0;
+    for (int q = 0; q < f->n && n < 4; q++) { const Guild *g = guild_find(f->gids[q]); if (g) g4[n++] = g; }
+    return n;
+}
+/* Буквы сервера не шире maxc клеток (обычная сетка: как на плитке, обрезано). */
+static void abbr_cut(const char *name, char *out, size_t n, int maxc) {
+    char a[32];
+    abbr(name, a, sizeof a);
+    size_t o = 0;
+    int cells = 0;
+    for (const char *p = a; *p; ) {
+        u32 c;
+        int k = utf8_dec(p, &c), w = shown_w(c);
+        if (cells + w > maxc || o + (size_t)k + 1 > n) break;
+        memcpy(out + o, p, (size_t)k);
+        o += (size_t)k; cells += w; p += k;
+    }
+    out[o] = 0;
+}
+/* Буквы сервера для мелкой сетки: там только ASCII — кириллица латиницей по первой букве (Ш -> S). */
+static void abbr_ascii(const char *name, char *out, int maxc) {
+    static const char CYR[] = "ABVGDEZZIJKLMNOPRSTUFHCCSS'Y'EUY";   /* А..Я */
+    char a[32];
+    abbr(name, a, sizeof a);
+    int o = 0;
+    for (const char *p = a; *p && o < maxc; ) {
+        u32 c;
+        p += utf8_dec(p, &c);
+        char ch = '?';
+        if (c >= 0x21 && c < 0x7F) ch = (char)c;
+        else if (c >= 0x410 && c <= 0x42F) ch = CYR[c - 0x410];
+        else if (c >= 0x430 && c <= 0x44F) { ch = CYR[c - 0x430]; if (ch >= 'A' && ch <= 'Z') ch = (char)(ch + 32); }
+        else if (c == 0x401) ch = 'E';
+        else if (c == 0x451) ch = 'e';
+        if (ch == '\'') continue;
+        out[o++] = ch;
+    }
+    if (!o) out[o++] = '?';
+    out[o] = 0;
+}
+/* Буквы мини-значка в мелкой сетке: шрифт 3x4 «пикселя» (пиксель — мелкая клетка-пробел цвета букв), чтобы
+ * буквы были размером с обычный текст, а не в 4 раза мельче. Строка глифа — 4 цифры (строки сверху вниз),
+ * цифра — биты 4 (слева), 2, 1 (справа). Строчные — как прописные, Ё — как Е; нет глифа — '?'. */
+static const char *mini_glyph(u32 c) {
+    static const char *const DIG[10] = { "7557", "2627", "6127", "7317", "5571", "7616", "4757", "7122", "7757", "7571" };
+    static const char *const LAT[26] = { "2575", "6765", "7447", "6556", "7647", "7644", "7457", "5755", "7227", "1157", "5665",
+                                         "4447", "5775", "6555", "2552", "7574", "2553", "7565", "3416", "7222", "5557", "5552",
+                                         "5577", "5225", "5522", "7127" };
+    static const char *const CYR[32] = { "2575", "7476", "6765", "7444", "2557", "7647", "5275", "6136", "5765", "2565", "5665",
+                                         "3555", "5775", "5755", "2552", "7555", "7574", "7447", "7222", "5524", "2772", "5225",
+                                         "5573", "5571", "5577", "5577", "6376", "4655", "4476", "7137", "5775", "3535" };
+    if (c >= '0' && c <= '9') return DIG[c - '0'];
+    if (c >= 'a' && c <= 'z') c -= 32;
+    if (c >= 'A' && c <= 'Z') return LAT[c - 'A'];
+    if (c >= 0x430 && c <= 0x44F) c -= 0x20;
+    if (c == 0x401 || c == 0x451) c = 0x415;
+    if (c >= 0x410 && c <= 0x42F) return CYR[c - 0x410];
+    return "6121";                               /* '?' */
+}
+static void cell_set(ImgCell *c, char ch, u32 fg, u32 bg);
+/* Буквы abbr (до двух) шрифтом 3x4 в место qw x qh мелкой сетки с клетки (x0, y0); false — место мало. */
+static bool mini_letters(const char *name, ImgCell *out, int W, int x0, int y0, int qw, int qh) {
+    if (qw < 7 || qh < 4) return false;
+    char a[32];
+    abbr_cut(name, a, sizeof a, 2);
+    u32 cs[2];
+    int n = 0;
+    for (const char *p = a; *p && n < 2; ) { u32 c; p += utf8_dec(p, &c); cs[n++] = c; }
+    int tw = n * 3 + (n - 1), tx = x0 + (qw - tw + 1) / 2, ty = y0 + (qh - 4) / 2;
+    for (int i = 0; i < n; i++) {
+        const char *g = mini_glyph(cs[i]);
+        for (int r = 0; r < 4; r++) for (int b = 0; b < 3; b++)
+            if ((g[r] - '0') >> (2 - b) & 1) cell_set(&out[(ty + r) * W + tx + i * 4 + b], ' ', C_WHITE, C_WHITE);
+    }
+    return true;
+}
+static void cell_set(ImgCell *c, char ch, u32 fg, u32 bg) {
+    c->ch = ch;
+    c->fg[0] = (u8)(fg >> 16); c->fg[1] = (u8)(fg >> 8); c->fg[2] = (u8)fg;
+    c->bg[0] = (u8)(bg >> 16); c->bg[1] = (u8)(bg >> 8); c->bg[2] = (u8)bg;
+}
+/* Плитка папки в мелкой сетке K: 6K x 3K клеток. false — какой-то значок ещё качается (слой не шлём: видны
+ * обычные клетки с серым местом под него). */
+static bool fold_compose(const GuildFolder *f, int K, ImgCell *out) {
+    FLay l = fold_lay(K);
+    int W = 6 * K, H = 3 * K;
+    u32 bg = fold_bg(f, false);
+    for (int i = 0; i < W * H; i++) cell_set(&out[i], ' ', bg, bg);
+    const Guild *g4[4];
+    int n = fold_firsts(f, g4);
+    bool ok = true;
+    ImgCell mini[2 * FINE_K * FINE_K];
+    for (int q = 0; q < n; q++) {
+        int x0 = l.mx + (q & 1) * (l.qw + l.gx), y0 = l.my + (q >> 1) * (l.qh + l.gy);
+        if (g4[q]->icon[0]) {
+            if (l.qw * l.qh > (int)(sizeof mini / sizeof *mini) || !pic_icon_mini(g4[q], W, H, l.qw, l.qh, mini)) { ok = false; continue; }
+            for (int r = 0; r < l.qh; r++) memcpy(&out[(y0 + r) * W + x0], &mini[r * l.qw], (size_t)l.qw * sizeof(ImgCell));
+            continue;
+        }
+        for (int r = 0; r < l.qh; r++) for (int i = 0; i < l.qw; i++) cell_set(&out[(y0 + r) * W + x0 + i], ' ', C_BTN2, C_BTN2);
+        if (mini_letters(g4[q]->name, out, W, x0, y0, l.qw, l.qh)) continue;   /* K=4: буквы размером с обычный текст */
+        char t[16];                              /* мельче: ASCII-буквы мелким шрифтом */
+        abbr_ascii(g4[q]->name, t, l.qw < 15 ? l.qw : 15);
+        int tl = (int)strlen(t), tx = x0 + (l.qw - tl) / 2, ty = y0 + l.qh / 2;
+        for (int i = 0; i < tl; i++) cell_set(&out[ty * W + tx + i], t[i], C_WHITE, C_BTN2);
+    }
+    return ok;
+}
+/* Подпись слоя мелкой сетки: номер папки (младшие 16 бит) и содержимое плитки (серверы, значки, буквы, цвет). */
+static u64 fold_part_id(const GuildFolder *f, int fk) {
+    const Guild *g4[4];
+    int n = fold_firsts(f, g4);
+    u32 h = 2166136261u ^ fold_color(f);
+    for (int q = 0; q < n; q++) {
+        const char *ps[2] = { g4[q]->icon, g4[q]->name ? g4[q]->name : "" };
+        h = (h ^ (u32)g4[q]->id ^ (u32)(g4[q]->id >> 32)) * 16777619u;
+        for (int j = 0; j < 2; j++) for (const char *p = ps[j]; *p; p++) h = (h ^ (u8)*p) * 16777619u;
+    }
+    return (u64)h << 16 | (u64)(fk & 0xFFFF);
+}
+static bool fold_pic(u64 id, int pw, int ph, ImgCell *dst) {   /* fine_pic: плитка папки из подписи */
+    const GuildFolder *fd = NULL;
+    int n = guild_folders(&fd), fk = (int)(id & 0xFFFF), K = pw / 6;
+    if (fk >= n || K < 2 || K > FINE_K || pw != 6 * K || ph != 3 * K || fold_part_id(&fd[fk], fk) != id) return false;
+    return fold_compose(&fd[fk], K, dst);
+}
+/* Та же плитка обычными клетками (терминал и подложка под мелкой сеткой): значки 2x1 по углам. */
+static void draw_fold_tile(int y, const GuildFolder *f) {
+    FLay l = fold_lay(1);
+    g_rect(1, y, 6, 3, fold_bg(f, false));
+    const Guild *g4[4];
+    int n = fold_firsts(f, g4), bw = 6, bh = 3;
+    if (fine_on) {                               /* в окне значок заказывается один раз — в размере мелкой сетки */
+        int K = term_subcell_scale() > FINE_K ? FINE_K : term_subcell_scale();
+        if (K >= 2) { bw = 6 * K; bh = 3 * K; }
+    }
+    for (int q = 0; q < n; q++) {
+        int x = 1 + l.mx + (q & 1) * (l.qw + l.gx), yy = y + l.my + (q >> 1) * (l.qh + l.gy);
+        ImgCell mini[2];
+        if (g4[q]->icon[0]) {
+            if (pic_icon_mini(g4[q], bw, bh, 2, 1, mini)) g_imgrow(x, yy, 2, 0, mini);
+            else g_rect(x, yy, 2, 1, C_PH);     /* качается: серое место */
+            continue;
+        }
+        char t[16];
+        abbr_cut(g4[q]->name, t, sizeof t, 2);
+        g_rect(x, yy, 2, 1, C_BTN2);
+        g_ctext(x, yy, 2, t, C_WHITE, AT_B);
+    }
+}
+/* selftest: плитка папки fk в мелкой сетке K (6K x 3K клеток) и её фон; раскрыта ли папка */
+bool ui_fold_tile(int fk, int K, ImgCell *out, u32 *bg);
+bool ui_fold_tile(int fk, int K, ImgCell *out, u32 *bg) {
+    const GuildFolder *fd = NULL;
+    int n = guild_folders(&fd);
+    if (fk < 0 || fk >= n || K < 1 || K > FINE_K) return false;
+    *bg = fold_bg(&fd[fk], false);
+    return fold_compose(&fd[fk], K, out);
+}
+void ui_fold_close_all(void);                    /* selftest: все папки свёрнуты */
+void ui_fold_close_all(void) { memset(fold_open_ids, 0, sizeof fold_open_ids); rail_fcur = 0; }
+bool ui_fold_open(int fk);
+bool ui_fold_open(int fk) {
+    const GuildFolder *fd = NULL;
+    int n = guild_folders(&fd);
+    return fk >= 0 && fk < n && folder_open(fold_id(fd, fk));
+}
+/* Подсказка над папкой: её название, без названия — серверы через запятую (как в Discord). */
+static void fold_title(int fk, char *out, size_t n) {
+    const GuildFolder *fd = NULL;
+    int nf = guild_folders(&fd);
+    out[0] = 0;
+    if (fk < 0 || fk >= nf) return;
+    if (fd[fk].name && *fd[fk].name) { snprintf(out, n, "%s", fd[fk].name); return; }
+    size_t o = 0;
+    for (int q = 0; q < fd[fk].n && o + 8 < n; q++) {
+        const Guild *g = guild_find(fd[fk].gids[q]);
+        if (!g) continue;
+        int w = snprintf(out + o, n - o, "%s%s", o ? ", " : "", g->name ? g->name : "?");
+        if (w < 0 || (size_t)w >= n - o) { o = n - 1; break; }
+        o += (size_t)w;
+    }
+    if (o >= n - 1 && n > 4) {                   /* не влезло: обрезать по символу и «...» */
+        size_t k = n - 4;
+        while (k && ((unsigned char)out[k] & 0xC0) == 0x80) k--;
+        memcpy(out + k, "...", 4);
+    }
+}
+/* Элементы полосы в порядке показа: kind 0 — сервер (idx в S.guilds + 1; fk >= 0 — в развёрнутой папке),
+ * 1 — плитка папки fk; gid — сервер (у плитки — первый из её серверов). */
+typedef struct { short kind, idx, fk; u64 gid; } RItem;
+static int rail_items(RItem **out) {
+    const GuildFolder *fd = NULL;
+    int nfd = guild_folders(&fd);
+    RailEnt *re;
+    int nre = guild_rail(&re), ni = 0;
+    RItem *it = xmalloc((size_t)(2 * nre + 1) * sizeof(RItem));
+    for (int i = 0; i < nre; i++) {
+        Guild *g = guild_find(re[i].gid);
+        int fk = re[i].fk;
+        if (!g) continue;
+        short idx = (short)(g - S.guilds + 1);
+        if (fk < 0 || fk >= nfd) { it[ni++] = (RItem){ 0, idx, -1, re[i].gid }; continue; }
+        if (!i || re[i - 1].fk != fk) it[ni++] = (RItem){ 1, 0, (short)fk, re[i].gid };
+        if (folder_open(fold_id(fd, fk))) it[ni++] = (RItem){ 0, idx, (short)fk, re[i].gid };
+    }
+    free(re);
+    *out = it;
+    return ni;
+}
+/* Что нарисовано на полосе (для перетаскивания): верхняя строка значка и элемент. */
+#define RH_MAX 160
+static struct { int y; RItem it; } RH[RH_MAX];
+static int nrh;
+/* Перетаскивание сервера (или папки целиком) мышью: нажатие на значке — «взят», движение с зажатой
+ * левой — тащим, отпускание над полосой — guild_move. */
+static struct { bool armed, on, whole, toggled; u64 gid; int fk, x0, y0, x, y; } GD;
+typedef struct { int how; u64 ref; bool top; int line_y, box_y; } RailDrop;
+static bool fold_has(int fk, u64 g) {            /* сервер g в папке fk */
+    const GuildFolder *fd = NULL;
+    int n = guild_folders(&fd);
+    for (int q = 0; fk >= 0 && fk < n && q < fd[fk].n; q++) if (fd[fk].gids[q] == g) return true;
+    return false;
+}
+static bool fold_last(int fk, u64 g) {           /* g — последний (из пришедших) сервер папки fk */
+    const GuildFolder *fd = NULL;
+    int n = guild_folders(&fd);
+    if (fk < 0 || fk >= n) return false;
+    for (int q = fd[fk].n - 1; q >= 0; q--) if (guild_find(fd[fk].gids[q])) return fd[fk].gids[q] == g;
+    return false;
+}
+/* Куда ляжет сервер (или папка целиком) при отпускании над (x, y). Из раскрытой папки вынимают: вверх — на
+ * плитку этой же папки (сервер встаёт перед папкой), вниз — в промежуток под её последним сервером (после папки),
+ * или на любое место вне папки. Черта внутри папки — короткая (по значку), черта общего списка — во всю колонку. */
+static bool rail_target(int x, int y, RailDrop *d) {
+    if (x < 0 || x >= RAIL_W || !nrh) return false;
+    memset(d, 0, sizeof *d);
+    d->line_y = d->box_y = -1;
+    const int step = 4;
+    if (y < RH[0].y) { d->how = GM_BEFORE; d->ref = RH[0].it.gid; d->top = true; d->line_y = RH[0].y - 1; return true; }
+    int k = -1;
+    for (int i = 0; i < nrh; i++) if (y >= RH[i].y && y < RH[i].y + step) k = i;
+    if (k < 0) { d->how = GM_AFTER; d->ref = RH[nrh - 1].it.gid; d->top = true; d->line_y = RH[nrh - 1].y + 3; return true; }
+    const RItem *t = &RH[k].it;
+    int r = y - RH[k].y, y0 = RH[k].y;
+    d->ref = t->gid;
+    if (t->kind == 1) {                         /* плитка папки */
+        bool open = k + 1 < nrh && RH[k + 1].it.kind == 0 && RH[k + 1].it.fk == t->fk;
+        bool own = !GD.whole && fold_has(t->fk, GD.gid);   /* свой сервер на плитку своей папки — вынуть наверх */
+        if (r == 0 || (r == 1 && (GD.whole || own))) { d->how = GM_BEFORE; d->top = true; d->line_y = y0 - 1; }
+        else if (r == 1) { d->how = GM_INTO; d->box_y = y0; }
+        else if (open && !GD.whole) { d->how = GM_BEFORE; d->top = false; d->line_y = y0 + 3; }   /* в начало папки */
+        else { d->how = GM_AFTER; d->top = true; d->line_y = y0 + 3; }
+    } else if (t->fk < 0) {                     /* сервер верхнего уровня */
+        /* середина плитки - новая папка (рамка; при отпускании - окно «Новая папка»), края - перестановка */
+        if (r == 0 || (r == 1 && (GD.whole || t->gid == GD.gid))) { d->how = GM_BEFORE; d->top = true; d->line_y = y0 - 1; }
+        else if (r == 1) { d->how = GM_NEWFOLDER; d->box_y = y0; }
+        else { d->how = GM_AFTER; d->top = true; d->line_y = y0 + 3; }
+    } else {                                    /* сервер в развёрнутой папке */
+        d->top = GD.whole;
+        if (r == 0) { d->how = GM_BEFORE; d->line_y = y0 - 1; }
+        else { d->how = GM_AFTER; d->line_y = y0 + 3; }
+        if (!GD.whole && r == 3 && fold_last(t->fk, t->gid)) d->top = true;   /* промежуток под папкой — после неё */
+    }
+    return true;
+}
+static void rail_move(u64 src, bool whole, int how, u64 ref, bool top) {
+    char err[160];
+    if (!guild_move(src, whole, how, ref, top, err, sizeof err) && err[0]) ui_notice("%s", err);
+    U.dirty = true;
+}
+static void rail_arm(const Key *k, u64 gid, bool whole, int fk, bool toggled) {
+    memset(&GD, 0, sizeof GD);
+    if (!gid) return;
+    GD.armed = true;
+    GD.gid = gid; GD.whole = whole; GD.fk = fk; GD.toggled = toggled;
+    GD.x0 = GD.x = k->x; GD.y0 = GD.y = k->y;
+}
+static void rail_drag(const Key *k) {
+    if (!GD.on && (k->y != GD.y0 || k->x - GD.x0 > 1 || GD.x0 - k->x > 1)) {
+        GD.on = true;
+        if (GD.toggled) { folder_toggle(GD.fk); GD.toggled = false; }   /* папку тащат, а не открывают */
+    }
+    GD.x = k->x; GD.y = k->y;
+    U.dirty = true;
+}
+static void rail_release(const Key *k) {
+    RailDrop d;
+    if (GD.on && rail_target(k->x, k->y, &d)) {
+        if (d.how == GM_NEWFOLDER) {            /* папка - только после подтверждения в окне */
+            if (guild_find(GD.gid) && guild_find(d.ref) && GD.gid != d.ref) { fm_nf_src = GD.gid; fm_open(FM_FNEW, d.ref, 0); }
+        } else rail_move(GD.gid, GD.whole, d.how, d.ref, d.top);
+    }
+    memset(&GD, 0, sizeof GD);
+    U.dirty = true;
+}
+/* Где курсор клавиатуры на полосе: элемент rail_items (плитка папки с курсором, выбранный сервер или плитка
+ * свёрнутой папки, где он); -1 — «домой». */
+static int rail_cur_pos(const RItem *it, int ni) {
+    const GuildFolder *fd = NULL;
+    guild_folders(&fd);
+    if (rail_fcur) for (int i = 0; i < ni; i++) if (it[i].kind == 1 && fold_id(fd, it[i].fk) == rail_fcur) return i;
+    for (int i = 0; i < ni; i++) if (it[i].kind == 0 && it[i].idx == U.sel_guild && U.sel_guild) return i;
+    if (U.sel_guild >= 1 && U.sel_guild <= S.nguilds)
+        for (int i = 0; i < ni; i++) if (it[i].kind == 1) for (int q = 0; q < fd[it[i].fk].n; q++) if (fd[it[i].fk].gids[q] == S.guilds[U.sel_guild - 1].id) return i;
+    return -1;
+}
+/* Up/Down в колонке серверов — по тому, что видно на полосе: серверы, плитки папок (курсор на папке сервер не
+ * меняет), серверы раскрытых папок; Home/End — края. */
+static void rail_step(int d) {
+    RItem *it;
+    int ni = rail_items(&it), pos = rail_cur_pos(it, ni);
+    int np = d == -2 ? -1 : d == 2 ? ni - 1 : pos + d;
+    if (np >= ni) np = ni - 1;
+    if (np < -1) np = -1;
+    if (np >= 0 && it[np].kind == 1) {
+        const GuildFolder *fd = NULL;
+        guild_folders(&fd);
+        rail_fcur = fold_id(fd, it[np].fk);
+        U.dirty = true;
+    } else select_guild(np >= 0 ? it[np].idx : 0);
+    free(it);
+}
+/* Enter / пробел на папке — раскрыть или свернуть; Right — раскрыть, Left — свернуть (с сервера раскрытой
+ * папки — свернуть её, курсор на плитку). true — клавиша съедена. */
+static bool rail_fold_key(int code) {
+    int k = fold_by_id(rail_fcur);
+    const GuildFolder *fd = NULL;
+    guild_folders(&fd);
+    if (k < 0 && code == K_LEFT && U.sel_guild >= 1 && U.sel_guild <= S.nguilds) {
+        RItem *it;
+        int ni = rail_items(&it), fk = -1;
+        for (int i = 0; i < ni; i++) if (it[i].kind == 0 && it[i].idx == U.sel_guild && it[i].fk >= 0) fk = it[i].fk;
+        free(it);
+        if (fk < 0) return false;
+        folder_toggle(fk);
+        rail_fcur = fold_id(fd, fk);
+        return true;
+    }
+    if (k < 0) return false;
+    bool open = folder_open(rail_fcur);
+    if (code == K_ENTER || (code == K_RIGHT && !open) || (code == K_LEFT && open)) folder_toggle(k);
+    return code != K_LEFT || open;
+}
+/* Alt+Up/Down в колонке серверов: сдвинуть выбранный сервер (в свёрнутой папке — папку целиком) на шаг,
+ * заходя в развёрнутые папки и выходя из них на краях, как при перетаскивании. */
+static void rail_key_move(int dir) {
+    int fcur = fold_by_id(rail_fcur);
+    if (fcur < 0 && (U.sel_guild < 1 || U.sel_guild > S.nguilds)) return;
+    u64 src = fcur < 0 ? S.guilds[U.sel_guild - 1].id : 0;
+    RItem *it;
+    int ni = rail_items(&it), c = -1;
+    bool whole = false;
+    if (fcur >= 0) {                            /* курсор на папке: двигаем её целиком */
+        for (int i = 0; i < ni; i++) if (it[i].kind == 1 && it[i].fk == fcur) { c = i; src = it[i].gid; whole = true; }
+    } else for (int i = 0; i < ni; i++) if (it[i].kind == 0 && it[i].gid == src) c = i;
+    if (c < 0 && fcur < 0) {                    /* в свёрнутой папке: двигаем папку */
+        const GuildFolder *fd = NULL;
+        guild_folders(&fd);
+        for (int i = 0; i < ni && c < 0; i++) if (it[i].kind == 1) for (int q = 0; q < fd[it[i].fk].n; q++) if (fd[it[i].fk].gids[q] == src) c = i;
+        whole = true;
+    }
+    if (c < 0) { free(it); return; }
+    int fk = it[c].fk;
+    if (whole) {
+        if (dir < 0 && c > 0) rail_move(src, true, GM_BEFORE, it[c - 1].gid, true);
+        else if (dir > 0) {
+            int n = c + 1;
+            while (n < ni && it[n].kind == 0 && it[n].fk == fk) n++;
+            if (n < ni) rail_move(src, true, GM_AFTER, it[n].gid, true);
+        }
+    } else if (fk < 0) {                        /* сервер верхнего уровня */
+        if (dir < 0 && c > 0) {
+            const RItem *p = &it[c - 1];
+            if (p->kind == 0 && p->fk >= 0) rail_move(src, false, GM_AFTER, p->gid, false);   /* в конец развёрнутой папки */
+            else rail_move(src, false, GM_BEFORE, p->gid, true);
+        } else if (dir > 0 && c + 1 < ni) {
+            const RItem *n = &it[c + 1];
+            bool open = n->kind == 1 && c + 2 < ni && it[c + 2].kind == 0 && it[c + 2].fk == n->fk;
+            if (open) rail_move(src, false, GM_BEFORE, it[c + 2].gid, false);   /* в начало развёрнутой папки */
+            else rail_move(src, false, GM_AFTER, n->gid, true);
+        }
+    } else {                                    /* сервер в развёрнутой папке */
+        u64 other = 0;                          /* другой сервер той же папки */
+        for (int i = 0; i < ni; i++) if (i != c && it[i].kind == 0 && it[i].fk == fk) { other = it[i].gid; break; }
+        bool first = it[c - 1].kind == 1, last = c + 1 >= ni || !(it[c + 1].kind == 0 && it[c + 1].fk == fk);
+        if (dir < 0) {
+            if (!first) rail_move(src, false, GM_BEFORE, it[c - 1].gid, false);
+            else if (other) rail_move(src, false, GM_BEFORE, other, true);   /* выйти из папки вверх */
+            else if (c >= 2) rail_move(src, false, GM_AFTER, it[c - 2].gid, true);
+        } else {
+            if (!last) rail_move(src, false, GM_AFTER, it[c + 1].gid, false);
+            else if (other) rail_move(src, false, GM_AFTER, other, true);    /* выйти из папки вниз */
+            else if (c + 1 < ni) rail_move(src, false, GM_BEFORE, it[c + 1].gid, true);
+        }
+    }
+    free(it);
+    if (fcur >= 0) {                            /* папка без id: её номер сменился — курсор следом */
+        const GuildFolder *fd = NULL;
+        int n = guild_folders(&fd);
+        for (int k = 0; k < n; k++) for (int q = 0; q < fd[k].n; q++) if (fd[k].gids[q] == src) rail_fcur = fold_id(fd, k);
+    }
 }
 static void draw_rail(int H) {
     g_rect(0, 0, RAIL_W, H, C_RAIL);
@@ -7485,39 +8016,24 @@ static void draw_rail(int H) {
     int top = 6, step = 4;
     int vg = (H - top - step) / step;            /* значков помещается (3 строки + промежуток), снизу «+» */
     if (vg < 1) vg = 1;
-    /* №2: порядок полосы — серверы по порядку store; сервер из папки показывается в месте папки: свёрнутая —
-     * одна плитка папки, развёрнутая — шапка папки и её серверы на подложке цвета папки */
+    /* №2: порядок полосы — как в Discord (guild_rail: новые сверху, дальше guild_folders); папка свёрнутая —
+     * одна плитка, развёрнутая — шапка и её серверы на подложке цвета папки */
     const GuildFolder *fd = NULL;
-    int nfd = guild_folders(&fd);
-    typedef struct { short kind, idx, fk; } RItem;   /* kind 0 — сервер (idx в S.guilds + 1), 1 — шапка папки fk */
-    int cap = S.nguilds + nfd + 1;              /* ревью 15 К1: каждый сервер — не больше одного раза, запись — в пределах cap */
-    RItem *it = xmalloc((size_t)cap * sizeof(RItem));
-    int ni = 0;
-    bool *done = xcalloc((size_t)(nfd > 0 ? nfd : 1), sizeof(bool));
-    bool *shown = xcalloc((size_t)(S.nguilds > 0 ? S.nguilds : 1), sizeof(bool));
-    for (int gi = 0; gi < S.nguilds; gi++) {
-        int fk = -1;
-        for (int k = 0; k < nfd && fk < 0; k++)
-            if (fd[k].n > 1 || fd[k].id) for (int q = 0; q < fd[k].n; q++) if (fd[k].gids[q] == S.guilds[gi].id) fk = k;
-        if (fk < 0) { if (!shown[gi] && ni < cap) { shown[gi] = true; it[ni++] = (RItem){ 0, (short)(gi + 1), -1 }; } continue; }
-        if (done[fk]) continue;
-        done[fk] = true;
-        if (ni < cap) it[ni++] = (RItem){ 1, 0, (short)fk };
-        if (folder_open(fd[fk].id ? fd[fk].id : -(i64)(fk + 1)))
-            for (int q = 0; q < fd[fk].n; q++)
-                for (int gj = 0; gj < S.nguilds; gj++)
-                    if (S.guilds[gj].id == fd[fk].gids[q] && !shown[gj] && ni < cap) { shown[gj] = true; it[ni++] = (RItem){ 0, (short)(gj + 1), (short)fk }; }
-    }
-    free(done);
-    free(shown);
+    guild_folders(&fd);
+    if (rail_fcur && fold_by_id(rail_fcur) < 0) rail_fcur = 0;   /* папки с курсором больше нет */
+    RItem *it;
+    int ni = rail_items(&it);
+    nrh = 0;
     int selpos = -1;
     for (int i = 0; i < ni; i++) if (it[i].kind == 0 && it[i].idx == U.sel_guild) selpos = i;
     if (selpos < 0 && U.sel_guild >= 1)          /* выбранный сервер в свёрнутой папке — на её плитке */
         for (int i = 0; i < ni; i++) if (it[i].kind == 1) for (int q = 0; q < fd[it[i].fk].n; q++)
             if (U.sel_guild - 1 < S.nguilds && fd[it[i].fk].gids[q] == S.guilds[U.sel_guild - 1].id) selpos = i;
-    if (!U.guild_free && selpos >= 0) {
-        if (selpos < U.guild_scroll) U.guild_scroll = selpos;
-        if (selpos >= U.guild_scroll + vg) U.guild_scroll = selpos - vg + 1;
+    int seepos = selpos;                         /* что держать на виду: курсор на папке или выбранный сервер */
+    if (rail_fcur) for (int i = 0; i < ni; i++) if (it[i].kind == 1 && fold_id(fd, it[i].fk) == rail_fcur) seepos = i;
+    if (!U.guild_free && seepos >= 0) {
+        if (seepos < U.guild_scroll) U.guild_scroll = seepos;
+        if (seepos >= U.guild_scroll + vg) U.guild_scroll = seepos - vg + 1;
     }
     if (U.guild_scroll > ni - vg) U.guild_scroll = ni - vg;
     if (U.guild_scroll < 0) U.guild_scroll = 0;
@@ -7528,20 +8044,22 @@ static void draw_rail(int H) {
         int y = ry < 0 ? 0 : top + ry * step;
         if (pos >= ni || y + 2 >= H) break;
         last_y = y;
+        if (pos >= 0 && nrh < RH_MAX) { RH[nrh].y = y; RH[nrh].it = it[pos]; nrh++; }
         if (pos >= 0 && it[pos].kind == 1) {     /* плитка папки */
             const GuildFolder *f = &fd[it[pos].fk];
-            u32 fc = f->has_color && f->color ? f->color : 0x5865f2u;
-            bool open = folder_open(f->id ? f->id : -(i64)(it[pos].fk + 1)), fsel = pos == selpos;
+            u32 fc = fold_color(f);
+            bool open = folder_open(fold_id(fd, it[pos].fk)), fsel = pos == selpos;
+            bool fcur = U.focus == F_GUILDS && rail_fcur && rail_fcur == fold_id(fd, it[pos].fk);
             int ment = 0;
             bool unr = false;
             for (int q = 0; q < f->n; q++) { int mm = 0; Guild *gg = guild_find(f->gids[q]); if (gg && guild_unread(gg->id, &mm)) unr = true; ment += mm; }
-            g_rect(1, y, 6, 3, mix(fc, C_RAIL, open ? 170 : 120));
+            g_rect(1, y, 6, 3, fold_bg(f, open));
             if (open) g_ctext(1, y + 1, 6, "v", C_WHITE, AT_B);
             else {
-                char t2[8];
-                snprintf(t2, sizeof t2, "%d", f->n);
-                for (int r = 0; r < 3; r++) { g_ch(1, y + r, '[', fc, AT_B); g_ch(6, y + r, ']', fc, AT_B); }
-                g_ctext(2, y + 1, 4, t2, C_WHITE, AT_B);
+                /* мини-значки 2x2; в окне поверх — та же плитка мелкой сеткой */
+                draw_fold_tile(y, f);
+                u64 pid = fold_part_id(f, it[pos].fk);
+                for (int r = 0; r < 3; r++) strip_part(G_RAIL, 1, y + r, 6, 3, r, PK_FOLDER, pid);
                 if (fsel) g_rect(0, y, 1, 3, C_WHITE);
                 else if (unr) g_rect(0, y + 1, 1, 1, C_WHITE);
                 if (ment) {
@@ -7552,7 +8070,12 @@ static void draw_rail(int H) {
                     g_text(RAIL_W - 1 - bw, y + 2, mb, bw, C_WHITE, AT_B);
                 }
             }
+            if (fcur) {                          /* курсор клавиатуры на папке: черта снизу и «>» слева */
+                g_fgset(1, y + 2, 6, C_WHITE, AT_B | AT_U);
+                if (!fsel) g_ch(0, y + 1, '>', C_WHITE, AT_B);
+            }
             hit_add(1, y, 6, 3, A_FOLDER, 0, it[pos].fk, HV_ICON);
+            U.hit[U.nhit - 1].tip = T_FOLDER;
             if (open) for (int r = 3; r < step && y + r < H; r++) g_rect(1, y + r, 6, 1, mix(fc, C_RAIL, 200));
             continue;
         }
@@ -7591,7 +8114,7 @@ static void draw_rail(int H) {
             for (int r = 0; r < 3; r++) { g_ch(1, y + r, '[', C_MUTED, AT_B); g_ch(6, y + r, ']', C_MUTED, AT_B); }
             g_ctext(2, y + 1, 4, lab, tc, AT_B);
         }
-        if (sel && U.focus == F_GUILDS) g_fgset(1, y + 2, 6, C_WHITE, AT_B | AT_U);
+        if (sel && U.focus == F_GUILDS && !rail_fcur) g_fgset(1, y + 2, 6, C_WHITE, AT_B | AT_U);
         /* «пилюля» слева: выбран — во всю высоту значка, непрочитанное — маленькая */
         if (sel) g_rect(0, y, 1, 3, C_WHITE);
         else if (unread) g_rect(0, y + 1, 1, 1, C_WHITE);
@@ -7606,6 +8129,13 @@ static void draw_rail(int H) {
         if (!g) U.hit[U.nhit - 1].tip = T_HOME;
     }
     free(it);
+    RailDrop dd;
+    if (GD.on && rail_target(GD.x, GD.y, &dd)) {   /* куда ляжет перетаскиваемый: черта или рамка */
+        bool inner = !dd.top && dd.how != GM_INTO;   /* место внутри папки — короткая черта по значку */
+        if (dd.line_y >= 0 && dd.line_y < H) g_rect(inner ? 2 : 0, dd.line_y, inner ? 4 : RAIL_W - 1, 1, C_WHITE);
+        /* рамка - по бокам значка (столбцы 0 и 7): поверх картинки значка (окно) скобки не видны; фон - колонки (не «пилюля», не бейдж) */
+        if (dd.box_y >= 0) for (int r = 0; r < 3 && dd.box_y + r < H; r++) { g_rect(0, dd.box_y + r, 1, 1, C_RAIL); g_rect(7, dd.box_y + r, 1, 1, C_RAIL); g_ch(0, dd.box_y + r, '[', C_WHITE, AT_B); g_ch(7, dd.box_y + r, ']', C_WHITE, AT_B); }
+    }
     /* «+» добавить сервер: серый квадрат с зелёным плюсом */
     int py = last_y + step;
     if (py + 2 < H) {
@@ -7981,6 +8511,19 @@ static void wv_step(int d) {                    /* Alt+стрелки: сосе�
     for (int i = 0; i < n; i++) if (WV.cam ? WV.sk[i] && WV.su[i] == WV.cam : !WV.sk[i] && WV.su[i] == WS.user) cur = i;
     if (n > 0) wv_pick(cur < 0 ? 0 : (cur + d + n) % n);
 }
+/* Громкость звука смотримой трансляции (отдельно от голоса стримера): d = -1/+1 — шаг 10 %, 0 — 100 %. */
+static void wv_svol(int d) {
+    u64 u = WS.user;
+    if (WV.cam || WS.phase == GW_OFF || !u) return;
+    voice_stream_volume_set(u, d ? voice_stream_volume(u) + d * 0.1f : 1.0f);
+    U.dirty = true;
+}
+static void wv_smute(void) {
+    u64 u = WS.user;
+    if (WV.cam || WS.phase == GW_OFF || !u) return;
+    voice_stream_mute_set(u, !voice_stream_muted(u));
+    U.dirty = true;
+}
 static bool wv_key(const Key *k) {
     bool alt = k->alt && !k->ctrl;
     if (k->code == K_ESC && WV.full && !WV.chat && !U.menu && !U.card_uid && !U.ep && !U.qs && !FM.id) { WV.full = false; U.full = U.dirty = true; return true; }
@@ -7989,6 +8532,13 @@ static bool wv_key(const Key *k) {
         u32 c = k->ch;
         if (c == 'w' || c == 'W' || c == 0x446 || c == 0x426) { WV.chat = !WV.chat; WV.ch = S.open_ch; WV.gd = U.sel_guild; U.full = U.dirty = true; return true; }   /* ц */
         if ((c == 'f' || c == 'F' || c == 0x430 || c == 0x410) && !WV.chat) { WV.full = !WV.full; U.full = U.dirty = true; return true; }   /* а */
+        /* звук трансляции: Alt+- / Alt+= (Alt++) — громкость, Alt+0 — 100 %, Alt+M (Alt+ь) — вкл/выкл */
+        if (!WV.cam && WS.phase != GW_OFF) {
+            if (c == '-' || c == '_') { wv_svol(-1); return true; }
+            if (c == '=' || c == '+') { wv_svol(1); return true; }
+            if (c == '0') { wv_svol(0); return true; }
+            if (c == 'm' || c == 'M' || c == 0x44C || c == 0x42C) { wv_smute(); return true; }
+        }
     }
     return false;
 }
@@ -7997,6 +8547,28 @@ static void wv_rbtn(int *right, const char *t, int style, int id, int tip) {   /
     *right -= w;
     if (g_button(*right, 0, t, w, style, id)) U.hit[U.nhit - 1].tip = (u8)tip;
     *right -= 1;
+}
+/* строка под видео: «Звук трансляции: 80 % [-10 %] [+10 %] [100 %] [Выкл. звук]     Alt+- Alt+= Alt+M» */
+static void wv_svol_row(int x, int w, int y) {
+    u64 u = WS.user;
+    bool m = voice_stream_muted(u), narrow = w < 72;
+    int pc = (int)(voice_stream_volume(u) * 100 + 0.5f), r = x + w - 1, px = x + 1;
+    char val[48];
+    if (m) snprintf(val, sizeof val, "%s (%d %%)", TR("выкл."), pc);
+    else snprintf(val, sizeof val, "%d %%", pc);
+    px += g_text(px, y, narrow ? TR("Звук:") : TR("Звук трансляции:"), r - px, C_MUTED, AT_B) + 1;
+    if (r - px > 0) px += g_text(px, y, val, r - px, m ? C_RED : C_WHITE, AT_B) + 1;
+    struct { const char *t; int id, tip; bool on; } b[] = {
+        { TR("-10 %"), B_WSV_DN, T_WSVOL, true }, { TR("+10 %"), B_WSV_UP, T_WSVOL, true },
+        { TR("100 %"), B_WSV_0, T_WSVOL, pc != 100 }, { m ? TR("Вкл. звук") : TR("Выкл. звук"), B_WSV_MUTE, T_WSMUTE, true },
+    };
+    for (int i = 0; i < 4; i++) {
+        if (!b[i].on || vw(b[i].t) + 4 > r - px) continue;
+        px += g_button(px, y, b[i].t, r - px, i == 3 && m ? 1 : 0, b[i].id) + 1;
+        U.hit[U.nhit - 1].tip = (u8)b[i].tip;
+    }
+    const char *hint = "Alt+- Alt+= Alt+M";
+    if (!narrow && r - px > vw(hint) + 2) g_rtext(r - 1, y, hint, vw(hint), C_MUTED, 0);
 }
 static void draw_watch(int x, int w, int H) {
     g_rect(x, 0, w, H, C_FEED);
@@ -8053,6 +8625,10 @@ static void draw_watch(int x, int w, int H) {
     int vx = x + 1, vy = y + 1, vwd = w - 2, vh = H - 2 - vy;
     if (vh < 1) vh = 1;
     g_rect(vx, vy, vwd, vh, 0x000000u);
+    if (!WV.cam && WS.phase != GW_OFF && WS.user) {
+        hit_add(vx, vy, vwd, vh, A_AR_WATCH, 0, 0, 0);   /* колесо над видео — громкость звука трансляции */
+        if (H - 2 > vy) wv_svol_row(x, w, H - 2);
+    }
     int cy = vy + vh / 2;
     if (WV.cam) cu_frame(vx, vy, vwd, vh, WV.cam);   /* камера крупно: окно отдаёт полный кадр под размер области */
     else if (WS.phase == GW_FAILED) {
@@ -9212,7 +9788,7 @@ static bool fine_pic(int kind, u64 id, int pw, int ph, u32 under, ImgCell *dst) 
         }
         if (fcache[i].age < fcache[lru].age) lru = i;
     }
-    bool ok = kind == PK_AVR ? pic_avatar(id, pw, ph, true, under, dst) : pic_icon(guild_find(id), pw, ph, dst);
+    bool ok = kind == PK_AVR ? pic_avatar(id, pw, ph, true, under, dst) : kind == PK_FOLDER ? fold_pic(id, pw, ph, dst) : pic_icon(guild_find(id), pw, ph, dst);
     if (!ok || n > 24 * 12 * 2) return ok;      /* качается — не запоминаем; крупное (логотип) — тоже */
     if (!fcache[lru].px || (size_t)fcache[lru].w * (size_t)fcache[lru].h < n) { free(fcache[lru].px); fcache[lru].px = xmalloc(n * sizeof(ImgCell)); }
     memcpy(fcache[lru].px, dst, n * sizeof(ImgCell));
@@ -9556,6 +10132,7 @@ static void select_guild(int idx) {
     if (idx > S.nguilds) idx = S.nguilds;
     if (idx != U.sel_guild) { search_off(); U.pick = false; }   /* результаты поиска — по прошлому серверу */
     U.sel_guild = idx;
+    rail_fcur = 0;                               /* курсор клавиатуры — на выбранном сервере */
     U.sel_row = -1;
     U.row_scroll = 0;
     U.row_free = U.guild_free = false;
@@ -10112,6 +10689,11 @@ static void fm_submit(int bid) {
     case FM_SHARE: {
         int src = FM.f[0].ch;
         uintptr_t id = src < sh_n ? sh_ids[src] : 0;
+        if (!share_quality_allowed(FM.f[1].ch, S.me_premium)) {   /* 1080p без Nitro: пункт виден, но не запускается */
+            ok = false;
+            snprintf(err, sizeof err, "%s", TR("1080p - только с Nitro: выберите 720p"));
+            break;
+        }
         VoiceStatus v5;
         voice_status(&v5);
         share_audio_enable(FM.f[2].ch != 0);
@@ -10175,6 +10757,19 @@ static void fm_submit(int bid) {
     }
     case FM_TRENAME: ok = thread_edit(FM.cid, FM.f[0].val, -1, -1, err, sizeof err); break;
     case FM_GRENAME: ok = gdm_rename(FM.cid, FM.f[0].val, err, sizeof err); break;
+    case FM_FRENAME:                             /* без изменений (false без причины) — просто закрыть */
+        ok = !fm_changed(&FM.f[0]) || guild_folder_edit(FM.gid, FM.f[0].val, FOLDER_COLOR_KEEP, err, sizeof err) || !err[0];
+        break;
+    case FM_FNEW: {
+        ok = guild_folder_create(fm_nf_src, FM.gid, FM.f[0].val, err, sizeof err);
+        if (!ok) break;
+        char nm[FOLDER_NAME_MAX * 4 + 1];
+        guild_folder_name(FM.gid, nm, sizeof nm);
+        if (nm[0]) ui_notice(TR("Папка \"%s\" создана"), nm);
+        else ui_notice(TR("Папка создана"));
+        if (FM.f[1].ch) guild_folder_mute(FM.gid, true);   /* «Не беспокоить»: заглушить каждый сервер папки (отказ - своим уведомлением) */
+        break;
+    }
     case FM_FPOST: ok = forum_post_create(FM.cid, FM.f[0].val, FM.f[1].val, err, sizeof err); if (ok) ui_notice(TR("пост опубликован")); break;
     case FM_MEPROF: ok = profile_me_set(FM.f[0].val[0] ? FM.f[0].val : NULL, FM.f[1].val[0] ? FM.f[1].val : NULL, err, sizeof err); if (ok) ui_notice(TR("профиль сохранён")); break;
     case FM_VSTATUS: ok = voice_channel_status_set(FM.cid, FM.f[0].val, err, sizeof err); break;
@@ -10218,6 +10813,35 @@ static void fm_submit(int bid) {
     if (!ok) { char *e = san(err[0] ? err : TR("не получилось"), false); snprintf(FM.err, sizeof FM.err, "%s", e); free(e); return; }
     fm_close();
 }
+#ifdef ASTRA_VIDEO
+/* Проверка окна запуска трансляции (selftest): пункт 1080p есть всегда; без Nitro (0, 3) - серый с подсказкой и
+ * «Начать» отказывает, не трогая захват; с Nitro (1, 2) - обычный. Захват здесь не запускается. */
+int ui_share_selftest(void (*check)(bool ok, const char *what)) {
+    u8 pm = S.me_premium;
+    bool run = sh_running;
+    bool ok_nn = true, ok_n = true;
+    for (int p = 0; p <= 3; p++) {
+        S.me_premium = (u8)p;
+        fm_open(FM_SHARE, 0, 0);
+        FField *qf = &FM.f[1];
+        bool nitro = p == 1 || p == 2;
+        bool shown = FM.id == FM_SHARE && qf->kind == FF_CHOICE && qf->nch == SHARE_Q_N && qf->ch == SHARE_Q_720
+                     && strstr(qf->chs[SHARE_Q_1080], "1080p") != NULL;
+        bool off = (qf->dis >> SHARE_Q_1080 & 1) != 0, hint = strstr(qf->chs[SHARE_Q_1080], "нужен Nitro") != NULL;
+        if (nitro) ok_n = ok_n && shown && !off && !hint && !qf->dis;
+        else {
+            qf->ch = SHARE_Q_1080;
+            fm_submit(FB_OK);                    /* должен отказать до share_start */
+            ok_nn = ok_nn && shown && off && hint && FM.id == FM_SHARE && strstr(FM.err, "Nitro") && sh_running == run;
+        }
+        fm_close();
+    }
+    S.me_premium = pm;
+    check(ok_nn, "трансляция: без Nitro (premium_type 0 и 3) пункт 1080p виден серым с подсказкой «нужен Nitro», «Начать» отказывает");
+    check(ok_n, "трансляция: с Nitro (premium_type 1 и 2) пункт 1080p обычный, по умолчанию 720p");
+    return 0;
+}
+#endif
 /* Клавиатура окна-формы (модально). */
 static void fm_key(const Key *k) {
     int nfoc = FM.nf + FM.nb;
@@ -10330,6 +10954,22 @@ static void vmem_action(int what) {
 }
 static void msg_action(Message *m, int what) {
     if (what >= MI_V_VOL && what <= MI_V_DEAF) { vmem_action(what); return; }
+    if (what >= MI_F_RENAME && what < MI_FC_0 + NFPAL) {   /* №2 меню папки */
+        char err[160] = "";
+        U.menu = false;
+        if (!menu_folder()) return;
+        if (what == MI_F_RENAME) fm_open(FM_FRENAME, menu_fgid, 0);
+        else if (what == MI_F_COLOR) menu_open(MENU_FCOLOR, -1, U.menu_x, U.menu_y);
+        else if (what == MI_F_MUTE) {           /* все заглушены - включить всем, иначе заглушить всех */
+            bool on = !guild_folder_muted(menu_fgid);
+            guild_folder_mute(menu_fgid, on);
+            ui_notice(on ? TR("папка: не беспокоить") : TR("папка: уведомления включены"));
+        }
+        else if (what == MI_F_UNGROUP) { if (!guild_folder_ungroup(menu_fgid, err, sizeof err) && err[0]) ui_notice("%s", err); }
+        else if (!guild_folder_edit(menu_fgid, NULL, what == MI_FC_DEF ? FOLDER_COLOR_DEFAULT : (i64)FOLD_PAL[what - MI_FC_0].c, err, sizeof err) && err[0]) ui_notice("%s", err);
+        U.dirty = true;
+        return;
+    }
     switch (what) {
     case MI_FX: fx_cycle(); return;
     case MI_VADDN: voice_vad_adjust(-3); ui_notice(TR("порог голоса: %d дБ"), voice_vad_db()); return;
@@ -10358,6 +10998,12 @@ static void msg_action(Message *m, int what) {
         for (int i = 0; i < S.nchans && !ch; i++) if (S.chans[i].guild_id == g && chan_listed(&S.chans[i]) && !is_voice(&S.chans[i])) ch = S.chans[i].id;
         fm_open(what == MI_G_INV ? FM_INVITE : what == MI_G_SET ? FM_GSET : what == MI_G_CH ? FM_CHCREATE : what == MI_G_CAT ? FM_CATCREATE : FM_LEAVE,
                 g, what == MI_G_INV ? ch : 0);
+        return;
+    }
+    case MI_G_UNFOLD: {                          /* №2: сервер — отдельно, сразу после своей папки */
+        char err[160] = "";
+        if (!guild_unfold(cur_guild_id(), err, sizeof err) && err[0]) ui_notice("%s", err);
+        U.dirty = true;
         return;
     }
     case MI_G_MOVE: U.moving = !U.moving; U.focus = F_CHANNELS; ui_notice(U.moving ? TR("перестановка: Up/Down - канал, Alt+Up/Down - переставить, Esc - готово") : TR("перестановка закончена")); return;
@@ -10466,6 +11112,10 @@ static void menu_open(int kind, int mi, int x, int y) {
     U.menu_y = y;
     U.menu_sel = 0;
 }
+static void fold_menu(u64 gid, int x, int y) {
+    menu_fgid = gid;
+    menu_open(MENU_FOLDER, -1, x, y);
+}
 static void menu_do(int id) {
     U.menu = false;
     msg_action(U.menu_kind == MENU_MSG ? msg_find(U.menu_msg, NULL) : NULL, id);
@@ -10485,6 +11135,9 @@ static void wheel(int x, int y, bool up) {
     case A_AR_RAIL: U.guild_free = true; U.guild_scroll += up ? -1 : 1; break;
     case A_AR_CHANS: U.row_free = true; U.row_scroll += up ? -3 : 3; break;
     case A_AR_MEMB: MB.top += up ? -3 : 3; if (MB.top < 0) MB.top = 0; break;   /* верх — draw_members */
+#ifdef ASTRA_VIDEO
+    case A_AR_WATCH: wv_svol(up ? 1 : -1); break;   /* колесо над видео трансляции — громкость её звука */
+#endif
     case A_AR_TXT: {
         /* колесо над развёрнутым текстом — прокрутка внутри блока */
         for (int i = U.nhit - 1; i >= 0; i--) if (U.hit[i].act == A_AR_TXT && hit_in(&U.hit[i], x, y)) {
@@ -10588,6 +11241,10 @@ static void button(int id, int x, int y) {
     case B_WATCH_FULL: WV.full = !WV.full; U.full = true; break;
     case B_WATCH_CHAT: WV.chat = true; U.full = true; break;
     case B_WATCH_SHOW: WV.chat = false; WV.ch = S.open_ch; WV.gd = U.sel_guild; U.full = true; break;
+    case B_WSV_DN: wv_svol(-1); break;
+    case B_WSV_UP: wv_svol(1); break;
+    case B_WSV_0: wv_svol(0); break;
+    case B_WSV_MUTE: wv_smute(); break;
     case B_CAM: cu_toggle(!cu_on()); break;
     case B_CAM_PV: cu_pv_hide = !cu_pv_hide; U.full = true; break;
     case B_ANON: cu_anon_toggle(); break;
@@ -10880,6 +11537,13 @@ static void mouse(const Key *k) {
         else if (h->act == A_ROW && h->arg >= 0 && h->arg < U.nrows && (U.rows[h->arg].kind == R_CHAN || U.rows[h->arg].kind == R_HEADER)) {
             U.menu_cid = U.rows[h->arg].id;          /* правый щелчок по каналу/категории — меню канала */
             menu_open(MENU_CHAN, -1, k->x, k->y);
+        } else if (h->act == A_GUILD && h->arg >= 1 && h->arg <= S.nguilds) {
+            select_guild(h->arg);                /* меню сервера действует на выбранный: сначала выбрать его */
+            menu_open(MENU_GUILD, -1, k->x, k->y);
+        } else if (h->act == A_FOLDER) {          /* №2: правый щелчок по папке — её меню */
+            const GuildFolder *fd = NULL;
+            int n = guild_folders(&fd);
+            if (h->arg >= 0 && h->arg < n && fd[h->arg].n) fold_menu(fd[h->arg].gids[0], k->x, k->y);
         } else if (h->act == A_ROW && h->arg >= 0 && h->arg < U.nrows && U.rows[h->arg].kind == R_MEMBER) {
             U.menu_uid = U.rows[h->arg].user;    /* правый щелчок по участнику голоса — его меню */
             U.menu_vch = U.rows[h->arg].id;
@@ -10889,8 +11553,23 @@ static void mouse(const Key *k) {
         return;
     }
     switch (h->act) {
-    case A_GUILD: select_guild(h->arg); U.focus = F_CHANNELS; break;
-    case A_FOLDER: folder_toggle(h->arg); break;
+    case A_GUILD:
+        select_guild(h->arg);
+        U.focus = F_CHANNELS;
+        if (k->button == 1 && h->arg >= 1 && h->arg <= S.nguilds) rail_arm(k, S.guilds[h->arg - 1].id, false, -1, false);
+        break;
+    case A_FOLDER: {
+        /* №2: щелчок по папке только раскрывает / сворачивает её список серверов; выбранный сервер тот же */
+        folder_toggle(h->arg);
+        {
+            const GuildFolder *fd = NULL;
+            if (h->arg >= 0 && h->arg < guild_folders(&fd)) { rail_fcur = fold_id(fd, h->arg); U.focus = F_GUILDS; }
+        }
+        u64 g0 = 0;
+        for (int i = 0; i < nrh && !g0; i++) if (RH[i].it.kind == 1 && RH[i].it.fk == h->arg) g0 = RH[i].it.gid;
+        if (k->button == 1) rail_arm(k, g0, true, h->arg, true);
+        break;
+    }
     case A_SLASH:
         if (!h->sub) sl_pick(h->arg);
         else if (SL.cmd >= 0) { const char *nm, *val; SL.sel = h->arg; if (cmd_choice(cmds_state()->c[SL.cmd].opt0 + SL.opt, h->arg, &nm, &val)) sl_next(val); }
@@ -10968,6 +11647,9 @@ static void handle_key(const Key *k) {
             U.dirty = true;
             return;
         }
+        if (k->button == 1) memset(&GD, 0, sizeof GD);   /* новое нажатие: прежнее «взятие» без отпускания забыто */
+        if (k->button == 6 && GD.armed) { rail_drag(k); return; }   /* №2: перетаскивание сервера */
+        if (k->button == 7 && GD.armed) rail_release(k);
         if (k->button == 7) { PW.drag = 0; return; }   /* отпускание левой: конец протяжки границы панели */
         if (k->button == 6 && PW.drag) {         /* №11: протяжка границы панели */
             int W2 = U.gw;
@@ -10994,7 +11676,7 @@ static void handle_key(const Key *k) {
     if (k->code == K_ENTER && k->alt && !k->ctrl && full_toggle()) return;
     if (!LG.on && k->code == K_CHAR && k->alt && !k->ctrl && k->ch >= '1' && k->ch <= '9' && (int)(k->ch - '1') < TB.n) { tab_go((int)(k->ch - '1')); return; }
 #ifdef ASTRA_VIDEO
-    if (!LG.on && !U.help && !U.settings && wv_on() && wv_key(k)) return;   /* просмотр трансляции: Alt+W, Alt+F, Alt+стрелки, Esc */
+    if (!LG.on && !U.help && !U.settings && wv_on() && wv_key(k)) return;   /* просмотр трансляции: Alt+W, Alt+F, Alt+стрелки, Esc; звук трансляции: Alt+- Alt+= Alt+0 Alt+M */
 #endif
     if (!LG.on && k->code == K_CHAR && k->ctrl && !k->alt && (k->ch == 'w' || k->ch == 'W' || k->ch == 0x446 || k->ch == 0x426) && TB.n && !(U.focus == F_INPUT && U.in.len)) { tab_close(tab_pos(S.open_ch)); return; }   /* в поле с текстом Ctrl+W стирает слово */   /* №16; в консоли Alt+Enter — перенос строки */
     if (k->code == K_CHAR && k->ctrl && !k->alt && (k->ch == '=' || k->ch == '+' || k->ch == '-' || k->ch == '_' || k->ch == '0')) {
@@ -11119,6 +11801,7 @@ static void handle_key(const Key *k) {
         if (k->code == K_CHAR && k->ctrl && k->shift && (c == 'm' || c == 'M' || c == 0x44C || c == 0x42C)) { voice_toggle_mute(); U.dirty = true; return; }
         if (k->code == K_CHAR && k->ctrl && k->shift && (c == 'd' || c == 'D' || c == 0x432 || c == 0x412)) { voice_toggle_deaf(); U.dirty = true; return; }
         if (k->alt && (k->code == K_UP || k->code == K_DOWN) && U.moving) { move_step(k->code == K_UP ? -1 : 1); U.dirty = true; return; }
+        if (k->alt && !k->ctrl && !k->shift && (k->code == K_UP || k->code == K_DOWN) && U.focus == F_GUILDS) { rail_key_move(k->code == K_UP ? -1 : 1); return; }   /* №2 */
         if (k->alt && (k->code == K_UP || k->code == K_DOWN)) { chan_step(k->code == K_UP ? -1 : 1, k->shift); U.dirty = true; return; }
         if (k->code == K_ESC && U.moving) { U.moving = false; ui_notice(TR("перестановка закончена")); U.dirty = true; return; }
         if (k->code == K_ESC && k->shift) {
@@ -11257,10 +11940,20 @@ static void handle_key(const Key *k) {
     }
     switch (U.focus) {
     case F_GUILDS:
-        if (k->code == K_UP) select_guild(U.sel_guild - 1);
-        else if (k->code == K_DOWN) select_guild(U.sel_guild + 1);
-        else if (k->code == K_HOME) select_guild(0);
-        else if (k->code == K_END) select_guild(S.nguilds);
+        if (k->code == K_UP) rail_step(-1);
+        else if (k->code == K_DOWN) rail_step(1);
+        else if (k->code == K_HOME) rail_step(-2);
+        else if (k->code == K_END) rail_step(2);
+        else if ((k->code == K_ENTER || k->code == K_RIGHT || k->code == K_LEFT) && rail_fold_key(k->code)) U.dirty = true;   /* №2 папка */
+        else if (k->code == K_CHAR && k->ch == ' ' && rail_fold_key(K_ENTER)) U.dirty = true;
+        else if (k->code == K_CHAR && (k->ch == 'm' || k->ch == 'M' || k->ch == 0x44C || k->ch == 0x42C) && fold_by_id(rail_fcur) >= 0) {
+            /* m (ь) — меню папки у её плитки */
+            const GuildFolder *fd = NULL;
+            int fk = fold_by_id(rail_fcur), y = 6;
+            guild_folders(&fd);
+            for (int i = 0; i < nrh; i++) if (RH[i].it.kind == 1 && RH[i].it.fk == fk) y = RH[i].y;
+            fold_menu(fd[fk].gids[0], RAIL_W, y);
+        }
         else if (k->code == K_ENTER || k->code == K_RIGHT) {
             /* Enter на «домой» при открытой беседе — экран «Друзья», как щелчок по «Друзья» */
             if (k->code == K_ENTER && U.sel_guild == 0 && S.open_ch) { button(B_FRIENDS, 0, 0); U.focus = F_MESSAGES; }

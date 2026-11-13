@@ -15,6 +15,10 @@ C11 · Windows, Linux and macOS · no Electron, no browser, no GPU
 ![Discord features](https://img.shields.io/badge/Discord_features-86%25-f0b232)
 ![License GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)
 
+[![Telegram](https://img.shields.io/badge/Telegram-@astradsoff-26A5E4?logo=telegram&logoColor=white)](https://t.me/astradsoff)
+
+**📣 [Telegram channel](https://t.me/astradsoff): news, releases and discussion (in Russian)**
+
 ![Astra DS](docs/screenshots/main.png)
 
 *A Discord-style window drawn with colored text characters: polls, a voice message, bot buttons and a link card. Everything here is fake demo data.*
